@@ -1,0 +1,49 @@
+[tui]
+percentage = 80
+min = 10
+max = 25
+
+[ui]
+mouse_events = true
+border = { type = "Plain" }
+
+# The status row is reserved by default (`show = true`) with an empty
+# template, rendering as a blank line between the input and the header.
+[status]
+show = false
+# Match/total counter (`\m` = match count, `\t` = total), e.g. `3/40`:
+# template = "\m/\t"
+
+[results]
+wrap = false
+scroll_wrap = true
+reverse = false
+row_connection = "Full"
+inactive.fg = "DarkGray"
+inactive_current.fg = "DarkGray"
+style.fg = "Reset"
+
+[[preview.layout]]
+side = "right"
+percentage = 30
+min = 10
+max = 30
+
+[preview]
+wrap = true
+scroll_wrap = true
+show = true
+border = { type = "Plain" }
+
+[overlay]
+border = { type = "Rounded", color = "darkGrey", padding = 1 }
+
+[binds]
+"ctrl-." = "NextColumn"
+"ctrl-shift-." = "PrevColumn"
+"alt-." = "NextColumn"
+"alt-shift-." = "PrevColumn"
+"alt-\\" = "HideColumn"
+"alt-shift-\\" = "UnhideColumn"
+"F1" = "@help"
+"@help" = "Help"

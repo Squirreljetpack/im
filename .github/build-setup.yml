@@ -1,0 +1,34 @@
+# Extra steps injected by cargo-dist (dist-workspace.toml `github-build-setup`)
+# into every `build-local-artifacts` job, right before `dist build`.
+#
+# assets/model/embed.onnx is tracked with git-lfs, but the generated
+# actions/checkout steps don't set `lfs: true`, so the working tree only has the
+# pointer file. Materialize the real object before building. git-lfs ships on all
+# GitHub-hosted runners; the cargo-xwin container needs it installed via apt.
+- name: Fetch git-lfs objects (vendored model)
+  shell: bash
+  run: |
+    if ! command -v git-lfs > /dev/null 2>&1; then
+      apt-get update && apt-get install -y git-lfs
+    fi
+    # Container jobs mount the workspace from the host, where the files are
+    # owned by the runner user; git then refuses to touch the repo (dubious
+    # ownership). actions/checkout only whitelists it inside its own step's
+    # temp HOME, so re-whitelist it here for the git-lfs commands.
+    git config --global --add safe.directory "$(pwd)"
+    git lfs pull
+    # Fail fast: build.rs panics if the model is below MODEL_MIN_BYTES (100MB),
+    # which is exactly what a bare LFS pointer looks like.
+    size=$(wc -c < assets/model/embed.onnx)
+    if [ "$size" -lt 100000000 ]; then
+      echo "git-lfs failed to materialize assets/model/embed.onnx (size=$size)" >&2
+      exit 1
+    fi
+
+- name: Set Windows MSVC linker flags
+  if: runner.os == 'Windows'
+  shell: bash
+  run: |
+    echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=-C target-feature=-crt-static" >> $GITHUB_ENV
+
+

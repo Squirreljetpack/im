@@ -1,0 +1,112 @@
+# Mood-to-color anchors, imported by the config's `[moods] source` field.
+# Color format: #RRGGBB hex, rgb_(r,g,b), or a named crossterm color.
+
+[[pairs]]
+mood = "happy"
+color = "#84c741"
+
+[[pairs]]
+mood = "sad"
+color = "#0b3575"
+
+[[pairs]]
+mood = "drained"
+color = "#495057"
+
+[[pairs]]
+mood = "energetic"
+color = "#c5451e"
+
+[[pairs]]
+mood = "thoughtful"
+color = "#6B705C"
+
+[[pairs]]
+mood = "purposeful"
+color = "#FFC107"
+
+[[pairs]]
+mood = "passive"
+color = "#7b8caa"
+
+[[pairs]]
+mood = "frustrated"
+color = "#ae1550"
+
+[[pairs]]
+mood = "neutral"
+color = "#E2D4C9"
+
+[[pairs]]
+mood = "nostalgic"
+color = "#B56547"
+
+[[pairs]]
+mood = "humble"
+color = "#3B2319"
+
+[[pairs]]
+mood = "secure"
+color = "#2E1352"
+
+[[pairs]]
+mood = "pained"
+color = "#870c0c"
+
+[[pairs]]
+mood = "comfortable"
+color = "#4eb9b9"
+
+[[pairs]]
+mood = "guarded"
+color = "#244646"
+
+[[pairs]]
+mood = "vulnerable"
+color = "#b02cbc"
+
+[[pairs]]
+mood = "isolated"
+color = "#090977"
+
+[[pairs]]
+mood = "sociable"
+color = "#F07167"
+
+[[pairs]]
+mood = "connected"
+color = "#2A9D8F"
+
+[[pairs]]
+mood = "confused"
+color = "#5a0475"
+
+[[pairs]]
+mood = "lucid"
+color = "#bbcc8c"
+
+[[pairs]]
+mood = "proud"
+color = "#f354e3"
+
+[[pairs]]
+mood = "let down"
+color = "#351c88"
+
+[[pairs]]
+mood = "engrossed"
+color = "#e1e0ce"
+
+[[pairs]]
+mood = "disgusted"
+color = "#49891b"
+
+[[pairs]]
+mood = "satiated"
+color = "#c9a72d"
+
+[[pairs]]
+mood = "hungry"
+color = "#c12222"
+
+# joy, sorrow, jealousy, rage, vengeance, fear, love, hope

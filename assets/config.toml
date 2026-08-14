@@ -1,0 +1,183 @@
+[moods]
+
+# Mood-to-color anchors live in this file. Generate it by calling `im :moods`.
+# source = "moods.toml"
+
+# Instruction prefix for embedding model
+prefix_string = "Emotional state: "
+# A neutral phrase standing for "no particular mood"; anchor colors are measured from this baseline.
+base_string = "Emotional state"
+
+# How decisively the strongest anchor mood wins the final color (1.0 = even mix, higher = dominant).
+blend_steepness = 2.0
+
+# How strongly emotional saliency biases the day-average embedding behind a
+# tracker-grid dot: per-mood weights are s^k, so 1 = plain saliency weighting,
+# higher = the most salient moods of the day dominate its color.
+grid_blend_steepness = 1
+
+# How much emotional intensity (saliency) moves a color away from neutral:
+# 0 disables it entirely, 100 keeps the full effect.
+effective_saliency_gate = 50
+
+# Neutral gray lightness (0-100) used when no anchor mood matches, default 65.
+baseline_oklab_l = 65
+
+# An anchor mood must make up at least this % of the color mix to be included at all.
+# min_contribution = 7
+# top_k = 5
+
+[tasks]
+# colors = ["dark_red", "dark_yellow", "dark_green"]
+# default_priority = 5             # 1..=999
+# default_recurring_priority = 10
+# default_scheduled_priority = 15
+# Color for overdue task labels (date column in the today view, the
+# preview's `due:` field): pale pink by default.
+# overdue_color = "#FFB6C1"
+
+[grid]
+# week_rolling = false
+# month_rolling = true
+# year_rolling = true
+# week_start = "Monday"
+
+[preview]
+# Show a `last:` field for done tasks in the preview pane.
+show_last_when_done = true
+
+[today_view]
+# initial_tasks_filter = "all"   # all | overdue | pending | horizon
+
+# Merge a task's adjacent completion entries into a single done row
+# in the today view.
+coalesce_completions = true
+
+[badges]
+# Badge for journal-only entries (a mood entry with no mood word): a
+# glyph and/or color — '·', "red", or { badge = '·', color = "red" }.
+# The color defaults to Reset when unset; omit the key to show no badge.
+journal_badge = '·'
+# tracker = '◆'   # glyph for tracker entries in the today view
+# mood = '●'      # glyph for mood entries (today view + preview markers)
+
+[tasks_view]
+# Keep a just-completed task visible in the pending view (@) for this many
+# seconds after its last completion entry.
+persist_pending_seconds = 300
+
+[editor]
+# Body-editor templates per entry kind (arrays): a bare `.` opens the
+# editor seeded with the first template, `..` with the second, `...` with
+# the third, and so on; out-of-range dot counts fall back to the legacy
+# hint line. An empty entry opens a blank document; a non-empty path that
+# can't be read warns and opens blank. Lines between two `%%` markers are
+# stripped from the saved body (markers included) — use them for
+# instructions.
+# mood_template = ["templates/mood.txt"]
+# task_template = []
+# recurring_template = []
+# scheduled_template = []
+
+# --- TRACKERS ---
+#
+# Each tracker is its own section; log it with `-<name> <value>`.
+#
+# Intervals: If an interval is specified, tracker entries bin into the slots
+# given by the interval span, starting from the interval anchor.
+# - Newer entries replacing older entries in the same slot.
+# - Interval anchors are RFC 3339 timestamps with an explicit UTC offset.
+#
+# Bounds: min/max are used to determine display color of entries, not to gate insertion.
+# - If max < min, the semantics are reversed, with numbers closer to `max` mapping to earlier colors.
+
+# Types:
+# null:
+#  - when min/max/interval are all specified
+#    this acts as a timestamp tracker,
+#    with min/max interpreted as seconds-from-interval-start
+#    defining a circular time-of-day color range
+#  - With either min/min omitted, this simply counts occurrences with an interval
+#  - null trackers don't accept a payload, and cannot be _followed by_ a mood (log with `im -<name>`).
+# float | number:
+#  - Values and min/max bounds accept a plain number or a duration string
+#    (e.g. "6.5", "4h", "30m") — durations convert to seconds.
+# text:
+#  - Plain text entry.
+#  - colors override is limited to length 1.
+
+[tracker.sleep]
+kind = "null"
+interval = ["2026-01-01T00:00:00-04:00", "1 day"]
+min = "20h" # 20:00 local
+max = "4h" # 04:00 local - wrapping
+colors = [
+  "#3f6b93",
+  "#355B8F",
+  "#2C4B8B",
+  "#233B87",
+  "#1a2b83",
+  "#393075",
+  "#573462",
+  "#75384F",
+  "#933c3c",
+]
+
+[tracker.awake]
+kind = "null"
+interval = ["2026-01-01T00:00:00-04:00", "1 day"]
+min = "4h"
+max = "12h"
+colors = ["#1E3E72", "#786FA6", "#C88EA7", "#F5E1A4", "#F5B752", "#E08955"]
+
+[tracker.rating]
+kind = "float"
+interval = ["2026-01-01T00:00:00-04:00", "1 day"]
+min = 0
+max = 9
+# colors = [
+#   "#580000",
+#   "#800000",
+#   "#a63b00",
+#   "#c66e00",
+#   "#dfa000",
+#   "#a0b000",
+#   "#4da622",
+#   "#008c48",
+#   "#007766"
+# ]
+colors = [
+  "#d32f2f",
+  "#f57c00",
+  "#fbc02d",
+  "#c0ca33",
+  "#7cb342",
+  "#43a047",
+  "#00acc1",
+  "#1e88e5",
+  "#5e35b1",
+  "#8e24aa",
+]
+
+[tracker.pushups]
+kind = "number"
+interval = ["2026-01-01T00:00:00-04:00", "1 day"]
+min = 10
+
+# mile run time .e.g. -mile 6.5m (pure numbers have units in seconds!)
+[tracker.mile]
+kind = "float"
+interval = ["2026-01-01T00:00:00-04:00", "1 day"]
+min = "4m"
+max = "10m"
+
+[tracker.win]
+kind = "text"
+colors = ["#b5b224"]
+
+[tracker.thought]
+kind = "text"
+
+[tracker.grateful]
+kind = "text"
+colors = ["#a7347e"]

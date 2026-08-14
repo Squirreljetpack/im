@@ -1,0 +1,8 @@
+target/
+**/target/
+/feeling/
+.venv/
+.pixi/
+TODO/
+/cache
+/model/

@@ -1,0 +1,2 @@
+assets/model/embed.onnx filter=lfs diff=lfs merge=lfs -text
+assets/model/saliency_adaptor.onnx filter=lfs diff=lfs merge=lfs -text

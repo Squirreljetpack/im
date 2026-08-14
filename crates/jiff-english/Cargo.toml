@@ -1,0 +1,21 @@
+[package]
+name = "jiff-english"
+description = "Parses informal English dates on jiff, in the spirit of the Linux `date` command; a port of chrono-english with eod/end/start time specifiers and hence/later"
+version = "0.0.2"
+edition.workspace = true
+repository.workspace = true
+homepage.workspace = true
+license = "MIT"
+
+[features]
+# Serde impls for jiff-english types (jiff's own types have no serde impl;
+# e.g. the `Weekday` wrapper in `serde`).
+serde = ["dep:serde"]
+
+[dependencies]
+jiff = { workspace = true }
+scanlex = "0.1"
+serde = { version = "1", features = ["derive"], optional = true }
+
+[package.metadata.workspaces]
+independent = true

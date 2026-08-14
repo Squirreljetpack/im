@@ -1,0 +1,24 @@
+[env]
+# ONNX models recurse deeper than
+# the default 8 MiB test-thread stack; without this the test suite aborts with
+# a stack overflow as soon as any embedding is computed.
+RUST_MIN_STACK = "33554432"
+
+# Deprecated
+# NLI_MODEL = "xtremedistil"
+# NLI_MODEL = "deberta"
+# NLI_MODEL = "ettinx"
+
+EMBED_MODEL = "nomic"
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=-crt-static"]
+
+# Publish the only crates.io-visible crate of the workspace.
+[alias]
+"@publish" = "publish -p jiff-english"
+
+# Run the integration tests (tests/) with a single test thread, so the
+# suite runs without panicking.
+"@tui-tests" = "test --test today_tui --test integration -- --test-threads 1"
+
