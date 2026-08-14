@@ -1901,8 +1901,6 @@ dependencies = [
 [[package]]
 name = "matchmaker-partial"
 version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "912fc34238ba0cff6ace004647e85a30e4ead59634fce5560623f7d923988a79"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -1911,8 +1909,6 @@ dependencies = [
 [[package]]
 name = "matchmaker-partial-macros"
 version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46f5ad1e80ec348ed10880a030f27f432a40d427583850ff030bcc34eea972d1"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -59,7 +59,9 @@ im still alive . i think
 ## Gallery
 
 ![image-20260814134534039](.README.assets/image-20260814134534039.png)
-![image-20260814134534039](.README.assets/image-20260814134849943.png)
+
+
+<img src="https://raw.githubusercontent.com/Squirreljetpack/im/main/.README.assets/image-20260814134849943.png" alt="month" style="width:416px;" />
 
 ## Usage
 
@@ -198,4 +200,4 @@ Open to suggestions. Helping implement more filters, or a sensible configurable 
     - rationalize bad decisions
     - realize that you don't actually have any thoughts interesting enough to write down.
 
-[^2]: important, immense, in medias-res, immaculate, imagine all the people ♫ . immolated🔥
+[^2]: important, immense, immaculate, importune, imagine all the people .. immolated♫
