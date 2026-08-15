@@ -61,7 +61,7 @@ im still alive . i think
 ![image-20260814134534039](.README.assets/image-20260814134534039.png)
 
 
-<img src="https://raw.githubusercontent.com/Squirreljetpack/im/main/.README.assets/image-20260814134849943.png" alt="month" style="width:416px;" />
+<img src="https://raw.githubusercontent.com/Squirreljetpack/im/main/.README.assets/image-20260814134849943.png" alt="month" style="width:200px;"/>
 
 ## Usage
 
@@ -158,27 +158,25 @@ The default locations are in order:
   - tasks: oneshot, recurring, or scheduled.
   - trackers: defined in your configuration.
 
+##### Trackers
+
+Trackers are defined in your configuration (`im :config`); each `[tracker.<name>]`
+section is logged as `-<name> <value>` (no value for `null` trackers):
+
+- Kinds: `text` (value stored verbatim), `integer` (whole numbers), `float`
+  (plain numbers), `duration` (duration strings like `6m 30s`, stored and
+  displayed as time), `null` (valueless timestamp/count markers — requires an
+  interval).
+- `interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }` bins
+  entries into calendar slots. By default (replace) a new log in a slot
+  replaces the slot's previous entry; `cumulative = true` keeps every log and
+  the slot's grid dot shows the aggregate.
+
 ## FAQ
 
-### What is the difference between `im` and `im-dynamic`?
+### Why is the binary size so large?
 
-- **`im`** (default): Statically links ONNX Runtime (`ort`) at build time. It is a self-contained binary with no external library dependencies.
-- **`im-dynamic`**: Dynamically loads the ONNX Runtime shared library (`libonnxruntime`) at runtime. Use this variant if you prefer linking against a system-installed or custom-built ONNX Runtime.
-
-### How do I specify the library path for `im-dynamic`?
-
-Set the `ORT_DYLIB_PATH` environment variable to point to your `libonnxruntime` shared library:
-
-```sh
-# macOS
-export ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib
-
-# Linux
-export ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
-
-# Windows (PowerShell)
-$env:ORT_DYLIB_PATH = "C:\path\to\onnxruntime.dll"
-```
+`im` bundles a quant of `nomic-ai/nomic-embed-text-v1.5` to categorize your entries. This was the most effective, reasonably sized approach tested out of several options. The size is a bit abnormal, but was pleasantly surprised with how much better it worked compared to my other attempts. If you have any interesting uses for an embedding model that `im` can help with, `im` open to them!
 
 ### What does im stand for?
 

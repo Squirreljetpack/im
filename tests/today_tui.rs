@@ -138,26 +138,26 @@ fn strip_ansi(s: &str) -> String {
 
 /// Convert CSI codes to readable text: cursor position codes (H/f) become
 /// newlines, everything else is dropped.
-fn csi_to_lines(s: &str) -> Vec<String> {
-    let mut out = String::new();
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next();
-            for d in chars.by_ref() {
-                if ('\u{40}'..='\u{7e}').contains(&d) {
-                    if d == 'H' || d == 'f' {
-                        out.push('\n');
-                    }
-                    break;
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out.lines().map(|l| strip_ansi(l.trim_end())).collect()
-}
+// fn csi_to_lines(s: &str) -> Vec<String> {
+//     let mut out = String::new();
+//     let mut chars = s.chars().peekable();
+//     while let Some(c) = chars.next() {
+//         if c == '\x1b' && chars.peek() == Some(&'[') {
+//             chars.next();
+//             for d in chars.by_ref() {
+//                 if ('\u{40}'..='\u{7e}').contains(&d) {
+//                     if d == 'H' || d == 'f' {
+//                         out.push('\n');
+//                     }
+//                     break;
+//                 }
+//             }
+//         } else {
+//             out.push(c);
+//         }
+//     }
+//     out.lines().map(|l| strip_ansi(l.trim_end())).collect()
+// }
 
 /// Reconstruct the last screen state from the raw ANSI capture: the diff
 /// writer skips unchanged cells (e.g. the spaces inside the ui border
