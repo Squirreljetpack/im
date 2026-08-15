@@ -319,7 +319,7 @@ pub(crate) fn task_columns(view: &Arc<Mutex<TasksApp>>) -> [Column<TaskRow, ()>;
 /// The accept hook for the tasks view and the oneshot parent picker:
 /// reports the selected task's (stable id, short id).
 pub(crate) fn tasks_accept_hook(
-    state: &mut MMState<'_, '_, TaskRow, ()>,
+    state: &mut MMState<'_, TaskRow, ()>,
 ) -> Vec<(i64, Option<i64>)> {
     state
         .current_raw()
@@ -345,7 +345,7 @@ pub(crate) enum EditPayload {
 }
 
 /// Dispatch a custom action on the render thread.
-pub(crate) fn handler(action: ImAction, state: &mut MMState<'_, '_, TaskRow, ()>, ctx: &TaskCtx) {
+pub(crate) fn handler(action: ImAction, state: &mut MMState<'_, TaskRow, ()>, ctx: &TaskCtx) {
     match action {
         ImAction::Quit => state.should_quit = true,
         ImAction::ToggleSort => {
@@ -415,7 +415,7 @@ pub(crate) fn handler(action: ImAction, state: &mut MMState<'_, '_, TaskRow, ()>
 
 /// Rebuild the worker from the shared view state, refresh the ui border
 /// title, and restore the cursor position.
-pub(crate) fn repopulate(state: &mut MMState<'_, '_, TaskRow, ()>, ctx: &TaskCtx) {
+pub(crate) fn repopulate(state: &mut MMState<'_, TaskRow, ()>, ctx: &TaskCtx) {
     let (tasks, title, cursor) = {
         let v = ctx.view.lock().unwrap();
         (v.tasks.clone(), tasks_header(&v), v.cursor)

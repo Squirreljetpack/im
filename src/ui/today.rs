@@ -195,7 +195,7 @@ impl TodayApp {
         // `Action::Accept` (the view's accept state machine), never the
         // builtin matchmaker accept, so `pick` only finishes on Quit/Esc;
         // the hook still fires if something triggers the builtin accept.
-        let mut mm = Matchmaker::new(worker, |state: &mut MMState<'_, '_, TodayEntry, ()>| {
+        let mut mm = Matchmaker::new(worker, |state: &mut MMState<'_, TodayEntry, ()>| {
             state
                 .current_raw()
                 .and_then(|e| {
@@ -422,7 +422,7 @@ enum LinkKind {
 }
 
 /// Dispatch a custom action on the render thread.
-fn handler(action: ImAction, state: &mut MMState<'_, '_, TodayEntry, ()>, ctx: &TodayCtx) {
+fn handler(action: ImAction, state: &mut MMState<'_, TodayEntry, ()>, ctx: &TodayCtx) {
     match action {
         ImAction::Quit => state.should_quit = true,
         ImAction::ToggleSort => {
@@ -493,7 +493,7 @@ fn handler(action: ImAction, state: &mut MMState<'_, '_, TodayEntry, ()>, ctx: &
 
 /// Rebuild the worker from the shared view state, refresh the ui border
 /// title, and restore the cursor position.
-fn repopulate(state: &mut MMState<'_, '_, TodayEntry, ()>, ctx: &TodayCtx) {
+fn repopulate(state: &mut MMState<'_, TodayEntry, ()>, ctx: &TodayCtx) {
     let (entries, title, cursor) = {
         let v = ctx.view.lock().unwrap();
         (v.entries.clone(), today_header(&v), v.cursor)
@@ -964,7 +964,7 @@ fn open_link(ctx: TodayCtx, entry: &TodayEntry) {
 /// open the external editor (TUI suspended via `Interrupt::Execute`);
 /// number/float trackers open an in-TUI input overlay validated against
 /// the tracker kind.
-fn edit_selected(ctx: &TodayCtx, state: &mut MMState<'_, '_, TodayEntry, ()>, entry: &TodayEntry) {
+fn edit_selected(ctx: &TodayCtx, state: &mut MMState<'_, TodayEntry, ()>, entry: &TodayEntry) {
     match entry.kind {
         EntryKind::Task(_) => {
             if let Some(window) = &entry.recurring_window {

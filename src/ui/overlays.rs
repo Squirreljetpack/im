@@ -83,7 +83,7 @@ impl<T: matchmaker::SSS> ConfirmOverlay<T> {
 }
 
 impl<T: matchmaker::SSS> Overlay<AppAction, T, ()> for ConfirmOverlay<T> {
-    fn handle_input(&mut self, c: char, _state: &mut MMState<'_, '_, T, ()>) -> OverlayEffect {
+    fn handle_input(&mut self, c: char, _state: &mut MMState<'_, T, ()>) -> OverlayEffect {
         for (i, (name, hotkey)) in self.prompt.options.iter().enumerate() {
             if let Some(hc) = name.chars().nth(*hotkey)
                 && hc.eq_ignore_ascii_case(&c)
@@ -98,7 +98,7 @@ impl<T: matchmaker::SSS> Overlay<AppAction, T, ()> for ConfirmOverlay<T> {
     fn handle_action(
         &mut self,
         action: &MMAction<AppAction>,
-        _state: &mut MMState<'_, '_, T, ()>,
+        _state: &mut MMState<'_, T, ()>,
     ) -> OverlayEffect {
         match action {
             MMAction::BackwardChar => {
@@ -123,7 +123,7 @@ impl<T: matchmaker::SSS> Overlay<AppAction, T, ()> for ConfirmOverlay<T> {
     fn area(&mut self, ui_area: &Rect, layout: &OverlayLayoutSettings) {
         let width = (ui_area.width / 2).clamp(40, ui_area.width.saturating_sub(2));
         self.area = utils::default_area(
-            [SizeHint::Exact(width), SizeHint::Exact(7)],
+            [SizeHint::from(width), SizeHint::from(7)],
             layout,
             ui_area,
         );
@@ -286,7 +286,7 @@ impl<T: matchmaker::SSS> InputOverlay<T> {
 }
 
 impl<T: matchmaker::SSS> Overlay<AppAction, T, ()> for InputOverlay<T> {
-    fn handle_input(&mut self, c: char, _state: &mut MMState<'_, '_, T, ()>) -> OverlayEffect {
+    fn handle_input(&mut self, c: char, _state: &mut MMState<'_, T, ()>) -> OverlayEffect {
         if c == '\n' || c == '\r' {
             return self.submit();
         }
@@ -300,7 +300,7 @@ impl<T: matchmaker::SSS> Overlay<AppAction, T, ()> for InputOverlay<T> {
     fn handle_action(
         &mut self,
         action: &MMAction<AppAction>,
-        _state: &mut MMState<'_, '_, T, ()>,
+        _state: &mut MMState<'_, T, ()>,
     ) -> OverlayEffect {
         match action {
             // Backspace (builtin) and the Delete key (custom binding) pop
@@ -329,7 +329,7 @@ impl<T: matchmaker::SSS> Overlay<AppAction, T, ()> for InputOverlay<T> {
         let width = self.content_width();
         let height = self.content_height();
         self.area = utils::default_area(
-            [SizeHint::Exact(width), SizeHint::Exact(height)],
+            [SizeHint::from(width), SizeHint::from(height)],
             layout,
             ui_area,
         );
@@ -339,8 +339,8 @@ impl<T: matchmaker::SSS> Overlay<AppAction, T, ()> for InputOverlay<T> {
         // The box tracks the input: re-center and re-size every frame.
         self.area = utils::default_area(
             [
-                SizeHint::Exact(self.content_width().min(self.ui_area.width)),
-                SizeHint::Exact(self.content_height().min(self.ui_area.height)),
+                SizeHint::from(self.content_width().min(self.ui_area.width)),
+                SizeHint::from(self.content_height().min(self.ui_area.height)),
             ],
             &self.layout,
             &self.ui_area,
@@ -417,7 +417,7 @@ impl<O> SharedOverlay<O> {
 impl<A: matchmaker::action::ActionExt, T: matchmaker::SSS, D: 'static, O: Overlay<A, T, D>>
     Overlay<A, T, D> for SharedOverlay<O>
 {
-    fn on_enable(&mut self, area: &Rect, state: &mut MMState<'_, '_, T, D>) {
+    fn on_enable(&mut self, area: &Rect, state: &mut MMState<'_, T, D>) {
         self.inner.lock().unwrap().on_enable(area, state)
     }
 
@@ -425,14 +425,14 @@ impl<A: matchmaker::action::ActionExt, T: matchmaker::SSS, D: 'static, O: Overla
         self.inner.lock().unwrap().on_disable()
     }
 
-    fn handle_input(&mut self, c: char, state: &mut MMState<'_, '_, T, D>) -> OverlayEffect {
+    fn handle_input(&mut self, c: char, state: &mut MMState<'_, T, D>) -> OverlayEffect {
         self.inner.lock().unwrap().handle_input(c, state)
     }
 
     fn handle_action(
         &mut self,
         action: &MMAction<A>,
-        state: &mut MMState<'_, '_, T, D>,
+        state: &mut MMState<'_, T, D>,
     ) -> OverlayEffect {
         self.inner.lock().unwrap().handle_action(action, state)
     }

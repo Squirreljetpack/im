@@ -14,6 +14,9 @@ jiff = "0.2"
 [workspace.metadata.workspaces]
 allow_branch = "main"
 
+[patch.crates-io]
+matchmaker-lib = { path = "../matchmaker/matchmaker-lib" }
+
 [package]
 name = "im"
 version.workspace = true
@@ -29,7 +32,6 @@ path = "bin/seed_db.rs"
 [dependencies]
 cli_boilerplate_automation = { version = "0.*", features = ["serde", "bring"] }
 matchmaker-lib = { version = "0.*", features = ["partial", "bracketed-paste"] }
-
 # Stack
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "migrate"] }
 tokio = { version = "1", features = ["full"] }
