@@ -271,8 +271,8 @@ fn tracker_entry_color(
             Some(s) => RatColor::from_crossterm(crate::badge::tracker_color(
                 colors,
                 s,
-                tracker.min,
-                tracker.max,
+                tracker.low,
+                tracker.high,
             )),
             None => RatColor::DarkGray,
         },
@@ -371,22 +371,17 @@ pub async fn fetch_today_entries(
                     };
                     let (payload, score) = match tracker.kind {
                         TrackerKind::Text => (row.score.clone(), None),
-                        TrackerKind::Number | TrackerKind::Float => {
+                        TrackerKind::Integer | TrackerKind::Float => {
                             let score = crate::tracker::score_f64(&row.score);
                             (score.to_string(), Some(score))
                         }
-                        TrackerKind::Null => {
+                        TrackerKind::Duration => {
                             let score = crate::tracker::score_f64(&row.score);
-                            // Count mode (either bound missing) shows the
-                            // count; with both bounds the entry is a time
-                            // marker and shows the moment.
-                            let payload = if tracker.min.is_none() || tracker.max.is_none() {
-                                score.to_string()
-                            } else {
-                                date::format_datetime_short(row.time)
-                            };
-                            (payload, Some(score))
+                            (crate::date::format_tracker_duration(score), Some(score))
                         }
+                        // Null rows carry no payload (the count lives in
+                        // the grid, the moment in the entry's own time).
+                        TrackerKind::Null => (String::new(), None),
                     };
                     l_trackers.push(LinkedTracker {
                         name: row.tracker_type.clone(),
@@ -456,22 +451,24 @@ pub async fn fetch_today_entries(
             })?;
             let (label, score) = match tracker.kind {
                 TrackerKind::Text => (format!("{}: {}", tracker_type, row.score), None),
-                TrackerKind::Number | TrackerKind::Float => {
+                TrackerKind::Integer | TrackerKind::Float => {
                     let score = crate::tracker::score_f64(&row.score);
                     (format!("{}: {}", tracker_type, score), Some(score))
                 }
-                // Null payloads carry no value: count mode (either bound
-                // missing) shows the count, with both bounds the entry is a
-                // time marker and shows the moment (`sleep: 3-15 14:30`).
-                TrackerKind::Null => {
+                TrackerKind::Duration => {
                     let score = crate::tracker::score_f64(&row.score);
-                    let payload = if tracker.min.is_none() || tracker.max.is_none() {
-                        score.to_string()
-                    } else {
-                        date::format_datetime_short(time)
-                    };
-                    (format!("{}: {}", tracker_type, payload), Some(score))
+                    (
+                        format!(
+                            "{}: {}",
+                            tracker_type,
+                            crate::date::format_tracker_duration(score)
+                        ),
+                        Some(score),
+                    )
                 }
+                // Null rows carry no payload: the name alone (the count
+                // lives in the grid, the moment in the entry's own time).
+                TrackerKind::Null => (tracker_type.clone(), None),
             };
             entries.push(TodayEntry {
                 id: Some(tracker_id),

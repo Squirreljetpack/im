@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use crate::color::ColorAxes;
 use crate::config::{Config, TrackerKind};
 use crate::global::{config, pool, GLOBAL_CONFIG};
-use crate::db::TaskRow;
+use crate::db::{TaskRow, TrackerValue};
 use crate::task::{
     AcceptAction, accept_action, apply_accept_action, apply_completion_delta, reset_task_progress,
 };
@@ -403,6 +403,7 @@ enum EditPayload {
     TrackerValue {
         id: i64,
         kind: TrackerKind,
+        tracker_type: String,
         value: String,
     },
 }
@@ -684,15 +685,45 @@ async fn tracker_accept(ctx: &TodayCtx, kind: TrackerKind, tracker_id: Option<i6
         return;
     };
     if kind == TrackerKind::Null {
-        let increment = match label.split_once(':') {
-            Some((name, _)) => config()
-                .tracker
-                .get(name.trim())
-                .is_some_and(|t| t.min.is_none() || t.max.is_none()),
-            None => false,
+        // Null rows show their name as the label; the update action moves
+        // the row's timestamp to now — nothing else (no score change, no
+        // deletes; both modes). The move must stay within the row's current
+        // interval slot, and the strict when-zone gate applies to `now`.
+        let tracker_type = label.trim();
+        let Some(setting) = config().tracker.get(tracker_type).cloned() else {
+            log::error!("Unknown tracker '{tracker_type}' in today view");
+            return;
         };
-        let _ =
-            crate::db::relog_null_tracker(&pool(), tracker_id, crate::date::now(), increment).await;
+        let now = crate::date::now();
+        if setting.strict && !crate::tracker::null_zone_contains(&setting, now) {
+            let low = setting.low.unwrap_or(0.0);
+            let high = setting.high.unwrap_or(0.0);
+            log::error!(
+                "tracker '{tracker_type}': cannot re-log at this time — outside the strict [{low}, {high}] offset zone"
+            );
+            return;
+        }
+        let Some(row_time) = crate::db::fetch_tracker_time(&pool(), tracker_id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            log::error!("Tracker entry {tracker_id} not found");
+            return;
+        };
+        if let Some(interval) = setting.interval {
+            let current =
+                crate::date::interval_slot_unix_secs(interval.anchor, interval.span, row_time);
+            let target =
+                crate::date::interval_slot_unix_secs(interval.anchor, interval.span, now);
+            if !matches!((current, target), (Some(c), Some(t)) if c == t) {
+                log::error!(
+                    "tracker '{tracker_type}': cannot move the entry into a different interval slot"
+                );
+                return;
+            }
+        }
+        let _ = crate::db::update_tracker_time(&pool(), tracker_id, now).await;
         refresh_today(ctx).await;
         return;
     }
@@ -703,9 +734,48 @@ async fn tracker_accept(ctx: &TodayCtx, kind: TrackerKind, tracker_id: Option<i6
     open_input(ctx.clone(), update_tracker_prompt(ctx, tracker_id, &tracker_type, kind));
 }
 
-/// The "Update:" prompt for a value-bearing tracker: kind-filtered input
-/// validated with the shared tracker parser on submit. Used by Accept on a
-/// tracker row and by Edit on Number/Float trackers.
+/// The strict-gate measure for a parsed tracker value: the numeric score
+/// or, for text, the message length in characters.
+fn tracker_measure(parsed: &TrackerValue) -> f64 {
+    match parsed {
+        TrackerValue::Text(s) => crate::tracker::text_len_chars(s) as f64,
+        TrackerValue::Integer(n) => *n as f64,
+        TrackerValue::Float(f) => *f,
+    }
+}
+
+/// Parse, strict-gate, and write one tracker value — the same pipeline as
+/// the CLI (`parse_tracker_value` → `enforce_strict` →
+/// `db::update_tracker_score`). Shared by the Update prompt's submit and
+/// the editor path (`EditPayload::TrackerValue`).
+async fn submit_tracker_update(
+    ctx: &TodayCtx,
+    tracker_type: &str,
+    id: i64,
+    kind: TrackerKind,
+    raw: &str,
+) {
+    let parsed = match crate::tracker::parse_tracker_value(tracker_type, kind, raw.trim()) {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("{e:#}");
+            return;
+        }
+    };
+    if let Some(setting) = config().tracker.get(tracker_type)
+        && let Err(e) = crate::tracker::enforce_strict(tracker_type, setting, tracker_measure(&parsed))
+    {
+        log::error!("{e}");
+        return;
+    }
+    let _ = crate::db::update_tracker_score(&pool(), id, &parsed).await;
+    refresh_today(ctx).await;
+}
+
+/// The "Update:" prompt for a value-bearing tracker: kind-filtered input,
+/// validated (form and the strict gate) as it is typed, then submitted
+/// through the shared strict pipeline. Used by Accept on a tracker row and
+/// by Edit on Integer/Float/Duration trackers.
 fn update_tracker_prompt(
     ctx: &TodayCtx,
     tracker_id: i64,
@@ -714,6 +784,7 @@ fn update_tracker_prompt(
 ) -> InputPrompt {
     let ctx2 = ctx.clone();
     let tracker_type = tracker_type.to_string();
+    let validator_type = tracker_type.clone();
     InputPrompt {
         title: "Update".to_string(),
         label: "Update: ".to_string(),
@@ -721,25 +792,31 @@ fn update_tracker_prompt(
         input: String::new(),
         error: None,
         allowed: Some(Box::new(move |c: char| match kind {
-            TrackerKind::Number => c.is_ascii_digit() || c == '-',
+            TrackerKind::Integer => c.is_ascii_digit() || c == '-',
             TrackerKind::Float => c.is_ascii_digit() || c == '-' || c == '.',
+            // humantime strings like "1h 30m": digits, letters, space, dot.
+            TrackerKind::Duration => c.is_ascii_alphanumeric() || c == ' ' || c == '.' || c == '-',
             TrackerKind::Text => true,
             TrackerKind::Null => false,
         })),
         validator: Some(Box::new(move |s: &str| {
-            if s.trim().is_empty() {
-                Err("requires a value".to_string())
-            } else {
-                crate::tracker::parse_tracker_value(&tracker_type, kind, s.trim())
-                    .map(|_| ())
-                    .map_err(|e| format!("{e:#}"))
+            let s = s.trim();
+            if s.is_empty() {
+                return Err("requires a value".to_string());
             }
+            let parsed = crate::tracker::parse_tracker_value(&validator_type, kind, s)
+                .map_err(|e| format!("{e:#}"))?;
+            if let Some(setting) = config().tracker.get(&validator_type) {
+                crate::tracker::enforce_strict(&validator_type, setting, tracker_measure(&parsed))
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(())
         })),
         on_submit: Some(Box::new(move |val| {
+            let val = val.trim().to_string();
+            let tracker_type = tracker_type.clone();
             tokio::spawn(async move {
-                let _ =
-                    crate::db::update_tracker_score(&pool(), tracker_id, kind, val.trim()).await;
-                refresh_today(&ctx2).await;
+                submit_tracker_update(&ctx2, &tracker_type, tracker_id, kind, &val).await;
             });
         })),
     }
@@ -1002,13 +1079,14 @@ fn edit_selected(ctx: &TodayCtx, state: &mut MMState<'_, TodayEntry, ()>, entry:
                     *ctx.edit.lock().unwrap() = Some(EditPayload::TrackerValue {
                         id: tracker_id,
                         kind,
+                        tracker_type: tracker_type.trim().to_string(),
                         value: current.trim().to_string(),
                     });
                     state.set_interrupt(Interrupt::Execute, String::new());
                 }
-                // Number/Float payloads route to the Update prompt — the
-                // same overlay as Accept on the row.
-                TrackerKind::Number | TrackerKind::Float => {
+                // Integer/Float/Duration payloads route to the Update
+                // prompt — the same overlay as Accept on the row.
+                TrackerKind::Integer | TrackerKind::Float | TrackerKind::Duration => {
                     open_input(
                         ctx.clone(),
                         update_tracker_prompt(ctx, tracker_id, tracker_type.trim(), kind),
@@ -1055,17 +1133,19 @@ fn run_edit(ctx: &TodayCtx) {
             }
             Err(e) => log::error!("Editor: {e}"),
         },
-        EditPayload::TrackerValue { id, kind, value } => {
-            match crate::editor::open_editor_on_text(&value) {
-                Ok(new_value) => {
-                    tokio::spawn(async move {
-                        let _ = crate::db::update_tracker_score(&pool(), id, kind, &new_value).await;
-                        refresh_today(&ctx).await;
-                    });
-                }
-                Err(e) => log::error!("Editor: {e}"),
+        EditPayload::TrackerValue {
+            id,
+            kind,
+            tracker_type,
+            value,
+        } => match crate::editor::open_editor_on_text(&value) {
+            Ok(new_value) => {
+                tokio::spawn(async move {
+                    submit_tracker_update(&ctx, &tracker_type, id, kind, &new_value).await;
+                });
             }
-        }
+            Err(e) => log::error!("Editor: {e}"),
+        },
     }
 }
 

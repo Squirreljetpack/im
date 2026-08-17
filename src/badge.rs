@@ -60,45 +60,45 @@ pub fn completion_badge_text(count: i64, target_count: i32) -> String {
 }
 
 /// Tracker dot color: bin `score` onto the tracker palette given the
-/// effective min/max endpoints. Grid semantics (the grid view derives the
+/// effective low/high endpoints. Grid semantics (the grid view derives the
 /// endpoints via `effective_range` with data fallback; the today view
-/// passes the tracker's configured `min`/`max` directly):
+/// passes the tracker's configured `low`/`high` directly):
 /// - both endpoints with a non-degenerate range → linear binning across the
-///   palette (inverted ranges: `max < min` maps lower scores to the last
+///   palette (inverted ranges: `high < low` maps lower scores to the last
 ///   color);
 /// - only a lower bound → binary: below it the first color, at/above it the
 ///   last (success) color;
 /// - only an upper bound → binary: above it the first color, at/below it the
 ///   last (success) color;
-/// - no usable range (neither bound, or degenerate `min == max`) → the middle
+/// - no usable range (neither bound, or degenerate `low == high`) → the middle
 ///   palette color, rounded down (`colors[0]` for a single-color palette).
 pub(crate) fn tracker_color(
     colors: &[CtColor],
     score: f64,
-    eff_min: Option<f64>,
-    eff_max: Option<f64>,
+    eff_low: Option<f64>,
+    eff_high: Option<f64>,
 ) -> CtColor {
-    match (eff_min, eff_max) {
-        (Some(min), Some(max)) if (max - min).abs() > f64::EPSILON => {
-            let t = if min < max {
+    match (eff_low, eff_high) {
+        (Some(low), Some(high)) if (high - low).abs() > f64::EPSILON => {
+            let t = if low < high {
                 // normal: higher score → success
-                ((score - min) / (max - min)).clamp(0.0, 1.0)
+                ((score - low) / (high - low)).clamp(0.0, 1.0)
             } else {
-                // Inverted range (min > max): lower score → success
-                ((min - score) / (min - max)).clamp(0.0, 1.0)
+                // Inverted range (low > high): lower score → success
+                ((low - score) / (low - high)).clamp(0.0, 1.0)
             };
             let idx = ((t * (colors.len() as f64 - 1.0)).round() as usize).min(colors.len() - 1);
             colors[idx]
         }
-        (Some(min), None) => {
-            if score < min {
+        (Some(low), None) => {
+            if score < low {
                 colors[0]
             } else {
                 *colors.last().unwrap()
             }
         }
-        (None, Some(max)) => {
-            if score > max {
+        (None, Some(high)) => {
+            if score > high {
                 colors[0]
             } else {
                 *colors.last().unwrap()
@@ -110,66 +110,73 @@ pub(crate) fn tracker_color(
 
 /// Color for a Null tracker entry.
 ///
-/// With an interval and **both** min/max set, the entry is a time marker:
-/// min/max are seconds-from-interval-start offsets (times of day within the
-/// interval) that define a circular color range traversed **forward** from
-/// `min`, wrapping the interval boundary when `max < min`. Earlier times
-/// always map to the start of the palette, later to the end — the range is
-/// never reversed, regardless of the min/max order:
+/// The branch depends on the interval's mode:
 ///
-/// - inside the range `[min, max)` circular — e.g. 23:00→02:00 for a
-///   sleep tracker — the color is **binned** by position: `min` maps to the
-///   first palette color, `max` to the last;
-/// - outside the range, the first/last palette color is picked by which
-///   range endpoint the entry is **circularly closer** to — closer to `min`
-///   → first color, closer to `max` → last color. This is the same split as
-///   the TODO's cycle-back midpoint of the outside zone.
+/// - Replace mode (`cumulative: false`) with **both** `low`/`high` bounds
+///   and an interval: the entry is a time marker. `low`/`high` are
+///   seconds-from-interval-start offsets (times within the interval) that
+///   define a circular color range traversed **forward** from `low`,
+///   wrapping the interval boundary when `high < low`. Earlier times always
+///   map to the start of the palette, later to the end — the range is never
+///   reversed, regardless of the bound order:
+///   - inside the range `[low, high)` circular — e.g. 23:00→02:00 for a
+///     sleep tracker — the color is **binned** by position: `low` maps to
+///     the first palette color, `high` to the last;
+///   - outside the range, the first/last palette color is picked by which
+///     range endpoint the entry is **circularly closer to** — closer to
+///     `low` → first color, closer to `high` → last color.
 ///
-/// So a sleep tracker with `min = 23:00`, `max = 02:00` on a
-/// midnight-anchored day bins 23:00→02:00 from the first color toward the
-/// last (1am is mid-palette), 22:45 first (closer to 23:00), and 03:00 last
-/// (closer to 02:00).
+///   So a sleep tracker with `low = 23:00`, `high = 02:00` on a
+///   midnight-anchored day bins 23:00→02:00 from the first color toward the
+///   last (1am is mid-palette), 22:45 first (closer to 23:00), and 03:00
+///   last (closer to 02:00).
 ///
-/// With a single bound (or none — count mode), the score is binned like any
-/// numeric tracker. Without an interval the tracker is unsupported → Reset.
+/// - Cumulative mode (or replace without both bounds / interval geometry):
+///   the entry count is binned like a numeric tracker against the
+///   `low`/`high` thresholds via [`tracker_color`].
 pub(crate) fn null_tracker_color(
     colors: &[CtColor],
     tracker: &TrackerSetting,
     time: i64,
     score: f64,
 ) -> CtColor {
-    let (Some(min), Some(max), Some(interval)) = (tracker.min, tracker.max, tracker.interval)
-    else {
-        // No interval → unsupported. Single-bound (or no-bound) → the score
-        // is a count; bin it like a numeric tracker.
-        return tracker_color(colors, score, tracker.min, tracker.max);
+    let (Some(low), Some(high)) = (tracker.low, tracker.high) else {
+        return tracker_color(colors, score, tracker.low, tracker.high);
     };
+    let Some(interval) = tracker.interval else {
+        return tracker_color(colors, score, tracker.low, tracker.high);
+    };
+    if interval.cumulative {
+        // Cumulative: the score is a per-slot count; bin it against the
+        // threshold bounds.
+        return tracker_color(colors, score, tracker.low, tracker.high);
+    }
     let Some((interval_start, interval_end)) =
         crate::date::interval_slot_unix_secs(interval.anchor, interval.span, time)
     else {
-        return tracker_color(colors, score, tracker.min, tracker.max);
+        return tracker_color(colors, score, tracker.low, tracker.high);
     };
     let len = (interval_end - interval_start) as f64;
     if len <= 0.0 {
-        return tracker_color(colors, score, tracker.min, tracker.max);
+        return tracker_color(colors, score, tracker.low, tracker.high);
     }
     // Both bounds are seconds from the interval start; the range is
-    // traversed forward from min, wrapping when max < min. Earlier times
+    // traversed forward from low, wrapping when high < low. Earlier times
     // always bin to the palette start, later to the end — never reversed.
     let pos = (time - interval_start) as f64;
-    let zone_len = (max - min).rem_euclid(len);
-    let in_zone = ((pos - min).rem_euclid(len)) < zone_len;
+    let zone_len = (high - low).rem_euclid(len);
+    let in_zone = ((pos - low).rem_euclid(len)) < zone_len;
     if in_zone {
-        // Binning: min → first color, max → last color (continuous with the
+        // Binning: low → first color, high → last color (continuous with the
         // outside proximity rule).
-        let p = ((pos - min).rem_euclid(len)) / zone_len;
+        let p = ((pos - low).rem_euclid(len)) / zone_len;
         let idx = (p * (colors.len() as f64 - 1.0)).round() as usize;
         colors[idx.min(colors.len() - 1)]
-    } else if ((pos - max).rem_euclid(len)) < ((min - pos).rem_euclid(len)) {
-        // Outside, circularly closer to max (the range's late end).
+    } else if ((pos - high).rem_euclid(len)) < ((low - pos).rem_euclid(len)) {
+        // Outside, circularly closer to high (the range's late end).
         *colors.last().unwrap_or(&CtColor::Reset)
     } else {
-        // Outside, circularly closer to min (the range's early end).
+        // Outside, circularly closer to low (the range's early end).
         *colors.first().unwrap_or(&CtColor::Reset)
     }
 }
@@ -602,20 +609,22 @@ mod tests {
             interval: Some(crate::config::TrackerInterval {
                 anchor: 0,
                 span: jiff::Span::new().days(1),
+                cumulative: false,
             }),
             kind: crate::config::TrackerKind::Null,
-            min: Some(23.0 * 3600.0), // 23:00, seconds from interval start
-            max: Some(2.0 * 3600.0),  // 02:00, seconds from interval start
+            low: Some(23.0 * 3600.0),  // 23:00, seconds from interval start
+            high: Some(2.0 * 3600.0),  // 02:00, seconds from interval start
+            strict: false,
             colors: None,
         }
     }
 
-    /// Null time-marker coloring: the range is `[min, max]` circular — both
-    /// offsets from the interval start — traversed forward (23:00→02:00 for
-    /// the fixture), never reversed. Inside the range: binning (min → first
-    /// color, max → last). Outside: first/last by circular proximity to the
-    /// nearer range endpoint (closer to min → first color; closer to max →
-    /// last color).
+    /// Null time-marker coloring (replace mode): the range is `[low, high]`
+    /// circular — both offsets from the interval start — traversed forward
+    /// (23:00→02:00 for the fixture), never reversed. Inside the range:
+    /// binning (low → first color, high → last). Outside: first/last by
+    /// circular proximity to the nearer range endpoint (closer to low →
+    /// first color; closer to high → last color).
     #[test]
     fn test_null_tracker_color_time_of_day() {
         let colors = vec![CtColor::DarkRed, CtColor::DarkYellow, CtColor::DarkGreen];
@@ -632,14 +641,15 @@ mod tests {
         assert_eq!(color_at(22 * 3600 + 45 * 60), CtColor::DarkRed);
         assert_eq!(color_at(22 * 3600 + 15 * 60), CtColor::DarkRed);
         assert_eq!(color_at(13 * 3600), CtColor::DarkRed);
-        // Outside, closer to max (02:00) → last color: 03:00 and 12:00
+        // Outside, closer to high (02:00) → last color: 03:00 and 12:00
         // (12:00 is 10h from 02:00 vs 11h from 23:00).
         assert_eq!(color_at(3 * 3600), CtColor::DarkGreen);
         assert_eq!(color_at(12 * 3600), CtColor::DarkGreen);
     }
 
-    /// Null trackers without an interval (or with a single bound) fall back
-    /// to numeric score binning.
+    /// Null trackers without both bounds or interval geometry fall back to
+    /// numeric binning of the count; cumulative-mode null trackers bin the
+    /// per-slot count against the `low`/`high` thresholds.
     #[test]
     fn test_null_tracker_color_fallbacks() {
         let colors = vec![CtColor::DarkRed, CtColor::DarkYellow, CtColor::DarkGreen];
@@ -648,17 +658,17 @@ mod tests {
         // tracker, though they are meaningless without an interval).
         let mut tracker = day_interval_tracker();
         tracker.interval = None;
-        tracker.min = None;
-        tracker.max = None;
+        tracker.low = None;
+        tracker.high = None;
         assert_eq!(
             null_tracker_color(&colors, &tracker, 0, 42.0),
             CtColor::DarkYellow
         );
-        // Single bound → binary score binning (count mode): below the
-        // bound the first color, at/above it the last.
+        // Single bound → binary score binning: below the bound the first
+        // color, at/above it the last.
         let mut tracker = day_interval_tracker();
-        tracker.min = Some(5.0);
-        tracker.max = None;
+        tracker.low = Some(5.0);
+        tracker.high = None;
         assert_eq!(
             null_tracker_color(&colors, &tracker, 0, 10.0),
             CtColor::DarkGreen
@@ -669,7 +679,7 @@ mod tests {
         );
     }
 
-    /// The awake-tracker shape from assets/config.toml: min = 4h, max =
+    /// The awake-tracker shape from assets/config.toml: low = 4h, high =
     /// 12h on a midnight-anchored day. The palette runs dark → pale, so an
     /// 11:19 AM log (91.6% through the zone) must bin toward the pale end,
     /// not the dark end — regression for the reversed-direction bug. With
@@ -679,17 +689,17 @@ mod tests {
     fn test_null_tracker_color_awake_range() {
         let colors = vec![CtColor::DarkRed, CtColor::DarkYellow, CtColor::DarkGreen];
         let mut tracker = day_interval_tracker();
-        tracker.min = Some(4.0 * 3600.0);
-        tracker.max = Some(12.0 * 3600.0);
+        tracker.low = Some(4.0 * 3600.0);
+        tracker.high = Some(12.0 * 3600.0);
         let color_at = |secs: i64| null_tracker_color(&colors, &tracker, secs, 0.0);
-        // 04:00 (min) → first color; 12:00 (max) → last color.
+        // 04:00 (low) → first color; 12:00 (high) → last color.
         assert_eq!(color_at(4 * 3600), CtColor::DarkRed);
         assert_eq!(color_at(12 * 3600), CtColor::DarkGreen);
         // 08:00 → 0.5 in → middle; 11:19:41 → 0.916 in → last.
         assert_eq!(color_at(8 * 3600), CtColor::DarkYellow);
         assert_eq!(color_at(11 * 3600 + 19 * 60 + 41), CtColor::DarkGreen);
-        // Outside: 23:19 is closer to min (4am, 4h41m) than max (12pm,
-        // 11h19m) → first color. 13:00 is closer to max → last color.
+        // Outside: 23:19 is closer to low (4am, 4h41m) than high (12pm,
+        // 11h19m) → first color. 13:00 is closer to high → last color.
         assert_eq!(color_at(23 * 3600 + 19 * 60), CtColor::DarkRed);
         assert_eq!(color_at(13 * 3600), CtColor::DarkGreen);
     }

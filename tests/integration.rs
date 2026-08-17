@@ -50,6 +50,7 @@ fn day_interval() -> im::config::TrackerInterval {
     im::config::TrackerInterval {
         anchor: im::date::parse_datetime("2020-01-01 00:00", im::date::DATE_DIALECT).unwrap(),
         span: jiff::Span::new().days(1),
+    cumulative: false,
     }
 }
 
@@ -87,9 +88,10 @@ async fn test_create_mood_with_trackers() {
         "sleep".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -97,9 +99,10 @@ async fn test_create_mood_with_trackers() {
         "water".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -155,9 +158,10 @@ async fn test_create_tracker_only() {
         "sleep".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -201,9 +205,10 @@ async fn test_tracker_interval_insert_strategies() {
         "affirmation".to_string(),
         im::config::TrackerSetting {
             interval: Some(day_interval()),
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Text,
+            strict: false,
             colors: None,
         },
     );
@@ -212,20 +217,27 @@ async fn test_tracker_interval_insert_strategies() {
         "sleep".to_string(),
         im::config::TrackerSetting {
             interval: Some(day_interval()),
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
-    // number + interval: plain insert, accumulates
+    // integer + interval + cumulative: every log is kept (the grid sums)
+    let accum_iv = {
+        let mut iv = day_interval();
+        iv.cumulative = true;
+        iv
+    };
     config.tracker.insert(
         "runs".to_string(),
         im::config::TrackerSetting {
-            interval: Some(day_interval()),
-            min: None,
-            max: None,
-            kind: TrackerKind::Number,
+            interval: Some(accum_iv),
+            low: None,
+            high: None,
+            kind: TrackerKind::Integer,
+            strict: false,
             colors: None,
         },
     );
@@ -277,7 +289,7 @@ async fn test_tracker_interval_insert_strategies() {
     );
     assert_eq!(text_rows[0].0, "second");
 
-    // Number: plain insert, both rows kept (the view sums them).
+    // Integer + cumulative: plain insert, both rows kept (the view sums them).
     let runs_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracker WHERE type = 'runs'")
         .fetch_one(&pool)
         .await
@@ -292,10 +304,12 @@ async fn test_tracker_interval_insert_strategies() {
             interval: Some(im::config::TrackerInterval {
                 anchor: im::date::now(),
                 span: jiff::Span::new().seconds(1),
+            cumulative: false,
             }),
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -530,6 +544,68 @@ async fn test_create_oneshot_task_with_date() {
     assert!(start_time > 0);
 }
 
+
+/// Cumulative interval trackers keep every log: the today view shows each
+/// row with its raw value (summing happens only in the grid).
+#[tokio::test]
+async fn test_cumulative_interval_today_rows() {
+    use im::types::{TodayHorizon, ViewVariant};
+
+    let pool = test_pool().await.unwrap();
+    let mut config = Config::default();
+    let mut iv = day_interval();
+    iv.cumulative = true;
+    config.tracker.insert(
+        "pushups".to_string(),
+        im::config::TrackerSetting {
+            interval: Some(iv),
+            low: None,
+            high: None,
+            kind: TrackerKind::Integer,
+            strict: false,
+            colors: None,
+        },
+    );
+    for v in ["20", "30"] {
+        execute_command(
+            parse_from(vec!["-pushups".to_string(), v.to_string()]).unwrap(),
+            &pool,
+            &config,
+            &CliOpts::default(),
+            &mut Vec::new(),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+
+    // Both rows in the same day slot; each log shows its raw value.
+    let pushups: Vec<(i64,)> =
+        sqlx::query_as("SELECT score FROM tracker WHERE type = 'pushups' ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(pushups.len(), 2, "cumulative keeps every log");
+    assert_eq!(pushups[0].0, 20);
+    assert_eq!(pushups[1].0, 30);
+
+    config
+        .moods
+        .init_with(&pool, im::global::embedder())
+        .await
+        .unwrap();
+    let im::today::TodayFetch { entries, .. } =
+        im::today::fetch_today_entries(&pool, &config, TodayHorizon::Today, None, ViewVariant::All)
+            .await
+            .unwrap();
+    let rows: Vec<_> = entries
+        .iter()
+        .filter(|e| e.label.starts_with("pushups:"))
+        .collect();
+    assert_eq!(rows.len(), 2, "today view shows one row per log");
+    assert!(rows.iter().any(|e| e.label == "pushups: 20"));
+    assert!(rows.iter().any(|e| e.label == "pushups: 30"));
+}
 #[tokio::test]
 async fn test_tracker_range_not_enforced() {
     let pool = test_pool().await.unwrap();
@@ -539,9 +615,10 @@ async fn test_tracker_range_not_enforced() {
         "sleep".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: Some(4.0),
-            max: Some(10.0),
+            low: Some(4.0),
+            high: Some(10.0),
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -569,6 +646,103 @@ async fn test_tracker_range_not_enforced() {
     assert_eq!(count, 3);
 }
 
+/// `strict = true` gates insertion through the same inclusive span the
+/// colors use: below/above values error, the boundaries themselves store
+/// (exact f64), a single bound gates on that bound only, and inverted
+/// bounds gate the span between them.
+#[tokio::test]
+async fn test_tracker_strict_gate_enforced() {
+    let pool = test_pool().await.unwrap();
+    let mut config = Config::default();
+
+    async fn insert(
+        pool: &SqlitePool,
+        config: &Config,
+        name: &str,
+        value: &str,
+    ) -> anyhow::Result<()> {
+        let cmd = parse_from(vec![format!("-{name}"), value.to_string()]).unwrap();
+        execute_command(
+            cmd,
+            pool,
+            config,
+            &CliOpts::default(),
+            &mut Vec::new(),
+            false,
+        )
+        .await
+    }
+    let insert = insert;
+
+    // Both bounds: 4 and 10 are accepted, 3.5 / 11 error.
+    config.tracker.insert(
+        "sleep".to_string(),
+        im::config::TrackerSetting {
+            interval: None,
+            low: Some(4.0),
+            high: Some(10.0),
+            kind: TrackerKind::Float,
+            strict: true,
+            colors: None,
+        },
+    );
+    for ok in ["4", "10", "7"] {
+        insert(&pool, &config, "sleep", ok).await.unwrap();
+    }
+    for bad in ["3.5", "11"] {
+        let err = insert(&pool, &config, "sleep", bad).await.unwrap_err().to_string();
+        assert!(
+            err.contains("tracker 'sleep': value") && err.contains("outside [4, 10]"),
+            "strict must reject {bad}, got: {err}"
+        );
+    }
+
+    // Single bound: everything at/above the floor passes.
+    config.tracker.insert(
+        "pushups".to_string(),
+        im::config::TrackerSetting {
+            interval: None,
+            low: Some(10.0),
+            high: None,
+            kind: TrackerKind::Integer,
+            strict: true,
+            colors: None,
+        },
+    );
+    insert(&pool, &config, "pushups", "10").await.unwrap();
+    let err = insert(&pool, &config, "pushups", "9").await.unwrap_err().to_string();
+    assert!(
+        err.contains("outside [10]"),
+        "single-bound strict must reject below-floor values, got: {err}"
+    );
+
+    // Inverted bounds still gate the span between them.
+    config.tracker.insert(
+        "water".to_string(),
+        im::config::TrackerSetting {
+            interval: None,
+            low: Some(8.0),
+            high: Some(2.0),
+            kind: TrackerKind::Float,
+            strict: true,
+            colors: None,
+        },
+    );
+    insert(&pool, &config, "water", "5").await.unwrap();
+    let err = insert(&pool, &config, "water", "9").await.unwrap_err().to_string();
+    assert!(
+        err.contains("outside [2, 8]"),
+        "inverted bounds must gate the span between them, got: {err}"
+    );
+
+    // Nothing outside the gates was stored.
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracker")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 5, "3 sleep + 1 pushups + 1 water accepted rows; 4 rejected");
+}
+
 #[tokio::test]
 async fn test_multiple_trackers_same_mood() {
     let pool = test_pool().await.unwrap();
@@ -577,9 +751,10 @@ async fn test_multiple_trackers_same_mood() {
         "sleep".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -587,9 +762,10 @@ async fn test_multiple_trackers_same_mood() {
         "water".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -597,9 +773,10 @@ async fn test_multiple_trackers_same_mood() {
         "exercise".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -964,9 +1141,10 @@ async fn test_create_mood_tracker_in_final_position() {
         "sleep".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -974,9 +1152,10 @@ async fn test_create_mood_tracker_in_final_position() {
         "water".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -1028,9 +1207,10 @@ async fn test_out_of_range_tracker_still_inserts() {
         "sleep".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: Some(4.0),
-            max: Some(10.0),
+            low: Some(4.0),
+            high: Some(10.0),
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -1146,9 +1326,10 @@ async fn test_today_view_with_data() {
         "sleep".to_string(),
         TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -1156,9 +1337,10 @@ async fn test_today_view_with_data() {
         "water".to_string(),
         TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -1248,9 +1430,10 @@ async fn test_today_view_linked_trackers_and_tasks() {
         "sleep".to_string(),
         TrackerSetting {
             interval: None,
-            min: None,
-            max: Some(10.0),
+            low: None,
+            high: Some(10.0),
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -1320,39 +1503,39 @@ async fn test_today_view_linked_trackers_and_tasks() {
     assert_eq!(mood.linked_tasks[0].badge, Some('○')); // not done yet
 }
 
-/// Null tracker labels, relog semantics, and `prev:` in the today view:
-/// count-mode null trackers (either bound missing) show the count, both
-/// bounds set shows the entry moment; `relog_null_tracker` moves the time
-/// and increments the count; `tracker_prev` carries the previous entry of
-/// the same kind.
+/// Null tracker labels, update-action semantics, and `prev:` in the today
+/// view: null rows carry no payload (the name alone); the update action
+/// moves the row's timestamp within its slot; `tracker_prev` carries the
+/// previous entry of the same kind.
 #[tokio::test]
 async fn test_today_view_null_labels_relog_and_prev() {
     use im::config::TrackerSetting;
-    use im::today::EntryKind;
     use im::types::{TodayHorizon, ViewVariant};
 
     let pool = test_pool().await.unwrap();
     let mut config = Config::default();
 
-    // Count-mode null tracker: interval + a single bound.
+    // Replace-mode null tracker (single bound, count threshold unused).
     config.tracker.insert(
         "water".to_string(),
         TrackerSetting {
             interval: Some(day_interval()),
-            min: Some(0.0),
-            max: None,
+            low: Some(0.0),
+            high: None,
             kind: TrackerKind::Null,
+            strict: false,
             colors: None,
         },
     );
-    // Time-marker null tracker: interval + both bounds.
+    // Replace-mode null tracker: interval + both bounds (time offsets).
     config.tracker.insert(
         "sit".to_string(),
         TrackerSetting {
             interval: Some(day_interval()),
-            min: Some(0.0),
-            max: Some(86400.0),
+            low: Some(0.0),
+            high: Some(86400.0),
             kind: TrackerKind::Null,
+            strict: false,
             colors: None,
         },
     );
@@ -1361,15 +1544,15 @@ async fn test_today_view_null_labels_relog_and_prev() {
         "sleep".to_string(),
         TrackerSetting {
             interval: None,
-            min: None,
-            max: Some(10.0),
+            low: None,
+            high: Some(10.0),
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
 
-    // Log twice in the same day slot: the count-mode null upsert
-    // increments the slot's entry.
+    // Log twice in the same day slot: replace mode keeps one marker.
     for _ in 0..2 {
         execute_command(
             parse_from(vec!["-water".to_string()]).unwrap(),
@@ -1426,22 +1609,16 @@ async fn test_today_view_null_labels_relog_and_prev() {
             .await
             .unwrap();
 
-    // Count-mode null: the label carries the count, not the time.
+    // Null rows carry no payload: the name alone.
     let water = entries
         .iter()
-        .find(|e| e.label.starts_with("water:"))
+        .find(|e| e.label == "water")
         .expect("expected the water entry");
-    assert_eq!(water.label, "water: 2");
-
-    // Time-marker null: the label carries the entry moment.
     let sit = entries
         .iter()
-        .find(|e| e.label.starts_with("sit:"))
+        .find(|e| e.label == "sit")
         .expect("expected the sit entry");
-    assert_eq!(
-        sit.label,
-        format!("sit: {}", im::date::format_datetime_short(sit.time))
-    );
+    assert_eq!(sit.label, "sit");
 
     // prev: the later sleep entry points at the earlier one (row id is the
     // tiebreaker for same-second entries); the first has no previous entry.
@@ -1459,11 +1636,11 @@ async fn test_today_view_null_labels_relog_and_prev() {
     assert_eq!(first.tracker_prev, None);
     assert_eq!(second.tracker_prev, Some(first.time));
 
-    // Re-log the water entry: time moves to the new moment, count
-    // increments (count mode).
+    // Update action on the water entry (same day slot): the timestamp
+    // moves, nothing else changes (no score bump, no deletes).
     let water_id = water.id.expect("tracker entry id");
     let t0 = water.time;
-    im::db::relog_null_tracker(&pool, water_id, t0 + 1000, true)
+    im::db::update_tracker_time(&pool, water_id, t0 + 1000)
         .await
         .unwrap();
 
@@ -1473,9 +1650,9 @@ async fn test_today_view_null_labels_relog_and_prev() {
             .unwrap();
     let water = entries
         .iter()
-        .find(|e| e.label.starts_with("water:"))
+        .find(|e| e.id == Some(water_id))
         .expect("expected the water entry");
-    assert_eq!(water.label, "water: 3");
+    assert_eq!(water.label, "water");
     assert_eq!(water.time, t0 + 1000);
 }
 
@@ -1534,9 +1711,10 @@ async fn test_today_view_horizon_includes_moods_and_trackers() {
         "sleep".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
-            kind: TrackerKind::Number,
+            low: None,
+            high: None,
+            kind: TrackerKind::Integer,
+            strict: false,
             colors: None,
         },
     );
@@ -1977,9 +2155,9 @@ async fn test_task_mood_links() {
 }
 
 /// Null tracker semantics: a valueless `-<name>` logs a Null tracker.
-/// Count mode (no min/max): each log in the same interval slot increments
-/// the score. Time-marker mode (both min/max): re-logging moves the entry
-/// to now without touching the score. Without an interval: error.
+/// Replace mode: one marker per interval slot, score 0 (re-logging drops
+/// the slot's previous marker). Cumulative mode: every log appends its own
+/// score-0 row. Without an interval: error.
 #[tokio::test]
 async fn test_null_tracker_semantics() {
     let pool = test_pool().await.unwrap();
@@ -1987,26 +2165,46 @@ async fn test_null_tracker_semantics() {
     let day_interval = im::config::TrackerInterval {
         anchor: im::date::today_start() - 86_400,
         span: jiff::Span::new().days(1),
+        cumulative: false,
     };
-    // Count mode: no min/max.
+    // Replace mode (default): one marker per slot, score 0.
     config.tracker.insert(
         "prouds".to_string(),
         im::config::TrackerSetting {
             interval: Some(day_interval),
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: im::config::TrackerKind::Null,
+            strict: false,
             colors: None,
         },
     );
-    // Time-marker mode: both bounds (23:00 / 2h before the span end).
+    // Replace mode with both bounds (23:00 / 2h before the span end):
+    // the marker's color comes from its circular position.
+    config.tracker.insert(
+        "sips".to_string(),
+        im::config::TrackerSetting {
+            interval: Some(im::config::TrackerInterval {
+                anchor: im::date::today_start() - 86_400,
+                span: jiff::Span::new().days(1),
+                cumulative: true,
+            }),
+            low: None,
+            high: None,
+            kind: im::config::TrackerKind::Null,
+            strict: false,
+            colors: None,
+        },
+    );
+    // Both bounds: the marker's circular time position drives its color.
     config.tracker.insert(
         "sleep_start".to_string(),
         im::config::TrackerSetting {
             interval: Some(day_interval),
-            min: Some(23.0 * 3600.0),
-            max: Some(2.0 * 3600.0),
+            low: Some(23.0 * 3600.0),
+            high: Some(2.0 * 3600.0),
             kind: im::config::TrackerKind::Null,
+            strict: false,
             colors: None,
         },
     );
@@ -2015,9 +2213,10 @@ async fn test_null_tracker_semantics() {
         "unsupported".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: im::config::TrackerKind::Null,
+            strict: false,
             colors: None,
         },
     );
@@ -2063,9 +2262,34 @@ async fn test_null_tracker_semantics() {
     .fetch_all(&pool)
     .await
     .unwrap();
-    // Count mode: one row per slot, score incremented to 2.
-    assert_eq!(prouds_rows.len(), 1, "count mode keeps one row per slot");
-    assert_eq!(prouds_rows[0].1, "2", "count mode increments the score");
+    // Replace mode: one row per slot, score stays 0.
+    assert_eq!(prouds_rows.len(), 1, "replace keeps one row per slot");
+    assert_eq!(prouds_rows[0].1, "0", "replace keeps score 0");
+
+    // Cumulative mode: each log appends its own score-0 row.
+    for _ in 0..2 {
+        execute_command(
+            parse_from(vec!["-sips".to_string()]).unwrap(),
+            &pool,
+            &config,
+            &CliOpts::default(),
+            &mut Vec::new(),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    let sips_rows: Vec<String> = sqlx::query(
+        "SELECT CAST(score AS TEXT) AS s FROM tracker WHERE type = 'sips' ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|r| r.get::<String, _>("s"))
+    .collect();
+    assert_eq!(sips_rows.len(), 2, "cumulative keeps every log");
+    assert_eq!(sips_rows, vec!["0".to_string(), "0".to_string()]);
 
     // Re-log the time-marker: same slot → the row's time moves, score stays.
     std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -2931,9 +3155,10 @@ async fn test_tracker_dots() {
         "sleep".to_string(),
         TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -3281,9 +3506,10 @@ async fn test_text_tracker_entry_today_badge_and_listing() {
         "accomplishment".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Text,
+            strict: false,
             colors: None,
         },
     );
@@ -3354,9 +3580,10 @@ async fn test_text_tracker_lists_all_entries_in_range() {
         "accomplishment".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Text,
+            strict: false,
             colors: None,
         },
     );
@@ -3397,9 +3624,10 @@ async fn test_tracker_parse_errors() {
         "sleep".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -3418,18 +3646,32 @@ async fn test_tracker_parse_errors() {
         result
             .unwrap_err()
             .to_string()
-            .contains("Cannot parse 'good' as a number for tracker 'sleep'"),
+            .contains("Cannot parse 'good' for tracker 'sleep' (kind=float): expected a plain number"),
         "expected a clear float parse error"
     );
+
+    // Float tracker: duration strings are not plain numbers.
+    let cmd = parse_from(vec!["-sleep".to_string(), "4h".to_string()]).unwrap();
+    let result = execute_command(
+        cmd,
+        &pool,
+        &config,
+        &CliOpts::default(),
+        &mut Vec::new(),
+        false,
+    )
+    .await;
+    assert!(result.is_err(), "float must reject duration strings");
 
     // Number tracker: non-integer argument must error
     config.tracker.insert(
         "bugs".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
-            kind: TrackerKind::Number,
+            low: None,
+            high: None,
+            kind: TrackerKind::Integer,
+            strict: false,
             colors: None,
         },
     );
@@ -3448,17 +3690,113 @@ async fn test_tracker_parse_errors() {
         result
             .unwrap_err()
             .to_string()
-            .contains("Value '3.5' for tracker 'bugs' is not a whole number (kind = number)"),
+            .contains("Cannot parse '3.5' for tracker 'bugs' (kind=integer): expected a plain whole number"),
         "expected a clear integer parse error"
     );
 
-    // Nothing was stored
+    // Integer tracker: duration strings, fractions, and scientific notation
+    // all error with the same message.
+    for bad in ["4h", "4.5", "1e3"] {
+        let cmd = parse_from(vec!["-bugs".to_string(), bad.to_string()]).unwrap();
+        let result = execute_command(
+            cmd,
+            &pool,
+            &config,
+            &CliOpts::default(),
+            &mut Vec::new(),
+            false,
+        )
+        .await;
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Cannot parse") && err.contains("(kind=integer)") && err.contains("expected a plain whole number"),
+            "integer must reject {bad}, got: {err}"
+        );
+    }
+
+    // Duration tracker: bare numbers error, duration strings store seconds.
+    config.tracker.insert(
+        "mile".to_string(),
+        im::config::TrackerSetting {
+            interval: None,
+            low: None,
+            high: None,
+            kind: TrackerKind::Duration,
+            strict: false,
+            colors: None,
+        },
+    );
+    let cmd = parse_from(vec!["-mile".to_string(), "390".to_string()]).unwrap();
+    let result = execute_command(
+        cmd,
+        &pool,
+        &config,
+        &CliOpts::default(),
+        &mut Vec::new(),
+        false,
+    )
+    .await;
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("Cannot parse '390'")
+            && err.contains("(kind=duration)")
+            && err.contains("expected a duration like '6m 30s'"),
+        "duration must reject bare numbers, got: {err}"
+    );
+    let cmd = parse_from(vec!["-mile".to_string(), "6m 30s".to_string()]).unwrap();
+    execute_command(
+        cmd,
+        &pool,
+        &config,
+        &CliOpts::default(),
+        &mut Vec::new(),
+        false,
+    )
+    .await
+    .unwrap();
+    let stored: f64 = sqlx::query_scalar("SELECT score FROM tracker WHERE type = 'mile'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 390.0);
+
+    // Null tracker with a value errors.
+    config.tracker.insert(
+        "pills".to_string(),
+        im::config::TrackerSetting {
+            interval: None,
+            low: None,
+            high: None,
+            kind: TrackerKind::Null,
+            strict: false,
+            colors: None,
+        },
+    );
+    let cmd = parse_from(vec!["-pills".to_string(), "3".to_string()]).unwrap();
+    let result = execute_command(
+        cmd,
+        &pool,
+        &config,
+        &CliOpts::default(),
+        &mut Vec::new(),
+        false,
+    )
+    .await;
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("does not take a value"),
+        "null must reject payloads"
+    );
+
+    // Only the successful duration log was stored.
     let count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM tracker")
         .fetch_one(&pool)
         .await
         .unwrap()
         .get("n");
-    assert_eq!(count, 0);
+    assert_eq!(count, 1);
 }
 
 #[tokio::test]
@@ -3469,9 +3807,10 @@ async fn test_number_tracker_stored_as_integer() {
         "bugs".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: Some(0.0),
-            max: Some(10.0),
-            kind: TrackerKind::Number,
+            low: Some(0.0),
+            high: Some(10.0),
+            kind: TrackerKind::Integer,
+            strict: false,
             colors: None,
         },
     );
@@ -3932,9 +4271,10 @@ async fn test_tracker_grid_uses_colors_override() {
         "run".to_string(),
         im::config::TrackerSetting {
             interval: Some(day_interval()),
-            min: Some(0.0),
-            max: Some(10.0),
-            kind: TrackerKind::Number,
+            low: Some(0.0),
+            high: Some(10.0),
+            kind: TrackerKind::Integer,
+            strict: false,
             colors: Some(override_palette.clone()),
         },
     );
@@ -3942,9 +4282,10 @@ async fn test_tracker_grid_uses_colors_override() {
         "feel".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: Some(0.0),
-            max: Some(10.0),
-            kind: TrackerKind::Number,
+            low: Some(0.0),
+            high: Some(10.0),
+            kind: TrackerKind::Integer,
+            strict: false,
             colors: Some(override_palette),
         },
     );
@@ -4847,9 +5188,10 @@ async fn test_delete_mood_removes_linked_tracker_rows() {
         "sleep".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -4920,9 +5262,10 @@ async fn test_delete_tracker_row() {
         "sleep".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -4989,9 +5332,10 @@ async fn test_delete_mood_without_cascade_fails_with_fk_enforced() {
         "sleep".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -5086,9 +5430,10 @@ async fn test_edit_tracker_text_payload() {
         "note".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Text,
+            strict: false,
             colors: None,
         },
     );
@@ -5132,9 +5477,10 @@ async fn test_edit_tracker_float_payload() {
         "sleep".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -5303,9 +5649,10 @@ async fn test_fetch_today_entries_carries_tracker_ids() {
         "sleep".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -5669,9 +6016,10 @@ async fn test_db_doctor_noninteractive_reports_only() {
         "sleep".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
+            low: None,
+            high: None,
             kind: TrackerKind::Float,
+            strict: false,
             colors: None,
         },
     );
@@ -5728,9 +6076,10 @@ async fn test_db_doctor_buckets_and_prune() {
         "sleep".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: Some(82800.0),
-            max: Some(7200.0),
+            low: Some(82800.0),
+            high: Some(7200.0),
             kind: TrackerKind::Null,
+            strict: false,
             colors: None,
         },
     );
@@ -5738,9 +6087,10 @@ async fn test_db_doctor_buckets_and_prune() {
         "water".to_string(),
         im::config::TrackerSetting {
             interval: None,
-            min: None,
-            max: None,
-            kind: TrackerKind::Number,
+            low: None,
+            high: None,
+            kind: TrackerKind::Integer,
+            strict: false,
             colors: None,
         },
     );

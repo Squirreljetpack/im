@@ -85,28 +85,35 @@ impl Config {
     /// The bundled default config never needs this; a user-edited config
     /// may. See [`is_valid_tracker_name`] for the exact tracker-name rules.
     pub fn init(&mut self) {
-        // Drop trackers whose names are unusable: a `:` prefix collides with
-        // the grid-view `:` command, `-`/whitespace can't be addressed as
-        // `-name value`, names made purely of the flag characters
-        // (`q`/`v`) would be swallowed by the leading `-q`/`-v` flags, and
-        // purely numeric names collide with the `! -<parent_id>` flag.
-        self.tracker.retain(|name, _| {
+        self.tracker.retain(|name, setting| {
+            // Drop trackers whose names are unusable: a `:` prefix collides
+            // with the grid-view `:` command, `-`/whitespace can't be
+            // addressed as `-name value`, names made purely of the flag
+            // characters (`q`/`v`) would be swallowed by the leading
+            // `-q`/`-v` flags, and purely numeric names collide with the
+            // `! -<parent_id>` flag.
             if !is_valid_tracker_name(name) {
                 cba::ebog!(
                     "config";
                     "Dropping unusable tracker '{}': names cannot begin with ':', contain '-' or whitespace, be purely numeric, or consist solely of flag characters '{}'",
                     name, FLAG_CHARACTERS
                 );
-                false
-            } else {
-                true
+                return false;
             }
-        });
-        // Validate tracker-level color overrides: only an empty palette is
-        // unusable — single- and two-color palettes are fine, every badge
-        // path degrades to the first/last (or sole) color — so clear it
-        // and warn.
-        for (name, setting) in self.tracker.iter_mut() {
+            // Null trackers store no value; without an interval there is no
+            // slot to mark or display, so drop them.
+            if setting.kind == TrackerKind::Null && setting.interval.is_none() {
+                wbog!(
+                    "config";
+                    "Dropping null Tracker '{}': null trackers require an interval",
+                    name
+                );
+                return false;
+            }
+            // Validate tracker-level color overrides: only an empty palette
+            // is unusable — single- and two-color palettes are fine, every
+            // badge path degrades to the first/last (or sole) color — so
+            // clear it and warn.
             if let Some(ref colors) = setting.colors
                 && colors.is_empty() {
                     wbog!(
@@ -143,7 +150,8 @@ impl Config {
                 );
                 setting.interval = None;
             }
-        }
+            true
+        });
         // tasks.colors drives the completion badge and numeric binning; it
         // needs at least 3 entries to be meaningful, so fall back to the
         // default palette when fewer than three are configured.
@@ -215,6 +223,7 @@ mod tests {
         let zero = TrackerInterval {
             anchor: 0,
             span: jiff::Span::new(),
+            cumulative: false,
         };
         config.tracker.insert(
             "zero".to_string(),
@@ -223,6 +232,7 @@ mod tests {
         let good = TrackerInterval {
             anchor: 0,
             span: jiff::Span::new().days(1),
+            cumulative: false,
         };
         config.tracker.insert(
             "good".to_string(),
@@ -304,7 +314,7 @@ mod tests {
         config.tracker.insert(
             "one_color".to_string(),
             TrackerSetting {
-                kind: TrackerKind::Number,
+                kind: TrackerKind::Integer,
                 colors: Some(ColorBins::from(vec![crossterm::style::Color::DarkRed])),
                 ..Default::default()
             },
@@ -312,7 +322,7 @@ mod tests {
         config.tracker.insert(
             "two_colors".to_string(),
             TrackerSetting {
-                kind: TrackerKind::Number,
+                kind: TrackerKind::Integer,
                 colors: Some(ColorBins::from(vec![
                     crossterm::style::Color::DarkRed,
                     crossterm::style::Color::DarkGreen,
@@ -324,7 +334,7 @@ mod tests {
         config.tracker.insert(
             "good_colors".to_string(),
             TrackerSetting {
-                kind: TrackerKind::Number,
+                kind: TrackerKind::Integer,
                 colors: Some(ColorBins::from(vec![
                     crossterm::style::Color::DarkRed,
                     crossterm::style::Color::DarkYellow,
@@ -385,9 +395,9 @@ mod tests {
         );
         // Non-text trackers are unaffected by the single-color rule.
         config.tracker.insert(
-            "number_multi".to_string(),
+            "integer_multi".to_string(),
             TrackerSetting {
-                kind: TrackerKind::Number,
+                kind: TrackerKind::Integer,
                 colors: Some(ColorBins::from(vec![
                     crossterm::style::Color::DarkRed,
                     crossterm::style::Color::DarkGreen,
@@ -404,7 +414,7 @@ mod tests {
             1
         );
         assert_eq!(
-            config.tracker["number_multi"].colors.as_ref().unwrap().len(),
+            config.tracker["integer_multi"].colors.as_ref().unwrap().len(),
             2
         );
     }
@@ -526,16 +536,17 @@ mod tests {
 
     #[test]
     fn test_tracker_interval_serde() {
-        // The interval deserializes from ["<anchor timestamp>", "<span>"];
-        // anchors are RFC 3339 timestamps with an explicit UTC offset.
+        // The interval deserializes from the table form { anchor = ...,
+        // span = ..., cumulative = ? }; anchors are RFC 3339 timestamps
+        // with an explicit UTC offset.
         let cfg: Config = toml::from_str(
             r#"
             [tracker.sleep]
-            interval = ["2020-01-01T00:00:00Z", "1 day"]
+            interval = { anchor = "2020-01-01T00:00:00Z", span = "1 day" }
             kind = "null"
             "#,
         )
-        .expect("interval array parses");
+        .expect("interval table parses");
         let iv = cfg.tracker["sleep"].interval.expect("interval set");
         assert_eq!(
             iv.anchor,
@@ -547,20 +558,43 @@ mod tests {
         assert_eq!(iv.span.fieldwise(), jiff::Span::new().days(1).fieldwise());
         assert_eq!(cfg.tracker["sleep"].kind, TrackerKind::Null);
 
-        // Old plain-string form is rejected with a clear message.
-        let err =
-            toml::from_str::<Config>("[tracker.sleep]\ninterval = \"1 day\"\nkind = \"float\"\n")
-                .unwrap_err();
+        // The legacy two-element array form binds positionally (anchor,
+        // span) with cumulative defaulting to false.
+        let cfg_arr: Config = toml::from_str(
+            "[tracker.sleep]\ninterval = [\"2020-01-01T00:00:00Z\", \"1 day\"]\nkind = \"null\"\n",
+        )
+        .expect("interval array parses");
+        assert_eq!(cfg_arr.tracker["sleep"].interval.as_ref(), Some(&iv));
+
+        // Non-table, non-array forms (e.g. a plain string) are rejected,
+        // and unknown table keys error.
+        let err = toml::from_str::<Config>(
+            "[tracker.sleep]\ninterval = \"1 day\"\nkind = \"float\"\n",
+        )
+        .unwrap_err();
         assert!(
-            err.to_string().contains("expected a sequence"),
+            err.to_string().contains("invalid type"),
+            "unexpected error: {err}"
+        );
+        let err = toml::from_str::<Config>(
+            "[tracker.sleep]\ninterval = { anchor = \"2020-01-01T00:00:00Z\", span = \"1 day\", bogus = 1 }\nkind = \"null\"\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field `bogus`"),
             "unexpected error: {err}"
         );
 
-        // Anchors without an explicit UTC offset are rejected.
-        assert!(toml::from_str::<Config>(
-            "[tracker.sleep]\ninterval = [\"2020-01-01 00:00\", \"1 day\"]\nkind = \"null\"\n"
+        // Anchors without an explicit UTC offset are rejected (table form,
+        // so the rejection comes from the timestamp parse itself).
+        let err = toml::from_str::<Config>(
+            "[tracker.sleep]\ninterval = { anchor = \"2020-01-01 00:00\", span = \"1 day\" }\nkind = \"null\"\n",
         )
-        .is_err());
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("timestamp"),
+            "expected an anchor-parse error, got: {err}"
+        );
 
         // Serialization roundtrip (anchors serialize back as RFC 3339).
         let serialized = toml::to_string(&cfg).unwrap();
@@ -572,49 +606,139 @@ mod tests {
 
         // A zero span is rejected at parse time.
         assert!(toml::from_str::<Config>(
-            "[tracker.sleep]\ninterval = [\"2020-01-01T00:00:00Z\", \"0 days\"]\n"
+            "[tracker.sleep]\ninterval = { anchor = \"2020-01-01T00:00:00Z\", span = \"0 days\" }\n"
         )
         .is_err());
     }
 
     #[test]
-    fn test_tracker_min_max_number_or_duration() {
-        // min/max accept plain numbers or humantime duration strings
-        // (converted to seconds, 1.0 = 1 s).
+    fn test_init_drops_null_trackers_without_interval() {
+        let mut config = Config::default();
+        config.tracker.insert(
+            "loose_null".to_string(),
+            TrackerSetting::new(TrackerKind::Null),
+        );
+        config.init();
+        assert!(
+            !config.tracker.contains_key("loose_null"),
+            "null trackers without an interval are dropped at init"
+        );
+        // Bundled null trackers (sleep, awake) all have intervals and survive.
+        assert!(config.tracker.contains_key("sleep"));
+    }
+
+    #[test]
+    fn test_tracker_bounds_strict_per_kind() {
+        // Bound forms are strict per kind/mode: float/integer take plain
+        // numbers (integer whole only), duration takes duration strings,
+        // null replace takes duration strings (seconds-from-interval-start
+        // offsets), null cumulative takes plain whole numbers (count
+        // thresholds). Invalid forms are dropped with a warning, not errors.
         let cfg: Config = toml::from_str(
             r#"
             [tracker.sleep]
             kind = "null"
-            min = "20h"
-            max = "4h"
+            interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }
+            low = "20h"
+            high = "4h"
+            [tracker.awake_count]
+            kind = "null"
+            interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day", cumulative = true }
+            low = 0
+            high = 5
             [tracker.rating]
             kind = "float"
-            min = 0
-            max = 9
+            low = 0
+            high = 9
             [tracker.pushups]
-            kind = "number"
-            min = 10
+            kind = "integer"
+            low = 10
             [tracker.mile]
-            kind = "float"
-            min = "4m"
-            max = "10m"
+            kind = "duration"
+            low = "4m"
+            high = "10m"
             "#,
         )
         .expect("trackers parse");
-        assert_eq!(cfg.tracker["sleep"].min, Some(72000.0));
-        assert_eq!(cfg.tracker["sleep"].max, Some(14400.0));
-        assert_eq!(cfg.tracker["rating"].min, Some(0.0));
-        assert_eq!(cfg.tracker["rating"].max, Some(9.0));
-        assert_eq!(cfg.tracker["pushups"].min, Some(10.0));
-        assert_eq!(cfg.tracker["pushups"].max, None);
-        assert_eq!(cfg.tracker["mile"].min, Some(240.0));
-        assert_eq!(cfg.tracker["mile"].max, Some(600.0));
+        assert_eq!(cfg.tracker["sleep"].low, Some(72000.0));
+        assert_eq!(cfg.tracker["sleep"].high, Some(14400.0));
+        assert_eq!(cfg.tracker["awake_count"].low, Some(0.0));
+        assert_eq!(cfg.tracker["awake_count"].high, Some(5.0));
+        assert_eq!(cfg.tracker["rating"].low, Some(0.0));
+        assert_eq!(cfg.tracker["rating"].high, Some(9.0));
+        assert_eq!(cfg.tracker["pushups"].low, Some(10.0));
+        assert_eq!(cfg.tracker["pushups"].high, None);
+        assert_eq!(cfg.tracker["mile"].low, Some(240.0));
+        assert_eq!(cfg.tracker["mile"].high, Some(600.0));
 
-        // A string that is neither a number nor a duration is rejected.
-        assert!(
-            toml::from_str::<Config>("[tracker.sleep]\nkind = \"null\"\nmin = \"bogus\"\n")
-                .is_err()
-        );
+        // Invalid bound forms are dropped with a warning: float "4h",
+        // integer 4.5 / "4h", duration bare 390, null+replace bare number,
+        // null+cumulative "4h".
+        let cfg: Config = toml::from_str(
+            r#"
+            [tracker.floaty]
+            kind = "float"
+            low = "4h"
+            high = 9
+            [tracker.wholey]
+            kind = "integer"
+            low = 4.5
+            high = "4h"
+            [tracker.timed]
+            kind = "duration"
+            low = 390
+            high = "10m"
+            [tracker.mark]
+            kind = "null"
+            interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }
+            low = 20
+            high = "4h"
+            [tracker.counted]
+            kind = "null"
+            interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day", cumulative = true }
+            low = "4h"
+            high = 5
+            "#,
+        )
+        .expect("trackers parse");
+        assert_eq!(cfg.tracker["floaty"].low, None);      // "4h" dropped
+        assert_eq!(cfg.tracker["floaty"].high, Some(9.0)); // plain number kept
+        assert_eq!(cfg.tracker["wholey"].low, None);      // 4.5 not whole
+        assert_eq!(cfg.tracker["wholey"].high, None);     // "4h" dropped
+        assert_eq!(cfg.tracker["timed"].low, None);       // bare 390 dropped
+        assert_eq!(cfg.tracker["timed"].high, Some(600.0));
+        assert_eq!(cfg.tracker["mark"].low, None);        // bare number dropped for null replace
+        assert_eq!(cfg.tracker["mark"].high, Some(14400.0));
+        assert_eq!(cfg.tracker["counted"].low, None);     // "4h" dropped for null cumulative
+        assert_eq!(cfg.tracker["counted"].high, Some(5.0));
+
+        // Text bounds without strict are dropped (message-length thresholds
+        // apply only with strict).
+        let cfg: Config = toml::from_str(
+            r#"
+            [tracker.thought]
+            kind = "text"
+            low = 10
+            high = 80
+            "#,
+        )
+        .expect("trackers parse");
+        assert_eq!(cfg.tracker["thought"].low, None);
+        assert_eq!(cfg.tracker["thought"].high, None);
+
+        // strict on null+cumulative (bounds are counts, not time) is dropped.
+        let cfg: Config = toml::from_str(
+            r#"
+            [tracker.counted]
+            kind = "null"
+            interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day", cumulative = true }
+            low = 0
+            high = 5
+            strict = true
+            "#,
+        )
+        .expect("trackers parse");
+        assert!(!cfg.tracker["counted"].strict);
     }
 
     #[test]

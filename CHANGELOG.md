@@ -1,3 +1,35 @@
+## [Unreleased]
+
+### 💥 Breaking changes (tracker rework)
+
+- `min`/`max` renamed to `low`/`high`; `kind = "number"` renamed to
+  `"integer"`; new `kind = "duration"` (duration-string values stored as
+  seconds, displayed like `6m 30s`).
+- `interval` now takes a table `{ anchor, span, cumulative = false }`
+- Value and bound forms are strict per kind/mode: `float` takes plain
+  numbers, `integer` plain whole numbers, `duration` duration strings only,
+  `null` no value at all; `low`/`high` mirror the value form of the kind
+  (duration strings for `duration` and `null`+replace, whole numbers for
+  `text` and `null`+cumulative). Invalid bound forms are dropped with a
+  warning at config load.
+- New `strict` setting gates logging/updating: numeric kinds gate the value
+  against the inclusive `low`..`high` span (inverted bounds gate the span
+  between them), `text` gates the message length in characters, `null`
+  trackers gate *when* they may be logged (the circular `low`/`high` time
+  offset zone; requires both bounds, replace mode only).
+- `null` trackers require an interval (dropped with a warning otherwise) and
+  store score 0 in every mode — the payload column is unused and today-view
+  rows show no payload (the count lives in the grid, the timestamp in the
+  entry's own time). Negative durations are rejected at log time.
+- Replace-mode insertion is one shared strategy for all kinds: a CLI log in
+  an occupied slot drops the slot's previous rows (including rows logged
+  with a mood — the mood row itself survives) and inserts the new one.
+- The TUI update action on a `null` row only moves its timestamp to now,
+  within its current interval slot (cross-slot moves are rejected, the
+  strict zone still applies); on value-bearing kinds it runs the same strict
+  pipeline as the CLI.
+- `:db doctor` prunes any nonzero row of a `null` tracker (all modes).
+
 ## [0.2.5] - 2026-08-14
 
 ### 🚀 Features

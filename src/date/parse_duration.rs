@@ -15,22 +15,6 @@ pub fn parse_duration_secs(s: &str) -> Result<i64> {
     Ok(dur.as_secs() as i64)
 }
 
-/// Parse a value that may be a plain number or a human-readable duration
-/// (e.g. "6.5", "4m", "20h") to a float.
-///
-/// The string is first tried as an `f64`; if that fails it is parsed as a
-/// humantime duration and converted to seconds (1.0 maps to 1 second).
-/// Shared by tracker `min`/`max` config bounds and CLI `-<tracker>` value
-/// parsing, so both accept the same inputs.
-pub fn parse_num_or_duration(s: &str) -> Result<f64> {
-    if let Ok(f) = s.parse::<f64>() {
-        return Ok(f);
-    }
-    let dur = humantime::parse_duration(s)
-        .with_context(|| format!("Failed to parse number or duration: '{}'", s))?;
-    Ok(dur.as_secs_f64())
-}
-
 /// Parse a calendar-aware interval span (e.g. "1 day", "2 hours",
 /// "1 month", "1 year", "1 week 2 days", "30 minutes", "45s").
 ///
@@ -136,23 +120,6 @@ mod tests {
         assert_eq!(parse_duration_secs("30 minutes").unwrap(), 1800);
         assert_eq!(parse_duration_secs("1d").unwrap(), 86400);
         assert_eq!(parse_duration_secs("2h").unwrap(), 7200);
-    }
-
-    #[test]
-    fn test_parse_num_or_duration() {
-        // Plain numbers win as-is.
-        assert_eq!(parse_num_or_duration("0").unwrap(), 0.0);
-        assert_eq!(parse_num_or_duration("10").unwrap(), 10.0);
-        assert_eq!(parse_num_or_duration("6.5").unwrap(), 6.5);
-        assert_eq!(parse_num_or_duration("-3").unwrap(), -3.0);
-        // Duration strings map to seconds (1.0 = 1 second).
-        assert_eq!(parse_num_or_duration("4m").unwrap(), 240.0);
-        assert_eq!(parse_num_or_duration("20h").unwrap(), 72000.0);
-        assert_eq!(parse_num_or_duration("30 minutes").unwrap(), 1800.0);
-        assert_eq!(parse_num_or_duration("1.5s").unwrap(), 1.5);
-        // A string that is neither is an error.
-        assert!(parse_num_or_duration("").is_err());
-        assert!(parse_num_or_duration("bogus").is_err());
     }
 
     #[test]

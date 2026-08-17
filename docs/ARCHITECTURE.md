@@ -258,11 +258,15 @@ mood/name fields are an error (output is tab-separated).
 `Command` enum; `opts` gates confirmations and verbose output.
 
 - **Entry** — transactional mood (+ tracker) insert. Trackers parse against
-  their declared kind (text/number/float) with clear errors; `text`/`float`
-  interval trackers keep one entry per interval slot (re-logging replaces),
-  `number` and interval-less trackers accumulate; `null` trackers re-log in
-  place or increment. `-<short id>` tokens link the entry to a task. Non-empty
-  moods are embedded and saliency-scored **before** the transaction opens.
+  their declared kind (text/integer/float/duration/null) with clear errors;
+  every kind takes a strict value form (plain number, whole number, duration
+  string, verbatim, none) and `strict = true` gates the raw value against
+  `low`/`high` before the insert (null trackers gate the entry time against
+  the circular offset zone). Replace mode (`interval` + `cumulative: false`)
+  is one shared insertion strategy for all kinds: the slot's previous rows
+  are dropped, then the new row is inserted. `-<short id>` tokens link the
+  entry to a task. Non-empty moods are embedded and saliency-scored
+  **before** the transaction opens.
 - **Task** — oneshot `! <name> [@<time>] [.. [body]]` validates name/date and
   resolves the body (`.. text` as-is, bare `..` opens the editor, none = no
   body). Bare `!`, `! @` (recurring) and incomplete `! @<time>` (scheduled)
@@ -348,8 +352,10 @@ On the selected item: task/mood bodies and text-tracker payloads open the
 external editor (`editor::open_editor_on_text`) via matchmaker's
 `Interrupt::Execute` — the render loop pauses the event loop, exits the
 alternate screen and raw mode, runs the interrupt handler (which blocks on
-`$EDITOR`), then restores the TUI; `number`/`float` trackers use an in-TUI
-input overlay validated against the tracker kind.
+`$EDITOR`), then restores the TUI; `integer`/`float`/`duration` trackers
+use an in-TUI input overlay validated with the same per-kind parser and
+strict gate as the CLI; null tracker rows move their timestamp to now
+(`update_tracker_time`) — nothing else.
 
 ### Item Linking (`Action::Link`, today view only, `Ctrl+L`)
 

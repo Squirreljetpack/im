@@ -94,20 +94,40 @@ impl Default for ColorBins {
 
 /// Payload type for a tracker entry.
 ///
-/// `Text` stores a string (e.g. `-accomplishment "fixed 2 bugs"`), `Number` an
-/// integer, `Float` a decimal. min/max apply to `Number` and `Float`; they are
-/// ignored for `Text`. `Null` stores no value — the entry is a timestamp
-/// marker (e.g. "sleep start"): with an interval, min/max are time-of-day
-/// offsets for coloring; without an interval it is unsupported.
+/// `Text` stores a string (e.g. `-accomplishment "fixed 2 bugs"`), `Integer` a
+/// whole number, `Float` a decimal, `Duration` a duration string stored as
+/// seconds. `low`/`high` bound the value's display color and the `strict`
+/// gate: plain numbers for `Integer`/`Float`, duration strings for `Duration`
+/// (seconds), whole numbers for `Text` when `strict` is set (message-length
+/// thresholds in characters; bounds without `strict` are dropped at load).
+/// `Null` stores no value — the entry is a timestamp marker (e.g. "sleep
+/// start") and requires an interval (dropped at load otherwise); with one,
+/// `low`/`high` are plain-number count thresholds in cumulative mode and
+/// seconds-from-interval-start time offsets in replace mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum TrackerKind {
     #[default]
     #[serde(rename = "text")]
     Text,
-    #[serde(rename = "number")]
-    Number,
+    #[serde(rename = "integer")]
+    Integer,
     #[serde(rename = "float")]
     Float,
+    #[serde(rename = "duration")]
+    Duration,
     #[serde(rename = "null")]
     Null,
+}
+
+impl TrackerKind {
+    /// The config/CLI name of this kind (lowercase).
+    pub fn name(self) -> &'static str {
+        match self {
+            TrackerKind::Text => "text",
+            TrackerKind::Integer => "integer",
+            TrackerKind::Float => "float",
+            TrackerKind::Duration => "duration",
+            TrackerKind::Null => "null",
+        }
+    }
 }

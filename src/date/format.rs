@@ -8,6 +8,15 @@ pub fn format_duration(secs: i64) -> String {
     humantime::format_duration(std::time::Duration::from_secs(secs as u64)).to_string()
 }
 
+/// Format a tracker's stored duration value (seconds as f64) for display:
+/// rounds fractional seconds (`6.5` → `"7s"`, `390` → `"6m 30s"`) and
+/// clamps negatives to `"0s"` defensively (legacy/manual rows). Duration
+/// tracker rows can never store a negative value through the normal write
+/// paths; the clamp only guards hand-edited data.
+pub(crate) fn format_tracker_duration(secs: f64) -> String {
+    format_duration(secs.round().max(0.0) as i64)
+}
+
 /// Format an epoch timestamp as `HH:MM`.
 pub fn format_time(ts: Epoch) -> String {
     crate::date::zoned_from_unix_secs(ts)
@@ -79,6 +88,15 @@ pub fn format_day_time(ts: Epoch) -> String {
 mod tests {
     use super::*;
     use crate::date::parse;
+
+    #[test]
+    fn test_format_tracker_duration() {
+        assert_eq!(format_tracker_duration(390.0), "6m 30s");
+        assert_eq!(format_tracker_duration(6.5), "7s"); // fractional seconds round
+        assert_eq!(format_tracker_duration(0.0), "0s");
+        assert_eq!(format_tracker_duration(-5.0), "0s"); // defensive clamp
+        assert_eq!(format_tracker_duration(1.0), "1s");
+    }
 
     #[test]
     fn test_format_duration_roundtrip() {

@@ -144,12 +144,33 @@ npm install -g @squirreljetpack/im
 
 ## Configuration
 
-Run `im :config` to open the configuration file in your `$VISUAL` or `$EDITOR`.
+Run `im :config` to open the configuration file in your `$EDITOR` or `$VISUAL`.
 
 The default locations are in order:
 
 - `~/.config/matchmaker/config.toml` (If the folder exists already).
 - `{PLATFORM_SPECIFIC_CONFIG_DIRECTORY}/matchmaker` (Generally the same as above when on linux)
+
+## Trackers
+
+Trackers are defined in your configuration (`im :config`); each `[tracker.<name>]`
+section is logged as `-<name> <value>` (no value for `null` trackers):
+
+- Kinds: `text` (value stored verbatim), `integer` (whole numbers), `float`
+  (plain numbers), `duration` (duration strings like `6m 30s`, stored and
+  displayed as time), `null` (valueless timestamp/count markers — requires an
+  interval).
+- Value forms are strict per kind: `-rating 4h` on a `float` tracker, `-mile
+  390` on a `duration` tracker, and any value on a `null` tracker are errors.
+- `interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }` (or
+  the legacy `["2026-01-01T00:00:00-04:00", "1 day"]` array form) bins
+  entries into calendar slots. By default (replace) a new log in a slot
+  replaces the slot's previous entry; `cumulative = true` keeps every log and
+  the slot's grid dot shows the sum (or count, for `null`).
+- `low`/`high` pick the grid dot color (see the inline docs in the default
+  config). With `strict = true` they also gate logging: values (numeric
+  kinds), message length in characters (`text`), or — for `null` trackers —
+  the time of day must fall inside the configured range.
 
 ## Advanced
 
@@ -180,7 +201,7 @@ section is logged as `-<name> <value>` (no value for `null` trackers):
 
 ### What does im stand for?
 
-What it stands for is immaterial.[^2]
+What it stands for is immaterial[^2].
 
 ### How can I contribute?
 Open to suggestions. Helping implement more filters, or a sensible configurable spec for exporting to markdown would be helpful. Documentation, always.

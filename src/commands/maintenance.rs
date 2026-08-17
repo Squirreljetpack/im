@@ -184,8 +184,9 @@ pub(super) struct TrackerPrunePlan {
 fn kind_label(kind: TrackerKind) -> &'static str {
     match kind {
         TrackerKind::Text => "text",
-        TrackerKind::Number => "number",
+        TrackerKind::Integer => "integer",
         TrackerKind::Float => "float",
+        TrackerKind::Duration => "duration",
         TrackerKind::Null => "null",
     }
 }
@@ -197,8 +198,8 @@ fn kind_label(kind: TrackerKind) -> &'static str {
 /// `create_entry` and `update_tracker_score`), so an entry whose
 /// `typeof(score)` differs no longer matches the tracker's current kind,
 /// e.g. after the tracker's `kind` changed in the config. A `null` tracker
-/// with both min and max set is a time-marker: it always writes score 0, so
-/// nonzero rows are stale count-mode leftovers and are pruned too. Types
+/// always writes score 0 (replace markers and cumulative count rows alike),
+/// so any nonzero null row is a stale leftover and is pruned too. Types
 /// with no `[tracker.<type>]` section (renamed/removed trackers) are
 /// orphans: everything is pruned (the today view hard-errors on such rows).
 fn plan_tracker_prunes(
@@ -232,12 +233,16 @@ fn plan_tracker_prunes(
 
         let keep = match setting.kind {
             TrackerKind::Text => "text",
-            TrackerKind::Number => "integer",
+            TrackerKind::Integer => "integer",
             TrackerKind::Float => "real",
+            TrackerKind::Duration => "real",
             TrackerKind::Null => "integer",
         };
-        let marker_mode =
-            setting.kind == TrackerKind::Null && setting.min.is_some() && setting.max.is_some();
+        // Null rows store score 0 by construction (replace inserts write 0,
+        // the TUI timestamp update never touches score, cumulative inserts
+        // 0), so any nonzero row is a stale leftover (incl. pre-rework
+        // count rows) — prune it regardless of the interval mode.
+        let marker_mode = setting.kind == TrackerKind::Null;
 
         let mut per_storage = Vec::new();
         let mut total = 0i64;
@@ -267,7 +272,7 @@ fn plan_tracker_prunes(
         }
 
         let reason = if marker_mode {
-            "kind null, time-marker mode (min+max set)".to_string()
+            "kind null (null rows store score 0)".to_string()
         } else {
             format!("kind {}", kind_label(setting.kind))
         };
@@ -429,8 +434,8 @@ mod tests {
 
     #[test]
     fn plan_prunes_storage_mismatches_per_kind() {
-        // sleep is float (real kept, text pruned); runs is number (integer
-        // kept, real pruned). BTreeMap orders lines by type name.
+        // sleep is float (real kept, text pruned); runs is integer
+        // (integer kept, real pruned). BTreeMap orders lines by type name.
         let rows = vec![
             row("runs", "integer", 3, 0),
             row("runs", "real", 2, 0),
@@ -439,7 +444,7 @@ mod tests {
         ];
         let trackers = make_trackers(&[
             ("sleep", TrackerSetting::new(TrackerKind::Float)),
-            ("runs", TrackerSetting::new(TrackerKind::Number)),
+            ("runs", TrackerSetting::new(TrackerKind::Integer)),
         ]);
         let plan = plan_tracker_prunes(&rows, &trackers);
         assert_eq!(
@@ -447,7 +452,7 @@ mod tests {
             vec![
                 TrackerPruneLine {
                     tracker_type: "runs".to_string(),
-                    reason: "kind number".to_string(),
+                    reason: "kind integer".to_string(),
                     per_storage: vec![("real".to_string(), 2)],
                     total: 2,
                 },
@@ -496,8 +501,9 @@ mod tests {
 
     #[test]
     fn plan_null_tracker_modes() {
-        // Count mode (no bounds): nonzero integers are the count and are
-        // kept; text entries are pruned.
+        // No bounds: null rows carry score 0 in every mode, so nonzero
+        // integers (pre-rework count rows) are stale leftovers; text
+        // entries are pruned.
         let rows = vec![row("pills", "integer", 3, 3), row("pills", "text", 1, 0)];
         let trackers = make_trackers(&[("pills", TrackerSetting::new(TrackerKind::Null))]);
         let plan = plan_tracker_prunes(&rows, &trackers);
@@ -505,20 +511,28 @@ mod tests {
             plan.lines,
             vec![TrackerPruneLine {
                 tracker_type: "pills".to_string(),
-                reason: "kind null".to_string(),
-                per_storage: vec![("text".to_string(), 1)],
-                total: 1,
+                reason: "kind null (null rows store score 0)".to_string(),
+                per_storage: vec![
+                    ("integer ≠ 0".to_string(), 3),
+                    ("text".to_string(), 1),
+                ],
+                total: 4,
             }]
         );
         assert_eq!(
             plan.rules,
-            vec![TrackerPruneRule::Storage {
-                tracker_type: "pills".to_string(),
-                keep: "integer",
-            }]
+            vec![
+                TrackerPruneRule::Storage {
+                    tracker_type: "pills".to_string(),
+                    keep: "integer",
+                },
+                TrackerPruneRule::NonzeroScore {
+                    tracker_type: "pills".to_string(),
+                },
+            ]
         );
 
-        // Time-marker mode (both bounds): nonzero integers are stale count
+        // Same rule with both bounds: the interval mode does not matter.
         // leftovers and are pruned too.
         let rows = vec![
             row("sleep", "integer", 5, 3),
@@ -528,15 +542,15 @@ mod tests {
         let trackers = make_trackers(&[(
             "sleep",
             TrackerSetting::new(TrackerKind::Null)
-                .with_min(82800.0)
-                .with_max(7200.0),
+                .with_low(82800.0)
+                .with_high(7200.0),
         )]);
         let plan = plan_tracker_prunes(&rows, &trackers);
         assert_eq!(
             plan.lines,
             vec![TrackerPruneLine {
                 tracker_type: "sleep".to_string(),
-                reason: "kind null, time-marker mode (min+max set)".to_string(),
+                reason: "kind null (null rows store score 0)".to_string(),
                 per_storage: vec![
                     ("integer ≠ 0".to_string(), 3),
                     ("real".to_string(), 1),
@@ -595,9 +609,9 @@ mod tests {
 
     #[test]
     fn plan_skips_clean_trackers_and_empty_input() {
-        // sleep float with only real entries and pills null count-mode with
-        // only integer entries (nonzero is the count — fine).
-        let rows = vec![row("sleep", "real", 2, 0), row("pills", "integer", 3, 3)];
+        // sleep float with only real entries and pills null with only
+        // zero-score integer entries (null rows store score 0 — clean).
+        let rows = vec![row("sleep", "real", 2, 0), row("pills", "integer", 3, 0)];
         let trackers = make_trackers(&[
             ("sleep", TrackerSetting::new(TrackerKind::Float)),
             ("pills", TrackerSetting::new(TrackerKind::Null)),

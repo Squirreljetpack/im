@@ -56,48 +56,50 @@ persist_pending_seconds = 300
 
 [tracker]
 # populatable as: [tracker.<name>]
-# interval = ["2020-01-01T00:00:00-04:00", "1 day"]   # anchor datetime + calendar span
-# kind = "float"      # text | number | float | null
-# min = 0
-# max = 10
+# interval = { anchor = "2020-01-01T00:00:00-04:00", span = "1 day" }  # anchor datetime + calendar span
+#   cumulative = true  # keep every log per period (default false = replace)
+# kind = "float"      # text | integer | float | duration | null
+# low = 0
+# high = 10
+# strict = true       # gate logging outside [low, high] (see config.toml docs)
 
 [tracker.sleep]
-interval = ["2020-01-01T00:00:00-04:00", "1 day"]
+interval = { anchor = "2020-01-01T00:00:00-04:00", span = "1 day" }
 kind = "float"
-min = 0
-max = 10
+low = 0
+high = 10
 
 [tracker.run_times]
-interval = ["2020-01-01T00:00:00-04:00", "1 week"]
+interval = { anchor = "2020-01-01T00:00:00-04:00", span = "1 week" }
 kind = "float"
-min = 100
-max = 0
+low = 100
+high = 0
 
-# Interval trackers without min/max — binning falls back to last color
+# Interval trackers without low/high — binning falls back to the middle color
 [tracker.water]
-interval = ["2020-01-01T00:00:00-04:00", "1 day"]
+interval = { anchor = "2020-01-01T00:00:00-04:00", span = "1 day" }
 kind = "float"
 
 # Interval text tracker — entries stored as strings, no numeric binning
 [tracker.notes]
-interval = ["2020-01-01T00:00:00-04:00", "1 week"]
+interval = { anchor = "2020-01-01T00:00:00-04:00", span = "1 week" }
 kind = "text"
 
-# Non-interval number tracker with only min (no max — bins from min upward).
+# Non-interval integer tracker with only low (no high — bins from low upward).
 [tracker.steps]
-kind = "number"
-min = 0
+kind = "integer"
+low = 0
 
 [tracker.mood_notes]
 kind = "text"
 
-# Tracker with values spanning below min, in range, and above max
+# Tracker with values spanning below low, in range, and above high
 # to exercise the full color binning palette.
 [tracker.temperature]
-interval = ["2020-01-01T00:00:00-04:00", "1 day"]
-kind = "number"
-min = 10
-max = 30
+interval = { anchor = "2020-01-01T00:00:00-04:00", span = "1 day" }
+kind = "integer"
+low = 10
+high = 30
 [editor]
 # Body-editor templates per entry kind (arrays): a bare `.` opens the
 # editor seeded with the first template, `..` with the second, and so on;

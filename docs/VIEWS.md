@@ -47,10 +47,6 @@ expiry is not used there). Availability-window checks must first exclude
 | `im @due:w` | Week view, `ViewVariant::B`, `TodayHorizon::Week` |
 | `im @<date>` | Anchored TodayView, `ViewVariant::All`, `TodayHorizon::Today` |
 
-The variant suffix is `o` (A) or `O` (B) — there is no `a` suffix, so
-`@:a` / `@done:a` are invalid. Starting in `ViewVariant::A` is only possible
-via the `:o` suffix.
-
 ## View matrix
 
 ### `@` — Pending view
@@ -74,7 +70,7 @@ auto-completed and completed `S` are excluded.
 | `A` | `done(O)` only |
 | `B` | (ALL `R`) + `S` `has_entry` or `auto_completed` |
 
-`@done:b` shows more scheduled tasks than `All` — it adds auto-completed `S`
+`@done:o` shows more scheduled tasks than `All` — it adds auto-completed `S`
 and every recurring task (never-completed rows included).
 Order: done time, newest first — the last completion entry; entry-less
 rows fall back per kind: auto-completed `S` to
@@ -152,7 +148,7 @@ shared.
 
 - **Task lists** (`format_tasks_simple`): `id \t interval \t next_available \t pri \t name \t status`. `id` is the user-facing short id — empty for completed oneshot tasks (their short id was cleared). `interval`/`next_available` are single spaces for oneshot tasks; `next_available` is the next interval-window start for recurring tasks. `status` is the completion badge (see ARCHITECTURE §8).
 - **Today view** (`format_today_simple`): `ts \t marker \t label \t detail` rows from moods, tracker entries, and tasks. Markers: `●` mood (Oklab projection), `◆` tracker, `○`/`✓` oneshot, `↻`/`✓` recurring, `✓`/`◷` scheduled; the mood and tracker glyphs are configurable via `[badges] mood` / `[badges] tracker`, and journal entries (empty mood) use `[badges] journal_badge` (glyph and/or color; color defaults to `Reset`) when set. Empty day → `Nothing logged today.`
-- **Tracker grids** (`write_tracker_grid`, `: [week|month|year] [ids]`): per-day/per-interval dot sequences — mood dots colored by the Oklab projection, tracker dots binned by score vs `min`/`max`, recurring-task dots from the per-interval completion sum via the completion badge.
+- **Tracker grids** (`write_tracker_grid`, `: [week|month|year] [ids]`): per-day/per-interval dot sequences — mood dots colored by the Oklab projection, tracker dots binned by score vs `low`/`high` (cumulative slots bin the per-slot sum; null replace markers bin the circular `[low, high]` time-offset zone, cumulative null markers bin the per-slot count), recurring-task dots from the per-interval completion sum via the completion badge.
 
 ## Appendix: formal definitions
 

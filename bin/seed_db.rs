@@ -607,8 +607,8 @@ fn tracker_value(config: &Config, name: &str, raw: &str) -> Result<TrackerValue>
         .with_context(|| format!("Unknown tracker type '{name}' not found in config"))?;
     Ok(match tracker.kind {
         TrackerKind::Text => TrackerValue::Text(raw.to_string()),
-        TrackerKind::Number => {
-            TrackerValue::Number(raw.parse().with_context(|| {
+        TrackerKind::Integer => {
+            TrackerValue::Integer(raw.parse().with_context(|| {
                 format!("Cannot parse '{raw}' as an integer for tracker '{name}'")
             })?)
         }
@@ -616,6 +616,13 @@ fn tracker_value(config: &Config, name: &str, raw: &str) -> Result<TrackerValue>
             TrackerValue::Float(raw.parse().with_context(|| {
                 format!("Cannot parse '{raw}' as a number for tracker '{name}'")
             })?)
+        }
+        // Duration values are duration strings stored as seconds.
+        TrackerKind::Duration => {
+            let secs = humantime::parse_duration(raw).with_context(|| {
+                format!("Cannot parse '{raw}' as a duration for tracker '{name}'")
+            })?;
+            TrackerValue::Float(secs.as_secs_f64())
         }
         // Null trackers don't take values; the seed script never seeds them.
         TrackerKind::Null => anyhow::bail!("Null tracker '{name}' cannot be seeded with a value"),
@@ -629,7 +636,7 @@ fn replace_slot(config: &Config, name: &str, time: i64) -> Option<(i64, i64)> {
     config
         .tracker
         .get(name)
-        .filter(|t| matches!(t.kind, TrackerKind::Text | TrackerKind::Float))
+        .filter(|t| t.interval.is_some_and(|iv| !iv.cumulative))
         .and_then(|t| t.interval)
         .and_then(|iv| crate::date::interval_slot_unix_secs(iv.anchor, iv.span, time))
 }
@@ -651,7 +658,6 @@ async fn seed_entry(
                 tracker_type: name.to_string(),
                 value: tracker_value(config, name, raw)?,
                 replace_slot: replace_slot(config, name, time),
-                null_upsert: None,
             })
         })
         .collect::<Result<Vec<_>>>()?;

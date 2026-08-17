@@ -6,7 +6,6 @@ use super::models::{
     TrackerScoreKindRow, TrackerValue,
 };
 use super::views::attach_full_completions;
-use crate::config::TrackerKind;
 
 /// Insert a mood entry and its linked tracker values in one transaction.
 /// For Text/Float interval trackers, `replace_slot` deletes the previous
@@ -49,80 +48,6 @@ pub async fn create_entry(pool: &SqlitePool, entry: &EntryObject) -> Result<Opti
     };
 
     for tracker in &entry.trackers {
-        // Null trackers: update the slot's existing entry in place (time
-        // moves to the new entry's; the score is incremented in count mode
-        // and left unchanged when both min/max are set), or insert when the
-        // slot is empty.
-        if let Some(nu) = &tracker.null_upsert {
-            let (slot_start, slot_end) = nu.slot;
-            let existing: Option<i64> = sqlx::query(
-                "SELECT id FROM tracker \
-                 WHERE type = ? AND time >= ? AND time < ? ORDER BY time DESC LIMIT 1",
-            )
-            .bind(&tracker.tracker_type)
-            .bind(slot_start)
-            .bind(slot_end)
-            .fetch_optional(&mut *tx)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to find existing entry for tracker '{}' in slot {}..{}",
-                    tracker.tracker_type, slot_start, slot_end
-                )
-            })?
-            .map(|r| r.get("id"));
-            match existing {
-                Some(id) => {
-                    if nu.increment {
-                        // Count mode: score + 1, time moves to now.
-                        sqlx::query("UPDATE tracker SET score = score + 1, time = ? WHERE id = ?")
-                            .bind(entry.time)
-                            .bind(id)
-                            .execute(&mut *tx)
-                            .await
-                            .with_context(|| {
-                                format!(
-                                    "Failed to increment tracker '{}' entry {}",
-                                    tracker.tracker_type, id
-                                )
-                            })?;
-                    } else {
-                        // Time-marker mode: just move the entry to now.
-                        sqlx::query("UPDATE tracker SET time = ? WHERE id = ?")
-                            .bind(entry.time)
-                            .bind(id)
-                            .execute(&mut *tx)
-                            .await
-                            .with_context(|| {
-                                format!(
-                                    "Failed to update tracker '{}' entry {}",
-                                    tracker.tracker_type, id
-                                )
-                            })?;
-                    }
-                }
-                None => {
-                    let mut q = sqlx::query(
-                        "INSERT INTO tracker (type, score, time, mood) VALUES (?, ?, ?, ?)",
-                    )
-                    .bind(&tracker.tracker_type);
-                    q = match &tracker.value {
-                        TrackerValue::Text(s) => q.bind(s),
-                        TrackerValue::Number(n) => q.bind(n),
-                        TrackerValue::Float(f) => q.bind(f),
-                    };
-                    q.bind(entry.time)
-                        .bind(mood_id)
-                        .execute(&mut *tx)
-                        .await
-                        .with_context(|| {
-                            format!("Failed to insert tracker '{}'", tracker.tracker_type)
-                        })?;
-                }
-            }
-            continue;
-        }
-
         if let Some((slot_start, slot_end)) = tracker.replace_slot {
             sqlx::query("DELETE FROM tracker WHERE type = ? AND time >= ? AND time < ?")
                 .bind(&tracker.tracker_type)
@@ -143,7 +68,7 @@ pub async fn create_entry(pool: &SqlitePool, entry: &EntryObject) -> Result<Opti
                 .bind(&tracker.tracker_type);
         q = match &tracker.value {
             TrackerValue::Text(s) => q.bind(s),
-            TrackerValue::Number(n) => q.bind(n),
+            TrackerValue::Integer(n) => q.bind(n),
             TrackerValue::Float(f) => q.bind(f),
         };
         q.bind(entry.time)
@@ -609,9 +534,9 @@ pub async fn delete_tracker_entry(pool: &SqlitePool, id: i64) -> Result<u64> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrackerPruneRule {
     /// Keep only entries whose SQLite storage class equals `keep`; delete
-    /// the rest. `keep` is `text` for kind text, `integer` for number/null,
-    /// `real` for float — the storage class every writer binds for that
-    /// kind (`create_entry`, `update_tracker_score`).
+    /// the rest. `keep` is `text` for kind text, `integer` for
+    /// integer/null, `real` for float/duration — the storage class every
+    /// writer binds for that kind (`create_entry`, `update_tracker_score`).
     Storage {
         tracker_type: String,
         keep: &'static str,
@@ -705,21 +630,21 @@ pub async fn update_mood_body(pool: &SqlitePool, id: i64, body: &str) -> Result<
     Ok(res.rows_affected())
 }
 
-/// Update a tracker entry's score, binding the value per its configured
-/// kind (Text → string, Number → i64, Float → f64). Returns affected rows.
+/// Update one tracker entry's score in place. `value` must already be
+/// validated for the tracker's kind (callers run the strict pipeline —
+/// [`crate::tracker::parse_tracker_value`] then
+/// [`crate::tracker::enforce_strict`]), so the value variant alone decides
+/// the bound storage class. Returns affected rows.
 pub async fn update_tracker_score(
     pool: &SqlitePool,
     id: i64,
-    kind: TrackerKind,
-    value: &str,
+    value: &TrackerValue,
 ) -> Result<u64> {
     let mut q = sqlx::query("UPDATE tracker SET score = ? WHERE id = ?");
-    q = match kind {
-        TrackerKind::Text => q.bind(value),
-        TrackerKind::Number => q.bind(value.parse::<i64>().unwrap_or(0)),
-        TrackerKind::Float => q.bind(value.parse::<f64>().unwrap_or(0.0)),
-        // Null trackers never go through the edit modal.
-        TrackerKind::Null => q.bind(0),
+    q = match value {
+        TrackerValue::Text(s) => q.bind(s.as_str()),
+        TrackerValue::Integer(n) => q.bind(*n),
+        TrackerValue::Float(f) => q.bind(*f),
     };
     let res = q
         .bind(id)
@@ -729,26 +654,31 @@ pub async fn update_tracker_score(
     Ok(res.rows_affected())
 }
 
-/// Re-log a null tracker entry in place: move its time to `now`; in count
-/// mode (either `min`/`max` bound missing) also increment the score by 1 —
-/// mirroring the CLI's null-tracker upsert. Returns affected rows.
-pub async fn relog_null_tracker(
+/// The current timestamp of a tracker entry (for the TUI update action's
+/// cross-slot check).
+pub async fn fetch_tracker_time(pool: &SqlitePool, id: i64) -> Result<Option<i64>> {
+    sqlx::query_scalar("SELECT time FROM tracker WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to fetch tracker entry time")
+}
+
+/// Move a tracker entry's timestamp to `time`. Used by the TUI update
+/// action on null tracker rows: timestamp only — no score change, no
+/// deletes. The caller checks that the move stays within the row's current
+/// interval slot. Returns affected rows.
+pub async fn update_tracker_time(
     pool: &SqlitePool,
     id: i64,
-    now: i64,
-    increment: bool,
+    time: i64,
 ) -> Result<u64> {
-    let sql = if increment {
-        "UPDATE tracker SET time = ?, score = score + 1 WHERE id = ?"
-    } else {
-        "UPDATE tracker SET time = ? WHERE id = ?"
-    };
-    let res = sqlx::query(sql)
-        .bind(now)
+    let res = sqlx::query("UPDATE tracker SET time = ? WHERE id = ?")
+        .bind(time)
         .bind(id)
         .execute(pool)
         .await
-        .context("Failed to re-log null tracker entry")?;
+        .context("Failed to update tracker entry time")?;
     Ok(res.rows_affected())
 }
 
@@ -859,9 +789,8 @@ mod tests {
                     score: None,
                     trackers: vec![TrackerObject {
                         tracker_type: "sleep".to_string(),
-                        value: TrackerValue::Number(7),
+                        value: TrackerValue::Integer(7),
                         replace_slot: None,
-                        null_upsert: None,
                     }],
                 },
             )

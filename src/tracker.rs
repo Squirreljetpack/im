@@ -6,7 +6,7 @@ use std::io::Write;
 use crate::global;
 use crate::badge::completion_badge;
 use crate::cli::{CliOpts, TrackerItem, TrackerPeriod};
-use crate::config::{Config, TrackerKind};
+use crate::config::{Config, TrackerKind, TrackerSetting};
 use crate::date;
 use crate::db::TrackerValue;
 
@@ -19,12 +19,11 @@ pub(crate) fn score_f64(s: &str) -> f64 {
 }
 
 /// Interpret a raw tracker value according to its configured kind, shared
-/// by the CLI entry path and the today view's Update modal. Values are
-/// parsed number-first, then as a humantime duration (e.g. `6.5`, `1h`,
-/// `45s` — see [`crate::date::parse_num_or_duration`], the same parser
-/// `min`/`max` config bounds use); `number` trackers additionally require
-/// the parsed value to be a whole number. Text accepts the value as-is
-/// (min/max ignored). Null trackers never reach this parser.
+/// by the CLI entry path and the today view's Update modal. The value form
+/// is strict per kind: `float` takes a plain number, `integer` a plain
+/// whole number, `duration` a duration string only (stored as `Float`
+/// seconds), `text` the token verbatim. Null trackers never reach this
+/// parser. Kind-based gating happens here — never in the CLI parser.
 pub(crate) fn parse_tracker_value(
     tracker_type: &str,
     kind: TrackerKind,
@@ -32,35 +31,117 @@ pub(crate) fn parse_tracker_value(
 ) -> Result<TrackerValue> {
     match kind {
         TrackerKind::Text => Ok(TrackerValue::Text(raw.to_string())),
-        TrackerKind::Number => {
-            let f = crate::date::parse_num_or_duration(raw).map_err(|_| {
+        TrackerKind::Integer => {
+            // A plain whole number: parse directly as i64. Going through an
+            // intermediate float would accept scientific notation ("1e3")
+            // and lose precision beyond 2^53.
+            let n = raw.parse::<i64>().map_err(|_| {
                 anyhow::anyhow!(
-                    "Cannot parse '{}' as an integer for tracker '{}'",
+                    "Cannot parse '{}' for tracker '{}' (kind=integer): expected a plain whole number",
                     raw,
                     tracker_type
                 )
             })?;
-            if f.fract() != 0.0 || !(i64::MIN as f64..=i64::MAX as f64).contains(&f) {
-                anyhow::bail!(
-                    "Value '{}' for tracker '{}' is not a whole number (kind = number)",
-                    raw,
-                    tracker_type
-                );
-            }
-            Ok(TrackerValue::Number(f as i64))
+            Ok(TrackerValue::Integer(n))
         }
         TrackerKind::Float => {
-            let f = crate::date::parse_num_or_duration(raw).map_err(|_| {
+            let f = raw.parse::<f64>().map_err(|_| {
                 anyhow::anyhow!(
-                    "Cannot parse '{}' as a number for tracker '{}'",
+                    "Cannot parse '{}' for tracker '{}' (kind=float): expected a plain number",
                     raw,
                     tracker_type
                 )
             })?;
             Ok(TrackerValue::Float(f))
         }
+        TrackerKind::Duration => {
+            let f = humantime::parse_duration(raw)
+                .map(|d| d.as_secs_f64())
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "Cannot parse '{}' for tracker '{}' (kind=duration): expected a duration like '6m 30s'",
+                        raw,
+                        tracker_type
+                    )
+                })?;
+            Ok(TrackerValue::Float(f))
+        }
         TrackerKind::Null => unreachable!("null trackers are handled by the caller"),
     }
+}
+
+/// The length of a text tracker's message in characters (the measure the
+/// `strict` gate uses for text trackers).
+pub(crate) fn text_len_chars(s: &str) -> usize {
+    s.chars().count()
+}
+
+/// Strict gate for numeric kinds and text: reject when the measure falls
+/// outside the inclusive span between the bounds, regardless of their
+/// order (`min(high, low) <= v <= max(high, low)`). A single bound gates on
+/// that bound alone; no bounds → nothing to check. Boundary comparisons are
+/// exact f64 with no epsilon; boundary values are accepted. The gate
+/// checks the raw logged measure only — display-time aggregates (grid slot
+/// sums) are never gated.
+pub(crate) fn enforce_strict(
+    tracker_name: &str,
+    tracker: &TrackerSetting,
+    measure: f64,
+) -> Result<(), String> {
+    match (tracker.low, tracker.high) {
+        (Some(low), Some(high)) => {
+            let (lo, hi) = (low.min(high), low.max(high));
+            if measure < lo || measure > hi {
+                return Err(format!(
+                    "tracker '{}': value {} outside [{}, {}]",
+                    tracker_name, measure, lo, hi
+                ));
+            }
+        }
+        (Some(low), None) => {
+            if measure < low {
+                return Err(format!(
+                    "tracker '{}': value {} outside [{}]",
+                    tracker_name, measure, low
+                ));
+            }
+        }
+        (None, Some(high)) => {
+            if measure > high {
+                return Err(format!(
+                    "tracker '{}': value {} outside [{}]",
+                    tracker_name, measure, high
+                ));
+            }
+        }
+        (None, None) => {}
+    }
+    Ok(())
+}
+
+/// Circular membership test for the null strict gate: `time` is inside the
+/// tracker's `[low, high]` seconds-from-interval-start zone (both bounds
+/// are required — load rules drop the gate otherwise; the zone wraps when
+/// `high < low`). Uses the same geometry as the marker dot coloring.
+pub(crate) fn null_zone_contains(tracker: &TrackerSetting, time: i64) -> bool {
+    let (Some(low), Some(high)) = (tracker.low, tracker.high) else {
+        return false;
+    };
+    let Some(interval) = tracker.interval else {
+        return false;
+    };
+    let Some((slot_start, slot_end)) =
+        crate::date::interval_slot_unix_secs(interval.anchor, interval.span, time)
+    else {
+        return false;
+    };
+    let len = (slot_end - slot_start) as f64;
+    if len <= 0.0 {
+        return false;
+    }
+    let pos = (time - slot_start) as f64;
+    let dist = (pos - low).rem_euclid(len);
+    dist <= (high - low).rem_euclid(len)
 }
 
 /// Effective endpoints for dot binning (grid semantics). Configured
@@ -68,30 +149,30 @@ pub(crate) fn parse_tracker_value(
 /// With a single bound configured, that bound becomes the bad-end threshold
 /// and the best observed score anchors the success end:
 /// - neither configured → `(data_min, data_max)` — linear binning against the observed range;
-/// - only `max` configured → `(cfg_max, data_min.min(cfg_max))` — inverted range: scores at/above `cfg_max` hit the first color, the best observed score anchors the last; collapses onto `cfg_max` when all data is at/above it;
-/// - only `min` configured → `(cfg_min, data_max.max(cfg_min))` — normal range: scores at/below `cfg_min` hit the first color, the best observed score anchors the last; collapses onto `cfg_min` when all data is at/below it;
-/// - both configured → used as-is `(cfg_min, cfg_max)`.
+/// - only `high` configured → `(cfg_high, data_min.min(cfg_high))` — inverted range: scores at/above `cfg_high` hit the first color, the best observed score anchors the last; collapses onto `cfg_high` when all data is at/above it;
+/// - only `low` configured → `(cfg_low, data_max.max(cfg_low))` — normal range: scores at/below `cfg_low` hit the first color, the best observed score anchors the last; collapses onto `cfg_low` when all data is at/below it;
+/// - both configured → used as-is `(cfg_low, cfg_high)`.
 fn effective_range(
-    cfg_min: Option<f64>,
-    cfg_max: Option<f64>,
+    cfg_low: Option<f64>,
+    cfg_high: Option<f64>,
     nonzero: &[f64],
 ) -> (Option<f64>, Option<f64>) {
     let data_min = nonzero.iter().copied().reduce(f64::min);
     let data_max = nonzero.iter().copied().reduce(f64::max);
 
-    match (cfg_min, cfg_max) {
-        (Some(min), Some(max)) => (Some(min), Some(max)),
-        (Some(min), None) => {
-            // Floor-only: scores below cfg_min are bad; the best observed
+    match (cfg_low, cfg_high) {
+        (Some(low), Some(high)) => (Some(low), Some(high)),
+        (Some(low), None) => {
+            // Floor-only: scores below cfg_low are bad; the best observed
             // score anchors the success end.
-            let eff_max = data_max.map_or(min, |mx| mx.max(min));
-            (Some(min), Some(eff_max))
+            let eff_max = data_max.map_or(low, |mx| mx.max(low));
+            (Some(low), Some(eff_max))
         }
-        (None, Some(max)) => {
-            // Ceiling-only: scores above cfg_max are bad; the best observed
+        (None, Some(high)) => {
+            // Ceiling-only: scores above cfg_high are bad; the best observed
             // score anchors the success end.
-            let eff_max = data_min.map_or(max, |mn| mn.min(max));
-            (Some(max), Some(eff_max))
+            let eff_max = data_min.map_or(high, |mn| mn.min(high));
+            (Some(high), Some(eff_max))
         }
         (None, None) => (data_min, data_max),
     }
@@ -547,7 +628,13 @@ async fn display_tracker<W: Write>(
             };
             let idx = (idx - start_idx) as usize;
             if idx < num_slots {
-                slot_sums[idx] += score;
+                if tracker.kind == TrackerKind::Null {
+                    // Null markers carry score 0; the slot's value is its
+                    // entry count (1 in replace mode).
+                    slot_sums[idx] += 1.0;
+                } else {
+                    slot_sums[idx] += score;
+                }
                 slot_has_entry[idx] = true;
                 slot_time[idx] = Some(time);
             }
@@ -565,7 +652,7 @@ async fn display_tracker<W: Write>(
             })
             .collect();
 
-        let (eff_min, eff_max) = effective_range(tracker.min, tracker.max, &nonzero_sums);
+        let (eff_min, eff_max) = effective_range(tracker.low, tracker.high, &nonzero_sums);
 
         let use_circle = period != TrackerPeriod::Year;
         for (i, &has_entry) in slot_has_entry.iter().enumerate() {
@@ -616,7 +703,7 @@ async fn display_tracker<W: Write>(
             .cloned()
             .collect();
 
-        let (eff_min, eff_max) = effective_range(tracker.min, tracker.max, &nonzero_scores);
+        let (eff_min, eff_max) = effective_range(tracker.low, tracker.high, &nonzero_scores);
 
         for &score in &scores {
             let color = crate::badge::tracker_color(colors, score, eff_min, eff_max);
@@ -730,6 +817,7 @@ async fn display_recurring_tracker<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::TrackerInterval;
 
     #[test]
     fn test_grid_title() {
@@ -787,4 +875,67 @@ mod tests {
             (Some(2.0), Some(2.0))
         );
     }
+
+    #[test]
+    fn test_enforce_strict() {
+        let tracker =
+            TrackerSetting::new(TrackerKind::Float).with_low(0.0).with_high(9.0).with_strict(true);
+        assert!(enforce_strict("rating", &tracker, 0.0).is_ok(), "lower boundary accepted");
+        assert!(enforce_strict("rating", &tracker, 9.0).is_ok(), "upper boundary accepted");
+        assert!(enforce_strict("rating", &tracker, 4.5).is_ok());
+        let err = enforce_strict("rating", &tracker, 12.0).unwrap_err();
+        assert_eq!(err, "tracker 'rating': value 12 outside [0, 9]");
+        let err = enforce_strict("rating", &tracker, -1.0).unwrap_err();
+        assert_eq!(err, "tracker 'rating': value -1 outside [0, 9]");
+        // Inverted bounds (high < low) still gate the inclusive span.
+        let inv = TrackerSetting::new(TrackerKind::Float).with_low(10.0).with_high(0.0).with_strict(true);
+        assert!(enforce_strict("inv", &inv, 5.0).is_ok());
+        assert_eq!(enforce_strict("inv", &inv, 10.5).unwrap_err(), "tracker 'inv': value 10.5 outside [0, 10]");
+        // Single bound gates on that bound only.
+        let floor = TrackerSetting::new(TrackerKind::Integer).with_low(10.0).with_strict(true);
+        assert!(enforce_strict("pushups", &floor, 10.0).is_ok());
+        assert_eq!(enforce_strict("pushups", &floor, 9.0).unwrap_err(), "tracker 'pushups': value 9 outside [10]");
+        // No bounds → nothing to check.
+        let open = TrackerSetting::new(TrackerKind::Float).with_strict(true);
+        assert!(enforce_strict("free", &open, 1e9).is_ok());
+        // Text gates the message length in characters.
+        let text = TrackerSetting::new(TrackerKind::Text).with_low(1.0).with_high(80.0).with_strict(true);
+        assert!(enforce_strict("thought", &text, text_len_chars("a short win") as f64).is_ok());
+        assert_eq!(
+            enforce_strict("thought", &text, text_len_chars("x".repeat(81).as_str()) as f64).unwrap_err(),
+            "tracker 'thought': value 81 outside [1, 80]"
+        );
+    }
+
+    /// Circular zone membership for the null strict gate: `time`'s position
+    /// inside its interval slot must fall within `[low, high]` as
+    /// seconds-from-interval-start offsets, wrapping when `high < low`.
+    #[test]
+    fn test_null_zone_contains() {
+        let tracker = TrackerSetting::new(TrackerKind::Null)
+            .with_interval(TrackerInterval {
+                anchor: 1_600_000_000,
+                span: jiff::Span::new().days(1),
+                cumulative: false,
+            })
+            .with_low(23.0 * 3600.0)
+            .with_high(2.0 * 3600.0)
+            .with_strict(true);
+        let slot_start = 1_600_000_000; // slot [start, start + 1 day)
+        // In-zone: 23:30 and 01:00 (wrapping zone 23:00 → 02:00).
+        assert!(null_zone_contains(&tracker, slot_start + 23 * 3600 + 30 * 60));
+        assert!(null_zone_contains(&tracker, slot_start + 3600));
+        // Boundaries are contained (exact dist <= zone_len).
+        assert!(null_zone_contains(&tracker, slot_start + 23 * 3600));
+        assert!(null_zone_contains(&tracker, slot_start + 2 * 3600));
+        // Out of zone: 03:00 and 22:00.
+        assert!(!null_zone_contains(&tracker, slot_start + 3 * 3600));
+        assert!(!null_zone_contains(&tracker, slot_start + 22 * 3600));
+        // Without both bounds (or an interval) the gate never contains.
+        let loose = TrackerSetting::new(TrackerKind::Null).with_interval(tracker.interval.unwrap());
+        assert!(!null_zone_contains(&loose, slot_start + 3600));
+        let no_iv = TrackerSetting::new(TrackerKind::Null).with_low(0.0).with_high(3600.0);
+        assert!(!null_zone_contains(&no_iv, slot_start + 300));
+    }
+
 }

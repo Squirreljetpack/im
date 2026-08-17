@@ -1,1 +1,5 @@
 Investigate global embedder lazy loading, i think its possible, mood color axes need it or no? Only on db cache miss. We should be able to assume no backfills for moods (missing -> skip)
+
+https://www.inkandswitch.com/essay/local-first/
+
+Centralized sync

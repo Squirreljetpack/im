@@ -5,7 +5,7 @@ use crate::global;
 use crate::cli::CliOpts;
 use crate::config::{Config, TrackerInterval, TrackerKind};
 use crate::date;
-use crate::db::{EntryObject, NullUpsert, TrackerObject, TrackerValue};
+use crate::db::{EntryObject, TrackerObject, TrackerValue};
 use crate::editor::open_editor_for_body;
 use crate::tracker::parse_tracker_value;
 use crate::types::Entry;
@@ -40,13 +40,12 @@ pub(super) async fn record_entry(
 
     // Parse and validate tracker values against their declared kind.
     // Raw strings are interpreted here (not in the parser) so the config's
-    // kind (text/number/float/null) determines how each value is stored.
-    // Text/float trackers with an interval keep one entry per calendar
-    // interval slot (re-logging in the same slot replaces the previous
-    // entry, inside `create_entry`); number trackers always accumulate.
-    // Null trackers with an interval either move the slot's entry to now
-    // (both min/max set — the entry is a timestamp marker) or increment its
-    // count (count mode).
+    // kind (text/integer/float/duration/null) determines how each value is
+    // stored. Replace mode (interval + `cumulative: false`) is one shared
+    // insertion strategy: the slot's previous entries of the tracker are
+    // dropped and the new row inserted (`replace_slot`, inside
+    // `create_entry`); cumulative mode appends every log. `strict` gates the
+    // raw value (or, for null trackers, the entry time) before inserting.
     let mut tracker_objects: Vec<TrackerObject> = Vec::with_capacity(trackers.len());
     for (tracker_type, raw) in &trackers {
         let tracker = config.tracker.get(tracker_type).ok_or_else(|| {
@@ -58,8 +57,7 @@ pub(super) async fn record_entry(
         match tracker.kind {
             TrackerKind::Null => {
                 // A trailing `-<name>` with no value; for Null trackers the
-                // entry is a timestamp marker. Without an interval the
-                // tracker is unsupported (no slot, no count semantics).
+                // entry is a timestamp marker.
                 if !raw.is_empty() {
                     anyhow::bail!(
                         "Null tracker '{}' does not take a value (use '-{}' with no value)",
@@ -73,24 +71,39 @@ pub(super) async fn record_entry(
                         tracker_type
                     );
                 };
-                // Count mode when either bound is missing: the score counts
-                // the logs in the current slot. With both bounds the entry
-                // is a time marker (score stays 0, color from the time).
-                let count_mode = tracker.min.is_none() || tracker.max.is_none();
-                let slot = interval_slot(time_epoch, interval).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Could not compute the interval slot for tracker '{}'",
-                        tracker_type
-                    )
-                })?;
+                // strict gates *when* the tracker may be logged: the entry
+                // time must fall in the circular [low, high] offset zone.
+                if tracker.strict {
+                    let (Some(low), Some(high)) = (tracker.low, tracker.high) else {
+                        anyhow::bail!(
+                            "tracker '{}': strict requires both low and high bounds",
+                            tracker_type
+                        );
+                    };
+                    if !crate::tracker::null_zone_contains(tracker, time_epoch) {
+                        anyhow::bail!(
+                            "tracker '{}': cannot log at this time — outside the strict [{}, {}] offset zone",
+                            tracker_type, low, high
+                        );
+                    }
+                }
+                // Replace: the slot's previous markers are dropped and a
+                // fresh marker inserted (score 0). Cumulative: every log
+                // appends its own row (score 0).
+                let replace_slot = if interval.cumulative {
+                    None
+                } else {
+                    Some(interval_slot(time_epoch, interval).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Could not compute the interval slot for tracker '{}'",
+                            tracker_type
+                        )
+                    })?)
+                };
                 tracker_objects.push(TrackerObject {
                     tracker_type: tracker_type.clone(),
-                    value: TrackerValue::Number(if count_mode { 1 } else { 0 }),
-                    replace_slot: None,
-                    null_upsert: Some(NullUpsert {
-                        slot,
-                        increment: count_mode,
-                    }),
+                    value: TrackerValue::Integer(0),
+                    replace_slot,
                 });
             }
             _ => {
@@ -98,8 +111,20 @@ pub(super) async fn record_entry(
                     anyhow::bail!("Tracker '{}' requires a value", tracker_type);
                 }
                 let value = parse_tracker_value(tracker_type, tracker.kind, raw)?;
-                let replace_slot = if matches!(tracker.kind, TrackerKind::Text | TrackerKind::Float)
-                {
+                // strict gates the raw logged value.
+                if tracker.strict {
+                    let measure = match &value {
+                        TrackerValue::Text(s) => crate::tracker::text_len_chars(s) as f64,
+                        TrackerValue::Integer(n) => *n as f64,
+                        TrackerValue::Float(f) => *f,
+                    };
+                    crate::tracker::enforce_strict(tracker_type, tracker, measure)
+                        .map_err(anyhow::Error::msg)?;
+                }
+                // Replace mode keeps one row per interval slot (the slot's
+                // previous row is dropped inside `create_entry`); cumulative
+                // and non-interval trackers always append.
+                let replace_slot = if tracker.interval.is_some_and(|iv| !iv.cumulative) {
                     tracker
                         .interval
                         .and_then(|iv| interval_slot(time_epoch, iv))
@@ -110,18 +135,15 @@ pub(super) async fn record_entry(
                     tracker_type: tracker_type.clone(),
                     value,
                     replace_slot,
-                    null_upsert: None,
                 });
             }
         }
     }
-
-    // Resolve the mood embedding and its saliency score before opening the
-    // transaction. Journal-only entries (empty mood) never embed; the model
-    // is bundled into the binary, so the embedder is always available — a
-    // per-text embedding failure (e.g. an un-tokenizable string) stores no
-    // embedding rather than losing the entry. The score is computed here so
-    // color passes later skip the ONNX saliency prediction.
+    // Journal-only entries (empty mood) never embed; the model is bundled
+    // into the binary, so the embedder is always available — a per-text
+    // embedding failure (e.g. an un-tokenizable string) stores no embedding
+    // rather than losing the entry. The score is computed here so color
+    // passes later skip the ONNX saliency prediction.
     let embedder = global::embedder();
     let (embedding_blob, score) = if mood.is_empty() {
         (None, None)
@@ -166,7 +188,7 @@ pub(super) async fn record_entry(
         crate::db::link_mood_to_tasks(pool, mood_id, &resolved).await?;
     }
 
-    crate::output::display_entry(&entry_obj, opts)?;
+    crate::output::display_entry(config, &entry_obj, opts)?;
 
     Ok(())
 }
@@ -189,6 +211,7 @@ mod tests {
         TrackerInterval {
             anchor: date::day_start(date::now()) - 30 * 86_400,
             span: Span::new().days(1),
+            cumulative: false,
         }
     }
 
@@ -201,6 +224,7 @@ mod tests {
             TrackerInterval {
                 anchor: date::today_start() - 86_400,
                 span: Span::new().minutes(30),
+                cumulative: false,
             },
         ] {
             let (start, end) = interval_slot(t, interval).unwrap();
@@ -220,6 +244,7 @@ mod tests {
         let interval = TrackerInterval {
             anchor,
             span: Span::new().minutes(30),
+            cumulative: false,
         };
         let t = date::today_start() + 10 * 3600; // 10:00 local
         let bucket = interval_slot(t, interval).unwrap();

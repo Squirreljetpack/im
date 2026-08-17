@@ -58,9 +58,9 @@ pub struct UpdateTaskObject {
 
 /// A logged mood entry plus any linked tracker values.
 ///
-/// `trackers` carries the pre-resolved `TrackerValue`s and, for Text/Float
-/// trackers with an interval, the slot `(start, end)` whose previous entry
-/// is replaced inside the insert transaction.
+/// `trackers` carries the pre-resolved `TrackerValue`s and, for interval
+/// trackers in replace mode, the slot `(start, end)` whose previous entries
+/// are deleted inside the insert transaction.
 #[derive(Debug, Clone)]
 pub struct EntryObject {
     pub mood: String,
@@ -77,30 +77,19 @@ pub struct EntryObject {
 pub struct TrackerObject {
     pub tracker_type: String,
     pub value: TrackerValue,
-    /// `[start, end)` interval slot whose previous entry is deleted before
-    /// the insert (Text/Float interval trackers).
+    /// `[start, end)` interval slot whose previous entries are deleted
+    /// before the insert (replace mode: every kind with an interval).
     pub replace_slot: Option<(i64, i64)>,
-    /// Null interval trackers: instead of delete+insert, the slot's entry
-    /// is updated in place (time moved to the new entry's; score incremented
-    /// in count mode, left unchanged otherwise).
-    pub null_upsert: Option<NullUpsert>,
 }
 
-/// Update-in-place semantics for a Null tracker entry.
-#[derive(Debug, Clone)]
-pub struct NullUpsert {
-    /// The `[start, end)` interval slot whose entry is updated.
-    pub slot: (i64, i64),
-    /// Count mode (`min` or `max` missing): increment the existing entry's
-    /// score by 1. When false (both bounds set) the score stays unchanged.
-    pub increment: bool,
-}
 
 /// Typed payload of a tracker entry, determined by its configured kind.
+/// `Duration` values are stored as `Float` seconds — display sites key on
+/// `TrackerKind`, not on the value variant.
 #[derive(Debug, Clone)]
 pub enum TrackerValue {
     Text(String),
-    Number(i64),
+    Integer(i64),
     Float(f64),
 }
 
@@ -108,7 +97,7 @@ impl std::fmt::Display for TrackerValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TrackerValue::Text(s) => write!(f, "{}", s),
-            TrackerValue::Number(n) => write!(f, "{}", n),
+            TrackerValue::Integer(n) => write!(f, "{}", n),
             TrackerValue::Float(x) => write!(f, "{}", x),
         }
     }

@@ -83,34 +83,54 @@ persist_pending_seconds = 300
 #
 # Each tracker is its own section; log it with `-<name> <value>`.
 #
-# Intervals: If an interval is specified, tracker entries bin into the slots
-# given by the interval span, starting from the interval anchor.
-# - Newer entries replacing older entries in the same slot.
-# - Interval anchors are RFC 3339 timestamps with an explicit UTC offset.
+# Intervals: with an interval, entries bin into slots of the given span,
+# starting from the interval anchor (RFC 3339 timestamps with an explicit
+# UTC offset). By default (replace) a new log in a slot replaces the slot's
+# previous entry; `cumulative = true` keeps every log and the slot's value
+# is the sum of its entries at display time.
 #
-# Bounds: min/max are used to determine display color of entries, not to gate insertion.
-# - If max < min, the semantics are reversed, with numbers closer to `max` mapping to earlier colors.
-
-# Types:
+# Bounds: low/high determine the entry display color AND, with `strict = true`,
+# gate logging (CLI and TUI). The bound form follows the kind:
+# - float:       plain numbers
+# - integer:     plain whole numbers
+# - duration:    duration strings ("4m", "1h 30m") — values too
+# - text:        whole numbers — message length in characters; meaningful
+#                only with strict, otherwise the bounds are dropped
+# - null:        replace mode -> duration strings (seconds-from-interval-start
+#                time offsets); cumulative mode -> plain whole numbers (count
+#                thresholds)
+# If high < low, the color semantics are reversed, with numbers closer to
+# `high` mapping to earlier colors.
+#
+# Kinds:
 # null:
-#  - when min/max/interval are all specified
-#    this acts as a timestamp tracker,
-#    with min/max interpreted as seconds-from-interval-start
-#    defining a circular time-of-day color range
-#  - With either min/min omitted, this simply counts occurrences with an interval
-#  - null trackers don't accept a payload, and cannot be _followed by_ a mood (log with `im -<name>`).
-# float | number:
-#  - Values and min/max bounds accept a plain number or a duration string
-#    (e.g. "6.5", "4h", "30m") — durations convert to seconds.
+#  - Timestamp marker (no payload; log with `im -<name>`). Requires an interval.
+#  - Replace mode: one marker per period; low/high are seconds-from-interval-start
+#    offsets defining the circular color range (and the strict "when" zone).
+#  - Cumulative mode: counts occurrences; low/high are count thresholds.
+#  - Null trackers don't accept a payload and cannot be _followed by_ a mood.
+# float | integer:
+#  - Values are plain numbers (integers must be whole). `-rating 4h` is an error.
+# duration:
+#  - Values are duration strings, stored as seconds and displayed as
+#    "6m 30s". `-mile 390` is an error — write `-mile 6m 30s`.
 # text:
-#  - Plain text entry.
+#  - Plain text entry; the value is stored verbatim.
 #  - colors override is limited to length 1.
+# strict:
+#  - With low/high: numeric kinds reject values outside the inclusive span;
+#    text rejects messages whose length in characters is outside it; null
+#    (replace mode) rejects logs whose timestamp falls outside the circular
+#    low/high offset zone.
 
 [tracker.sleep]
 kind = "null"
-interval = ["2026-01-01T00:00:00-04:00", "1 day"]
-min = "20h" # 20:00 local
-max = "4h" # 04:00 local - wrapping
+interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }
+# Replace mode: low/high are seconds-from-interval-start offsets for the
+# circular color range — 20:00 local is the "low" end, 04:00 the "high" end
+# (wrapping past midnight).
+low = "20h"
+high = "4h"
 colors = [
   "#3f6b93",
   "#355B8F",
@@ -125,16 +145,18 @@ colors = [
 
 [tracker.awake]
 kind = "null"
-interval = ["2026-01-01T00:00:00-04:00", "1 day"]
-min = "4h"
-max = "12h"
+interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }
+low = "4h"
+high = "12h"
 colors = ["#1E3E72", "#786FA6", "#C88EA7", "#F5E1A4", "#F5B752", "#E08955"]
 
 [tracker.rating]
 kind = "float"
-interval = ["2026-01-01T00:00:00-04:00", "1 day"]
-min = 0
-max = 9
+interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }
+low = 0
+high = 9
+# strict rejects values outside the inclusive [0, 9] span at log time.
+strict = true
 # colors = [
 #   "#580000",
 #   "#800000",
@@ -160,16 +182,19 @@ colors = [
 ]
 
 [tracker.pushups]
-kind = "number"
-interval = ["2026-01-01T00:00:00-04:00", "1 day"]
-min = 10
+kind = "integer"
+interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day", cumulative = true }
+low = 10
+# cumulative: every log in the period is kept; the period's grid dot shows
+# the sum of its values.
 
-# mile run time .e.g. -mile 6.5m (pure numbers have units in seconds!)
+# mile run time, e.g. -mile 6m 30s
 [tracker.mile]
-kind = "float"
-interval = ["2026-01-01T00:00:00-04:00", "1 day"]
-min = "4m"
-max = "10m"
+kind = "duration"
+interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }
+low = "4m"
+high = "10m"
+# Values are duration strings, stored as seconds and displayed as "6m 30s".
 
 [tracker.win]
 kind = "text"
