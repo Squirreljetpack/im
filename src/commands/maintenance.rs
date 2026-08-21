@@ -100,12 +100,11 @@ pub(super) async fn db_prune(pool: &SqlitePool, _config: &Config) -> Result<()> 
 }
 
 /// `im :db backfill` — compute and persist the mood embeddings and
-/// saliency scores that rendering no longer writes inline (see
-/// `color::ColorAxes::mood_color_cached`). Journal-only rows (empty mood)
-/// never embed and are skipped, matching the old inline backfill behavior.
+/// saliency scores. Journal-only rows (empty mood)
+/// never embed and are skipped.
 pub(super) async fn db_backfill(pool: &SqlitePool) -> Result<()> {
     let rows = crate::db::fetch_moods_between(pool, i64::MIN, i64::MAX).await?;
-    let embedder = global::embedder();
+    let embedder = global::embedder_async().await;
     let mut backfilled = 0usize;
     let mut failed = 0usize;
 
@@ -123,27 +122,22 @@ pub(super) async fn db_backfill(pool: &SqlitePool) -> Result<()> {
             continue;
         };
         // …and persist the embedding and the saliency score.
-        let mut changed = false;
-        if mood.embedding.is_none() {
-            let blob = global::embedding_to_blob(&embedding);
-            if crate::db::update_mood_embedding(pool, mood.id, &blob)
-                .await
-                .is_ok()
-            {
-                changed = true;
+        if let Ok(rows) = crate::db::update_mood_embedding_and_score(
+            pool,
+            mood.id,
+            mood.embedding
+                .is_none()
+                .then(|| global::embedding_to_blob(&embedding))
+                .as_deref(),
+            mood.score
+                .is_none()
+                .then(|| crate::color::predict_saliency(embedder, &mood.mood)),
+        )
+        .await
+        {
+            if rows > 0 {
+                backfilled += 1;
             }
-        }
-        if mood.score.is_none() {
-            let score = crate::color::predict_saliency(embedder, &mood.mood);
-            if crate::db::update_mood_score(pool, mood.id, score)
-                .await
-                .is_ok()
-            {
-                changed = true;
-            }
-        }
-        if changed {
-            backfilled += 1;
         }
     }
 

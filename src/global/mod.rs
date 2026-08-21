@@ -15,10 +15,9 @@ use std::sync::OnceLock;
 use crate::config::Config;
 
 /// The config the TUI apps were built with: set once by
-/// [`crate::ui::tasks::TasksApp::new`] and [`crate::ui::today::TodayApp::new`]
-/// after the config has been `init_with` (color model built). Render and
-/// preview code reads the current config from here via [`config`] instead
-/// of storing a clone on the apps.
+/// [`crate::ui::tasks::TasksApp::new`] and [`crate::ui::today::TodayApp::new`].
+/// Render and preview code reads the current config from here via [`config`]
+/// instead of storing a clone on the apps.
 pub static GLOBAL_CONFIG: OnceLock<Config> = OnceLock::new();
 
 /// The config stored by the TUI apps ([`GLOBAL_CONFIG`]). Panics when no

@@ -10,27 +10,53 @@ pub async fn prune_embedding_cache(pool: &SqlitePool) -> Result<u64> {
     Ok(rows_affected)
 }
 
+/// Backfill embedding and/or saliency score for a mood row in a single query.
+pub async fn update_mood_embedding_and_score(
+    pool: &SqlitePool,
+    id: i64,
+    blob: Option<&[u8]>,
+    score: Option<f32>,
+) -> Result<u64> {
+    let res = match (blob, score) {
+        (Some(blob), Some(score)) => {
+            sqlx::query("UPDATE mood SET embedding = ?, score = ? WHERE id = ?")
+                .bind(blob)
+                .bind(score)
+                .bind(id)
+                .execute(pool)
+                .await
+                .context("Failed to update mood embedding and score")?
+        }
+        (Some(blob), None) => {
+            sqlx::query("UPDATE mood SET embedding = ? WHERE id = ?")
+                .bind(blob)
+                .bind(id)
+                .execute(pool)
+                .await
+                .context("Failed to update mood embedding")?
+        }
+        (None, Some(score)) => {
+            sqlx::query("UPDATE mood SET score = ? WHERE id = ?")
+                .bind(score)
+                .bind(id)
+                .execute(pool)
+                .await
+                .context("Failed to update mood score")?
+        }
+        (None, None) => return Ok(0),
+    };
+    Ok(res.rows_affected())
+}
+
 /// Backfill a mood row's stored embedding.
 pub async fn update_mood_embedding(pool: &SqlitePool, id: i64, blob: &[u8]) -> Result<u64> {
-    let res = sqlx::query("UPDATE mood SET embedding = ? WHERE id = ?")
-        .bind(blob)
-        .bind(id)
-        .execute(pool)
-        .await
-        .context("Failed to update mood embedding")?;
-    Ok(res.rows_affected())
+    update_mood_embedding_and_score(pool, id, Some(blob), None).await
 }
 
 /// Persist a mood's cached saliency score (backfilled by
 /// `ColorAxes::mood_color_cached` on the first render pass).
 pub async fn update_mood_score(pool: &SqlitePool, id: i64, score: f32) -> Result<u64> {
-    let res = sqlx::query("UPDATE mood SET score = ? WHERE id = ?")
-        .bind(score)
-        .bind(id)
-        .execute(pool)
-        .await
-        .context("Failed to update mood score")?;
-    Ok(res.rows_affected())
+    update_mood_embedding_and_score(pool, id, None, Some(score)).await
 }
 
 // ---------------------------------------------------------------------------

@@ -94,6 +94,7 @@ pub fn get_mm_cfg() -> (
     // render no row prefixes, and the config file must not re-enable them.
     mm_cfg.render.results.multi_prefix = String::new();
     mm_cfg.render.results.default_prefix = String::new();
+    mm_cfg.render.results.autoscroll.initial_preserved = 3;
     (mm_cfg.render, mm_cfg.binds, mm_cfg.tui, mm_cfg.overlay)
 }
 

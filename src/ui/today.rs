@@ -17,10 +17,8 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::color::ColorAxes;
 use crate::config::{Config, TrackerKind};
 use crate::global::{config, pool, GLOBAL_CONFIG};
 use crate::db::{TaskRow, TrackerValue};
@@ -66,16 +64,10 @@ pub struct TodayApp {
     pub show: ViewVariant,
     pub day_epoch: Option<i64>,
     pub day_label: String,
-    /// The built mood-color model (`MoodConfig::init_with`), threaded to
-    /// the previewer and the background color fill. The config itself lives
-    /// in [`global::GLOBAL_CONFIG`].
-    pub axes: ColorAxes,
     pub sort_by_priority: bool,
     /// Raw mood rows for the background color fill (startup fetch): the
     /// fill takes them by move, so entries stay embedding-free.
     pub mood_rows: Vec<crate::db::MoodRow>,
-    /// Guards concurrent color fills (startup + refresh overlap).
-    fill_running: Arc<AtomicBool>,
     /// Last cursor position (results index), restored after repopulation.
     cursor: u32,
     /// `im -F`: run the picker fullscreen (`tui.layout = None`) instead of
@@ -86,7 +78,6 @@ pub struct TodayApp {
 impl TodayApp {
     pub async fn new(
         config: Config,
-        axes: ColorAxes,
         day_epoch: Option<i64>,
         show: ViewVariant,
         horizon: TodayHorizon,
@@ -105,9 +96,7 @@ impl TodayApp {
             show,
             day_epoch,
             day_label,
-            axes,
             sort_by_priority: false,
-            fill_running: Arc::new(AtomicBool::new(false)),
             cursor: 0,
             fullscreen,
         };
@@ -147,7 +136,6 @@ impl TodayApp {
         // varies.
         render_cfg.results.width_overrides = vec![8, 0];
 
-        let preview_axes = self.axes.clone();
         let view = Arc::new(Mutex::new(self));
 
         let columns = [
@@ -218,10 +206,12 @@ impl TodayApp {
         mm.config_render(render_cfg);
         mm.config_tui(tui_cfg);
 
+        let axes = Arc::new(tokio::sync::OnceCell::new());
+
         // Previewer: the event listener owns it (the `Preview` widget built
         // by `view()` holds its own clones of the shared string). A
         // generation counter drops stale async results.
-        let previewer = Previewer::new(preview_axes.clone());
+        let previewer = Previewer::new(axes.clone());
         let preview_view = previewer.view();
         // Clone for the PreviewSet handler below (the cursor handler moves
         // the original).
@@ -304,9 +294,39 @@ impl TodayApp {
 
         let render_tx = options.render_tx();
 
+        let pool = pool();
+        let (color_tx, mut color_rx) =
+            tokio::sync::mpsc::unbounded_channel::<Vec<crate::db::MoodRow>>();
+        let bg_render_tx = render_tx.clone();
+        let backfill = config().moods.backfill;
+        let bg_axes = axes;
+        tokio::spawn(async move {
+            let pool_opt = if backfill { Some(&pool) } else { None };
+            if let Ok(axes) = bg_axes
+                .get_or_try_init(|| crate::color::ColorAxes::build(&pool, &config().moods))
+                .await
+            {
+                while let Some(mut rows) = color_rx.recv().await {
+                    while let Ok(more) = color_rx.try_recv() {
+                        rows.extend(more);
+                    }
+                    let added = crate::color::compute_mood_colors_and_backfill(
+                        pool_opt,
+                        &rows,
+                        axes,
+                    )
+                    .await;
+                    if added > 0 {
+                        let _ = bg_render_tx.send(RenderCommand::Redraw);
+                    }
+                }
+            }
+        });
+
         let ctx = TodayCtx {
             view: view.clone(),
             tx: render_tx.clone(),
+            color_tx: color_tx.clone(),
             confirm: confirm_ov.clone(),
             input: input_ov.clone(),
             edit: Arc::new(Mutex::new(None)),
@@ -321,19 +341,12 @@ impl TodayApp {
         });
 
         // Background color fill for the startup fetch: the mood rows move
-        // in (embeddings never copied) and the fill redraws when it adds
-        // colors.
-        let fill_running = { view.lock().unwrap().fill_running.clone() };
+        // into the color queue and redraw is sent once all colors are computed.
         let initial_rows = {
             let mut v = view.lock().unwrap();
             std::mem::take(&mut v.mood_rows)
         };
-        spawn_mood_fill(
-            initial_rows,
-            preview_axes,
-            render_tx.clone(),
-            fill_running,
-        );
+        let _ = color_tx.send(initial_rows);
 
         // External editor: `Interrupt::Execute` runs with the TUI exited and
         // the event loop paused, so $EDITOR owns the terminal.
@@ -384,6 +397,7 @@ pub struct TodayRunCfg {
 struct TodayCtx {
     view: Arc<Mutex<TodayApp>>,
     tx: RenderSender<ImAction>,
+    color_tx: tokio::sync::mpsc::UnboundedSender<Vec<crate::db::MoodRow>>,
     confirm: Arc<Mutex<ConfirmOverlay<TodayEntry>>>,
     input: Arc<Mutex<InputOverlay<TodayEntry>>>,
     edit: Arc<Mutex<Option<EditPayload>>>,
@@ -556,21 +570,20 @@ fn open_input(ctx: TodayCtx, prompt: InputPrompt) {
 /// Refetch the entry list for the current view settings and signal the
 /// render thread to repopulate.
 async fn refresh_today(ctx: &TodayCtx) {
-    let (axes, horizon, day_epoch, show) = {
+    let (horizon, day_epoch, show) = {
         let v = ctx.view.lock().unwrap();
-        (v.axes.clone(), v.horizon, v.day_epoch, v.show)
+        (v.horizon, v.day_epoch, v.show)
     };
     let crate::today::TodayFetch { entries, mood_rows } =
         fetch_today_entries(&pool(), config(), horizon, day_epoch, show)
             .await
             .unwrap_or_default();
-    let fill_running = {
+    {
         let mut v = ctx.view.lock().unwrap();
         v.entries = entries;
         v.mood_rows = mood_rows;
         v.apply_sort();
-        v.fill_running.clone()
-    };
+    }
     let _ = ctx.tx.send(RenderCommand::Action(MMAction::Custom(
         ImAction::Repopulate,
     )));
@@ -579,28 +592,7 @@ async fn refresh_today(ctx: &TodayCtx) {
         let mut v = ctx.view.lock().unwrap();
         std::mem::take(&mut v.mood_rows)
     };
-    spawn_mood_fill(rows, axes, ctx.tx.clone(), fill_running);
-}
-
-/// Background color fill: compute colors for the rows the process-wide
-/// cache is missing, then redraw so the next frame picks them up. A
-/// second fill while one is running reuses the cache and no-ops.
-fn spawn_mood_fill(
-    rows: Vec<crate::db::MoodRow>,
-    axes: ColorAxes,
-    tx: RenderSender<ImAction>,
-    running: Arc<AtomicBool>,
-) {
-    if running.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    tokio::spawn(async move {
-        let added = crate::color::compute_mood_colors(&rows, &axes);
-        running.store(false, Ordering::Release);
-        if added > 0 {
-            let _ = tx.send(RenderCommand::Redraw);
-        }
-    });
+    let _ = ctx.color_tx.send(rows);
 }
 
 /// The Accept entry point: tracker rows relog/prompt, recurring windows

@@ -139,15 +139,16 @@ pub(super) async fn record_entry(
             }
         }
     }
-    // Journal-only entries (empty mood) never embed; the model is bundled
-    // into the binary, so the embedder is always available — a per-text
-    // embedding failure (e.g. an un-tokenizable string) stores no embedding
-    // rather than losing the entry. The score is computed here so color
-    // passes later skip the ONNX saliency prediction.
-    let embedder = global::embedder();
-    let (embedding_blob, score) = if mood.is_empty() {
+    // Journal-only entries (empty mood) never embed. When moods.backfill is
+    // enabled, mood entries are also inserted with NULL embedding/score to keep
+    // logging fast; UI/CLI color passes compute and backfill them on display.
+    // The model is bundled into the binary, so the embedder is always
+    // available — a per-text embedding failure (e.g. an un-tokenizable string)
+    // stores no embedding rather than losing the entry.
+    let (embedding_blob, score) = if mood.is_empty() || config.moods.backfill {
         (None, None)
     } else {
+        let embedder = global::embedder_async().await;
         match embedder.embed(&mood, &config.moods.axes.prefix_string) {
             Ok(v) => (
                 Some(global::embedding_to_blob(&v)),

@@ -202,11 +202,29 @@ pub fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
 
 static EMBEDDER: OnceLock<Embedder> = OnceLock::new();
 
+/// Kick off background loading of the embedder via `tokio::task::spawn_blocking`.
+pub fn init_embedder_background() {
+    tokio::task::spawn_blocking(|| {
+        let _ = embedder();
+    });
+}
+
+/// Asynchronously await the loaded embedding model.
+///
+/// If loading is already complete, this returns immediately. If loading is in
+/// progress, the calling async task yields until the model finishes loading.
+pub async fn embedder_async() -> &'static Embedder {
+    if let Some(e) = EMBEDDER.get() {
+        return e;
+    }
+    tokio::task::spawn_blocking(|| embedder())
+        .await
+        .expect("Embedding model spawn_blocking panicked")
+}
+
 /// Load the bundled embedding model once and return a reference to it.
 ///
-/// The model and tokenizer are compiled into the binary, so loading cannot
-/// be deferred or declined: a failure here means the binary is broken (corrupt
-/// build artifact), and we panic rather than degrade silently.
+/// In async/Tokio contexts, prefer `embedder_async()`.
 pub fn embedder() -> &'static Embedder {
     EMBEDDER.get_or_init(|| match Embedder::load() {
         Ok(e) => e,

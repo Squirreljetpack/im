@@ -27,6 +27,9 @@ baseline_oklab_l = 65
 # min_contribution = 7
 # top_k = 5
 
+# When true, embeddings/saliency are lazily backfilled when the mood entry is displayed, instead of on insertion.
+backfill = true
+
 [tasks]
 # colors = ["dark_red", "dark_yellow", "dark_green"]
 # default_priority = 5             # 1..=999

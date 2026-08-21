@@ -235,10 +235,6 @@ pub fn build_preview(
 
     // Linked moods (`im good -5` recorded the link): a `moods:` field
     // with one `  - {badge} {mood text}` line per linked mood. The badge
-    // color comes from the sync mood-color pipeline (process-wide cache;
-    // see `color::global_mood_color_cache`).
-    // Linked moods (`im good -5` recorded the link): a `moods:` field
-    // with one `  - {badge} {mood text}` line per linked mood. The badge
     // color resolves via the process-wide mood-color cache; on a miss the
     // pipeline runs here (background preview task — never the render
     // thread) and writes the result back.

@@ -410,9 +410,8 @@ Mood colors are a projection onto config `[moods]` pair anchors: each pair
 mood is embedded (prefix-anchored, SQLite-cached) and its **basis ray** is the
 L2-normalized difference from a neutral base embedding.
 
-- **Build** (`ColorAxes::build_async`): embeds base + pairs, computes basis
-  rays and each pair's Oklab target, precomputes the **Gram matrix** (AᵀA);
-  cached on `MoodConfig` by idempotent `MoodConfig::init_with`.
+- **Build** (`ColorAxes::build`): embeds base + pairs, computes basis
+  rays and each pair's Oklab target, precomputes the **Gram matrix** (AᵀA).
 - **Regression** (`regression_weights`): shift = embedding − base;
   Lawson–Hanson **NNLS** (`color/nnls.rs`) over the Gram matrix; weights
   filtered by `min_contribution`, truncated to `top_k`, power-rescaled;

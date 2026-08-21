@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::global::Embedder;
 use crate::utils::Percentage;
 
 use super::types::{MoodEndpoint, MoodsFile};
@@ -85,28 +84,21 @@ pub struct MoodConfig {
     /// file; a missing or unparsable file falls back to it as well.
     #[serde(default)]
     pub source: PathBuf,
+
+    /// When true, insertion does not compute embeddings or saliency scores;
+    /// they are backfilled into the database during UI/CLI color computation.
+    #[serde(default)]
+    pub backfill: bool,
 }
 
 impl MoodConfig {
-    /// Build the color model from the configured anchors. Run automatically
-    /// before any color-producing command (entry logging, today view,
-    /// trackers); the returned model is threaded to the callers that use it.
-    pub async fn init_with(
-        &self,
-        pool: &sqlx::SqlitePool,
-        embedder: &Embedder,
-    ) -> anyhow::Result<crate::color::ColorAxes> {
-        let pairs = self.load_pairs();
-        crate::color::ColorAxes::build_async(pool, embedder, &self.axes, &pairs).await
-    }
-
     /// Resolve the anchor pairs. An empty `source` skips deserialization
     /// and uses the bundled default directly. Otherwise the `source` file
     /// (relative to the config directory) is deserialized, falling back to
     /// the bundled default when it can't be read or parsed, or when it
     /// yields no pairs (the same load-or-default pattern as the config
     /// itself, see `cba::bo::load_type_or_default`).
-    pub(crate) fn load_pairs(&self) -> Vec<MoodEndpoint> {
+    pub fn load_pairs(&self) -> Vec<MoodEndpoint> {
         if self.source.as_os_str().is_empty() {
             return MoodsFile::default().pairs;
         }

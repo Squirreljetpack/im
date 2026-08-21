@@ -3,7 +3,6 @@ use cba::_dbg;
 use sqlx::SqlitePool;
 use std::io::Write;
 
-use crate::global;
 use crate::cli::{CliOpts, Command};
 use crate::config::Config;
 
@@ -29,11 +28,7 @@ pub async fn execute_command<W: Write>(
 
         Command::View { mode, show } => {
             if tui {
-                let axes = config
-                    .moods
-                    .init_with(pool, global::embedder())
-                    .await?;
-                crate::ui::tasks::TasksApp::new(mode, config.clone(), show, axes, opts.fullscreen)
+                crate::ui::tasks::TasksApp::new(mode, config.clone(), show, opts.fullscreen)
                     .await
                     .run()
                     .await
@@ -43,10 +38,7 @@ pub async fn execute_command<W: Write>(
         }
 
         Command::Tracker { period, items } => {
-            let axes = config
-                .moods
-                .init_with(pool, global::embedder())
-                .await?;
+            let axes = crate::color::ColorAxes::build(pool, &config.moods).await?;
             crate::tracker::write_tracker_grid(pool, config, &axes, opts, period, items, out).await
         }
 
@@ -72,10 +64,6 @@ pub async fn execute_command<W: Write>(
             show,
             horizon,
         } => {
-            let axes = config
-                .moods
-                .init_with(pool, global::embedder())
-                .await?;
             // `im @<date>` anchors the view to that day; parse with
             // the fixed `DATE_DIALECT`.
             let day_epoch = match &date {
@@ -85,7 +73,6 @@ pub async fn execute_command<W: Write>(
             if tui {
                 crate::ui::today::TodayApp::new(
                     config.clone(),
-                    axes,
                     day_epoch,
                     show,
                     horizon,
@@ -95,6 +82,7 @@ pub async fn execute_command<W: Write>(
                 .run()
                 .await
             } else {
+                let axes = crate::color::ColorAxes::build(pool, &config.moods).await?;
                 crate::today::write_today_view(
                     pool, config, &axes, day_epoch, show, horizon, opts, out,
                 )
@@ -124,10 +112,7 @@ pub async fn execute_command<W: Write>(
         },
 
         Command::Color { mood } => {
-            let axes = config
-                .moods
-                .init_with(pool, global::embedder())
-                .await?;
+            let axes = crate::color::ColorAxes::build(pool, &config.moods).await?;
             diagnostics::diagnose_color(&mood, config, &axes, opts, out)
         }
 

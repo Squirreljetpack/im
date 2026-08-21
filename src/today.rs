@@ -693,9 +693,10 @@ pub async fn write_today_view<W: Write>(
 ) -> Result<()> {
     let TodayFetch { entries, mood_rows } =
         fetch_today_entries(pool, config, horizon, day_epoch, show).await?;
-    // The CLI prints colors, so it computes them synchronously before
-    // formatting (unlike the TUI, which fills the cache in the background).
-    crate::color::compute_mood_colors(&mood_rows, axes);
+    // The CLI prints colors, so it computes them before formatting (and
+    // backfills unpersisted embeddings/scores to the DB when moods.backfill is true).
+    let pool_opt = if config.moods.backfill { Some(pool) } else { None };
+    crate::color::compute_mood_colors_and_backfill(pool_opt, &mood_rows, axes).await;
 
     if entries.is_empty() {
         writeln!(out, "Nothing logged today.")?;
@@ -955,7 +956,6 @@ mod tests {
     #[test]
     fn test_completed_sort_time() {
         let at = |s: &str| crate::date::parse_datetime(s, crate::date::DATE_DIALECT).unwrap();
-        let day_secs = 86400;
         let hour_secs = 3600;
 
         // Done oneshot with an entry: the last completion entry.

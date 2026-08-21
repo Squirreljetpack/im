@@ -330,6 +330,10 @@ async fn display_mood_tracker<W: Write>(
         return Ok(());
     }
 
+    // Unified helper: backfill missing embeddings/scores when moods.backfill is enabled
+    let pool_opt = if config.moods.backfill { Some(pool) } else { None };
+    crate::color::compute_mood_colors_and_backfill(pool_opt, &moods, axes).await;
+
     let embedder = global::embedder();
 
     let day_secs: i64 = 86400;

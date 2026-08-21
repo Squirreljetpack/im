@@ -97,13 +97,7 @@ async fn today_tui_row_content_renders() {
     seed_mood(&pool, "sad", "").await;
 
     let config = Config::default();
-    let axes = config
-        .moods
-        .init_with(&pool, im::global::embedder())
-        .await
-        .unwrap();
-
-    let app = TodayApp::new(config, axes, None, ViewVariant::All, TodayHorizon::Today, false).await;
+    let app = TodayApp::new(config, None, ViewVariant::All, TodayHorizon::Today, false).await;
     // Quit once the mood row shows up.
     app.run_with(headless_cfg("sad")).await.unwrap();
 
@@ -228,13 +222,7 @@ async fn today_tui_menu_title() {
     im::global::set_pool(pool.clone());
     seed_mood(&pool, "sad", "").await;
     let config = Config::default();
-    let axes = config
-        .moods
-        .init_with(&pool, im::global::embedder())
-        .await
-        .unwrap();
-
-    let app = TodayApp::new(config, axes, None, ViewVariant::All, TodayHorizon::Today, false).await;
+    let app = TodayApp::new(config, None, ViewVariant::All, TodayHorizon::Today, false).await;
     // Quit on any rendered frame (the title is set by the initializer).
     app.run_with(headless_cfg("Today")).await.unwrap();
 
@@ -272,13 +260,7 @@ async fn today_tui_alt_h_help_toggles() {
     im::global::set_pool(pool.clone());
     seed_mood(&pool, "sad", "").await;
     let config = Config::default();
-    let axes = config
-        .moods
-        .init_with(&pool, im::global::embedder())
-        .await
-        .unwrap();
-
-    let app = TodayApp::new(config, axes, None, ViewVariant::All, TodayHorizon::Today, false).await;
+    let app = TodayApp::new(config, None, ViewVariant::All, TodayHorizon::Today, false).await;
 
     // The on_start task records the last screen at each stage; the
     // assertions run after run_with returns so a failed stage can never
@@ -298,10 +280,10 @@ async fn today_tui_alt_h_help_toggles() {
             let help_screen = help_screen_inner.clone();
             let toggled_screen = toggled_screen_inner.clone();
             tokio::spawn(async move {
-                // Wait for the first frame, then open the help.
+                // Wait for the item to be matched and rendered, then open the help.
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
                 while tokio::time::Instant::now() < deadline {
-                    if !matchmaker::test::contents().is_empty() {
+                    if matchmaker::test::contents().contains("sad") {
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(25)).await;
@@ -375,13 +357,7 @@ async fn today_tui_resize_shrinks_to_small_window() {
     seed_mood(&pool, "sad", "").await;
     seed_mood(&pool, "okay", "").await;
     let config = Config::default();
-    let axes = config
-        .moods
-        .init_with(&pool, im::global::embedder())
-        .await
-        .unwrap();
-
-    let app = TodayApp::new(config, axes, None, ViewVariant::All, TodayHorizon::Today, false).await;
+    let app = TodayApp::new(config, None, ViewVariant::All, TodayHorizon::Today, false).await;
 
     let cfg = TodayRunCfg {
         tui: Some(TerminalConfig {

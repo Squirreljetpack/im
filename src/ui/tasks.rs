@@ -19,7 +19,6 @@ use ratatui::{
 use sqlx::SqlitePool;
 use std::sync::{Arc, Mutex};
 
-use crate::color::ColorAxes;
 use crate::config::Config;
 use crate::db::TaskRow;
 use crate::global::{config, pool, GLOBAL_CONFIG};
@@ -42,9 +41,6 @@ pub struct TasksApp {
     pub tasks: Vec<TaskRow>,
     pub mode: ViewMode,
     pub show: ViewVariant,
-    /// The built mood-color model (`MoodConfig::init_with`), threaded to
-    /// the previewer. The config itself lives in [`global::GLOBAL_CONFIG`].
-    pub axes: ColorAxes,
     pub sort_by_due: bool,
     /// Last cursor position (results index), restored after repopulation.
     pub(crate) cursor: u32,
@@ -58,7 +54,6 @@ impl TasksApp {
         mode: ViewMode,
         config: Config,
         show: ViewVariant,
-        axes: ColorAxes,
         fullscreen: bool,
     ) -> Self {
         let _ = GLOBAL_CONFIG.set(config.clone());
@@ -69,7 +64,6 @@ impl TasksApp {
             tasks,
             mode,
             show,
-            axes,
             sort_by_due: true,
             cursor: 0,
             fullscreen,
@@ -116,7 +110,6 @@ impl TasksApp {
         // Shared view state: async tasks update the data, the render thread
         // (Repopulate) pushes it into the worker.
         let view = Arc::new(Mutex::new(self));
-        let preview_axes = { view.lock().unwrap().axes.clone() };
 
         let worker = Worker::new(
             // The default column: label (index 2).
@@ -143,10 +136,12 @@ impl TasksApp {
         mm.config_render(render_cfg);
         mm.config_tui(tui_cfg);
 
+        let axes = Arc::new(tokio::sync::OnceCell::new());
+
         // Previewer: the event listener owns it (the `Preview` widget built
         // by `view()` holds its own clones of the shared string). A
         // generation counter drops stale async results.
-        let previewer = Previewer::new(preview_axes);
+        let previewer = Previewer::new(axes);
         let preview_view = previewer.view();
         // Clone for the PreviewSet handler below (the cursor handler moves
         // the original).

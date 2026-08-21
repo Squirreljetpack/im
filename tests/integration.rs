@@ -589,9 +589,7 @@ async fn test_cumulative_interval_today_rows() {
     assert_eq!(pushups[0].0, 20);
     assert_eq!(pushups[1].0, 30);
 
-    config
-        .moods
-        .init_with(&pool, im::global::embedder())
+    im::color::ColorAxes::build(&pool, &config.moods)
         .await
         .unwrap();
     let im::today::TodayFetch { entries, .. } =
@@ -1286,11 +1284,9 @@ async fn test_unknown_tracker_rejected() {
 async fn test_today_view_no_data() {
     let pool = test_pool().await.unwrap();
     let config = Config::default();
-    // write_today_view needs the embedder built (init_with) — handle_command does
+    // write_today_view needs the embedder built — handle_command does
     // this before dispatching, so the direct call must too.
-    let axes = config
-        .moods
-        .init_with(&pool, im::global::embedder())
+    let axes = im::color::ColorAxes::build(&pool, &config.moods)
         .await
         .unwrap();
     // write_today_view should succeed even with no data
@@ -1357,11 +1353,9 @@ async fn test_today_view_with_data() {
     .await
     .unwrap();
 
-    // write_today_view needs the embedder built (init_with) — handle_command does
+    // write_today_view needs the embedder built — handle_command does
     // this before dispatching, so the direct call must too.
-    let axes = config
-        .moods
-        .init_with(&pool, im::global::embedder())
+    let axes = im::color::ColorAxes::build(&pool, &config.moods)
         .await
         .unwrap();
 
@@ -1479,11 +1473,9 @@ async fn test_today_view_linked_trackers_and_tasks() {
     .await
     .unwrap();
 
-    // fetch_today_entries needs the embedder built (init_with) — the CLI
+    // fetch_today_entries needs the embedder built — the CLI
     // path does this before dispatching, so the direct call must too.
-    config
-        .moods
-        .init_with(&pool, im::global::embedder())
+    im::color::ColorAxes::build(&pool, &config.moods)
         .await
         .unwrap();
 
@@ -1596,11 +1588,9 @@ async fn test_today_view_null_labels_relog_and_prev() {
     .await
     .unwrap();
 
-    // fetch_today_entries needs the embedder built (init_with) — the CLI
+    // fetch_today_entries needs the embedder built — the CLI
     // path does this before dispatching, so the direct call must too.
-    config
-        .moods
-        .init_with(&pool, im::global::embedder())
+    im::color::ColorAxes::build(&pool, &config.moods)
         .await
         .unwrap();
 
@@ -1661,9 +1651,7 @@ async fn test_today_view_null_labels_relog_and_prev() {
 async fn test_today_view_with_date() {
     let pool = test_pool().await.unwrap();
     let config = Config::default();
-    config
-        .moods
-        .init_with(&pool, im::global::embedder())
+    im::color::ColorAxes::build(&pool, &config.moods)
         .await
         .unwrap();
 
@@ -1702,9 +1690,7 @@ async fn test_today_view_with_date() {
 async fn test_today_view_horizon_includes_moods_and_trackers() {
     let pool = test_pool().await.unwrap();
     let mut config = Config::default();
-    config
-        .moods
-        .init_with(&pool, im::global::embedder())
+    im::color::ColorAxes::build(&pool, &config.moods)
         .await
         .unwrap();
     config.tracker.insert(
@@ -1835,9 +1821,7 @@ async fn test_mood_score_roundtrip() {
 async fn test_today_view_backfills_mood_score() {
     let pool = test_pool().await.unwrap();
     let config = Config::default();
-    let axes = config
-        .moods
-        .init_with(&pool, im::global::embedder())
+    let axes = im::color::ColorAxes::build(&pool, &config.moods)
         .await
         .unwrap();
 
@@ -1909,7 +1893,76 @@ async fn test_today_view_backfills_mood_score() {
     assert_eq!(scores[1], Some(0.5), "pre-seeded score must be unchanged");
     assert!(
         scores[2].is_none(),
-        "directly-inserted row must NOT be backfilled by rendering"
+        "directly-inserted row must NOT be backfilled by rendering when moods.backfill is false"
+    );
+}
+
+#[tokio::test]
+async fn test_moods_backfill_config_and_render() {
+    let pool = test_pool().await.unwrap();
+    let mut config = Config::default();
+    config.moods.backfill = true;
+
+    // 1. Insert a mood with backfill = true: insertion skips embedding & score
+    let cmd = parse_from(vec!["serene".to_string()]).unwrap();
+    execute_command(
+        cmd,
+        &pool,
+        &config,
+        &CliOpts::default(),
+        &mut Vec::new(),
+        false,
+    )
+    .await
+    .unwrap();
+
+    let row = sqlx::query("SELECT embedding, score FROM mood WHERE mood = 'serene'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let emb_before: Option<Vec<u8>> = row.get("embedding");
+    let score_before: Option<f32> = row.get("score");
+    assert!(
+        emb_before.is_none(),
+        "embedding must NOT be computed at insertion when moods.backfill is true"
+    );
+    assert!(
+        score_before.is_none(),
+        "score must NOT be computed at insertion when moods.backfill is true"
+    );
+
+    // 2. Render today view: color computation should now backfill embedding & score
+    let axes = im::color::ColorAxes::build(&pool, &config.moods)
+        .await
+        .unwrap();
+
+    let mut out = Vec::new();
+    im::today::write_today_view(
+        &pool,
+        &config,
+        &axes,
+        None,
+        im::types::ViewVariant::All,
+        im::types::TodayHorizon::Today,
+        &CliOpts::default(),
+        &mut out,
+    )
+    .await
+    .unwrap();
+
+    let row_after = sqlx::query("SELECT embedding, score FROM mood WHERE mood = 'serene'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let emb_after: Option<Vec<u8>> = row_after.get("embedding");
+    let score_after: Option<f32> = row_after.get("score");
+    assert!(
+        emb_after.is_some(),
+        "embedding must be backfilled to DB on render"
+    );
+    assert!(
+        score_after.is_some(),
+        "score must be backfilled to DB on render"
     );
 }
 
@@ -2509,8 +2562,9 @@ async fn test_view_pending_b_not_availability_filtered() {
 async fn test_today_view_completed_today_inclusion_and_time_label() {
     let pool = test_pool().await.unwrap();
     let config = Config::default();
-    let embedder = im::global::embedder();
-    config.moods.init_with(&pool, embedder).await.unwrap();
+    im::color::ColorAxes::build(&pool, &config.moods)
+        .await
+        .unwrap();
 
     let interval = 86_400i64;
     let anchored_day = im::date::today_start() - 2 * 86_400;
@@ -2603,8 +2657,9 @@ async fn test_today_view_completed_today_inclusion_and_time_label() {
 async fn test_today_view_per_window_recurring_rows() {
     let pool = test_pool().await.unwrap();
     let config = Config::default();
-    let embedder = im::global::embedder();
-    config.moods.init_with(&pool, embedder).await.unwrap();
+    im::color::ColorAxes::build(&pool, &config.moods)
+        .await
+        .unwrap();
 
     let interval = 6 * 3600i64;
     let anchored_day = im::date::today_start() - 2 * 86_400;
@@ -2669,8 +2724,9 @@ async fn test_today_view_per_window_recurring_rows() {
 async fn test_today_view_open_done_window_shows_completion() {
     let pool = test_pool().await.unwrap();
     let config = Config::default();
-    let embedder = im::global::embedder();
-    config.moods.init_with(&pool, embedder).await.unwrap();
+    im::color::ColorAxes::build(&pool, &config.moods)
+        .await
+        .unwrap();
 
     let anchored_day = im::date::today_start() - 2 * 86_400;
     // 24-hour availability window every 48h starting yesterday 23:00:
@@ -2864,8 +2920,9 @@ async fn test_pending_b_window_open_scheduled() {
 async fn test_today_view_interval_aware_recurring_overlap() {
     let pool = test_pool().await.unwrap();
     let config = Config::default();
-    let embedder = im::global::embedder();
-    config.moods.init_with(&pool, embedder).await.unwrap();
+    im::color::ColorAxes::build(&pool, &config.moods)
+        .await
+        .unwrap();
 
     let today_start = im::date::today_start();
 
@@ -2940,8 +2997,9 @@ async fn test_today_view_interval_aware_recurring_overlap() {
 async fn test_today_view_done_time_label_and_b_filter() {
     let pool = test_pool().await.unwrap();
     let config = Config::default();
-    let embedder = im::global::embedder();
-    config.moods.init_with(&pool, embedder).await.unwrap();
+    im::color::ColorAxes::build(&pool, &config.moods)
+        .await
+        .unwrap();
 
     let yesterday_start = im::date::today_start() - 86_400;
 
@@ -3869,9 +3927,7 @@ async fn test_number_tracker_stored_as_integer() {
 async fn test_today_view_tasks_filters() {
     let pool = test_pool().await.unwrap();
     let config = Config::default();
-    config
-        .moods
-        .init_with(&pool, im::global::embedder())
+    im::color::ColorAxes::build(&pool, &config.moods)
         .await
         .unwrap();
 
@@ -5669,8 +5725,9 @@ async fn test_fetch_today_entries_carries_tracker_ids() {
     .await
     .unwrap();
 
-    let embedder = im::global::embedder();
-    config.moods.init_with(&pool, embedder).await.unwrap();
+    im::color::ColorAxes::build(&pool, &config.moods)
+        .await
+        .unwrap();
 
     let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
         &pool,
@@ -5737,8 +5794,9 @@ async fn test_fetch_today_entries_completed_task_has_check_badge() {
     .unwrap();
 
     let config = config;
-    let embedder = im::global::embedder();
-    config.moods.init_with(&pool, embedder).await.unwrap();
+    im::color::ColorAxes::build(&pool, &config.moods)
+        .await
+        .unwrap();
 
     let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
         &pool,
@@ -5774,9 +5832,7 @@ async fn test_fetch_today_entries_completed_task_has_check_badge() {
 async fn test_today_view_stale_completed_oneshot_hidden() {
     let pool = test_pool().await.unwrap();
     let mut config = Config::default();
-    config
-        .moods
-        .init_with(&pool, im::global::embedder())
+    im::color::ColorAxes::build(&pool, &config.moods)
         .await
         .unwrap();
 
@@ -5830,9 +5886,7 @@ async fn test_today_view_stale_completed_oneshot_hidden() {
 async fn test_today_view_journal_badge() {
     let pool = test_pool().await.unwrap();
     let mut config = Config::default();
-    let axes = config
-        .moods
-        .init_with(&pool, im::global::embedder())
+    let axes = im::color::ColorAxes::build(&pool, &config.moods)
         .await
         .unwrap();
 

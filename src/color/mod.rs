@@ -18,7 +18,6 @@ mod nnls;
 pub use blend::{average_oklab, blend_weights, lerp_oklab};
 pub use nnls::{nnls, nnls_core};
 
-use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use anyhow::Result;
@@ -97,9 +96,16 @@ pub fn predict_saliency(embedder: &Embedder, mood_text: &str) -> f32 {
 }
 
 impl ColorAxes {
+    /// Load and build color axes from the database and mood configuration.
+    pub async fn build(pool: &sqlx::SqlitePool, moods: &crate::config::MoodConfig) -> Result<Self> {
+        let embedder = crate::global::embedder_async().await;
+        let pairs = moods.load_pairs();
+        Self::build_inner(pool, embedder, &moods.axes, &pairs).await
+    }
+
     /// Build basis vectors from the given endpoint pairs using SQLite cached
     /// embeddings.
-    pub async fn build_async(
+    async fn build_inner(
         pool: &sqlx::SqlitePool,
         embedder: &Embedder,
         settings: &ColorAxesSettings,
@@ -319,25 +325,15 @@ impl ColorAxes {
         gated_saliency(saliency, self.emotional_saliency_gate.to_float())
     }
 
-    /// Resolve a mood row to its final Oklab color, caching the color
-    /// per mood so repeated moods run the pipeline once.
+    /// Resolve a mood row to its final Oklab color (pure computation, no cache).
     ///
     /// Sync and backfill-free: rows without a stored embedding are embedded
     /// on the fly (no DB write), and rows without a cached saliency score
-    /// fall back to predicting it inline. Persisting those values is the
-    /// job of `:db backfill` (see `commands::maintenance`).
+    /// fall back to predicting it inline.
     ///
     /// Returns `None` for empty moods or when embedding fails.
-    pub fn mood_color_cached(
-        &self,
-        embedder: &Embedder,
-        row: &MoodRow,
-        cache: &mut HashMap<String, Oklab>,
-    ) -> Option<Oklab> {
+    pub fn compute_mood_color(&self, embedder: &Embedder, row: &MoodRow) -> Option<Oklab> {
         let mood = &row.mood;
-        if let Some(oklab) = cache.get(mood) {
-            return Some(*oklab);
-        }
         if mood.is_empty() {
             return None;
         }
@@ -354,9 +350,7 @@ impl ColorAxes {
         };
         // The cached score (when present) skips the saliency ONNX pass.
         let reg = self.regression_weights(&embedding, embedder, row.score.ok_or(mood.as_str()));
-        let oklab = self.weights_to_color(reg.as_ref());
-        cache.insert(mood.to_string(), oklab);
-        Some(oklab)
+        Some(self.weights_to_color(reg.as_ref()))
     }
 }
 
@@ -378,57 +372,85 @@ pub fn cached_mood_color(mood: &str) -> Option<Oklab> {
     global_mood_color_cache().get(mood).map(|r| *r)
 }
 
-/// Snapshot the process-wide cache into an owned working map for a
-/// background computation pass.
-pub fn mood_color_snapshot() -> HashMap<String, Oklab> {
-    global_mood_color_cache()
-        .iter()
-        .map(|r| (r.key().clone(), *r.value()))
-        .collect()
-}
-
-/// Merge a working map into the process-wide cache.
-pub fn merge_mood_colors(map: HashMap<String, Oklab>) {
-    let cache = global_mood_color_cache();
-    for (mood, oklab) in map {
-        cache.insert(mood, oklab);
-    }
-}
-
 /// Resolve a mood's color via the process-wide cache; on a miss, runs the
 /// color pipeline (blocking — background tasks only) and writes the result
-/// back. Used by task previews for linked moods from arbitrary days, which
-/// no fill can pre-warm.
+/// back directly to the global cache.
 pub fn mood_color_with_backfill(axes: Option<&ColorAxes>, row: &MoodRow) -> Option<Oklab> {
     if let Some(oklab) = cached_mood_color(&row.mood) {
         return Some(oklab);
     }
     let axes = axes?;
     let embedder = global::embedder();
-    let mut working = mood_color_snapshot();
-    let out = axes.mood_color_cached(embedder, row, &mut working);
-    merge_mood_colors(working);
-    out
+    let oklab = axes.compute_mood_color(embedder, row)?;
+    global_mood_color_cache().insert(row.mood.clone(), oklab);
+    Some(oklab)
 }
 
-/// Compute colors for every row the process-wide cache is still missing
-/// (blocking — the background fill task, or the one-shot CLI). Returns how
-/// many moods were newly colored.
-pub fn compute_mood_colors(rows: &[MoodRow], axes: &ColorAxes) -> usize {
-    let embedder = global::embedder();
-    let mut working = mood_color_snapshot();
+/// Compute colors for mood rows missing from the process-wide cache, and backfill
+/// any unpersisted embeddings and saliency scores to the database.
+pub async fn compute_mood_colors_and_backfill(
+    pool: Option<&sqlx::SqlitePool>,
+    rows: &[MoodRow],
+    axes: &ColorAxes,
+) -> usize {
+    let embedder = global::embedder_async().await;
+    let cache = global_mood_color_cache();
     let mut added = 0;
+
     for row in rows {
         if row.mood.is_empty() {
             continue;
         }
-        let before = working.contains_key(&row.mood);
-        let _ = axes.mood_color_cached(embedder, row, &mut working);
-        if !before && working.contains_key(&row.mood) {
+
+        let cached = cache.contains_key(&row.mood);
+        if cached && (pool.is_none() || (row.embedding.is_some() && row.score.is_some())) {
+            continue;
+        }
+
+        // 1. Resolve embedding (from row blob, or ONNX inference)
+        let (embedding, needs_emb_backfill) = match row
+            .embedding
+            .as_deref()
+            .and_then(global::blob_to_embedding)
+        {
+            Some(emb) => (Some(emb), false),
+            None => (embedder.embed(&row.mood, &axes.prefix_string).ok(), true),
+        };
+
+        let Some(embedding) = embedding else {
+            continue;
+        };
+
+        // 2. Resolve saliency score (from row, or ONNX prediction)
+        let (score, needs_score_backfill) = match row.score {
+            Some(s) => (s, false),
+            None => (predict_saliency(embedder, &row.mood), true),
+        };
+
+        // 3. Persist missing fields to DB if pool is provided and row has valid id
+        if let Some(pool) = pool {
+            if row.id > 0 {
+                let _ = crate::db::update_mood_embedding_and_score(
+                    pool,
+                    row.id,
+                    needs_emb_backfill
+                        .then(|| global::embedding_to_blob(&embedding))
+                        .as_deref(),
+                    needs_score_backfill.then_some(score),
+                )
+                .await;
+            }
+        }
+
+        // 4. Compute color and update in-memory cache directly
+        if !cached {
+            let reg = axes.regression_weights(&embedding, embedder, Ok(score));
+            let oklab = axes.weights_to_color(reg.as_ref());
+            cache.insert(row.mood.clone(), oklab);
             added += 1;
         }
     }
-    merge_mood_colors(working);
+
     added
 }
 

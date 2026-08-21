@@ -22,7 +22,6 @@ use matchmaker::{
 };
 use std::sync::{Arc, Mutex};
 
-use crate::color::ColorAxes;
 use crate::config::Config;
 use crate::db::TaskRow;
 use crate::global::GLOBAL_CONFIG;
@@ -45,7 +44,6 @@ impl OneshotPickerApp {
             ViewMode::PendingTasks,
             config,
             ViewVariant::default(),
-            empty_axes(),
             fullscreen,
         )
         .await;
@@ -130,23 +128,5 @@ impl OneshotPickerApp {
             Err(MatchError::NoMatch) | Err(MatchError::Abort(_)) => Ok(None),
             Err(e) => Err(e.into()),
         }
-    }
-}
-
-/// A degenerate color model: the picker has no preview pane, so the axes
-/// are never read. TasksApp requires the value; the tasks view only uses
-/// it for the previewer.
-fn empty_axes() -> ColorAxes {
-    ColorAxes {
-        basis_moods: Vec::new(),
-        base_vector: Vec::new(),
-        steepness: 1.0,
-        min_contribution: crate::utils::Percentage::new(1),
-        top_k: 0,
-        baseline_oklab_l: crate::utils::Percentage::new(50),
-        emotional_saliency_gate: crate::utils::Percentage::new(0),
-        prefix_string: String::new(),
-        base_string: String::new(),
-        gram_matrix: Vec::new(),
     }
 }

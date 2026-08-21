@@ -485,19 +485,22 @@ mod tests {
         assert_eq!(cfg.moods.axes.prefix_string, "person says: ");
         assert_eq!(cfg.moods.axes.blend_steepness, 2.0);
         assert_eq!(cfg.moods.source, PathBuf::from("moods.toml"));
+        assert!(!cfg.moods.backfill);
 
         // Explicit settings are honored through the flatten.
         let cfg: Config = toml::from_str(
-            "[moods]\nblend_steepness = 3.5\ntop_k = 8\nsource = \"my-moods.toml\"\n",
+            "[moods]\nblend_steepness = 3.5\ntop_k = 8\nsource = \"my-moods.toml\"\nbackfill = true\n",
         )
         .expect("[moods] with settings parses");
         assert_eq!(cfg.moods.axes.blend_steepness, 3.5);
         assert_eq!(cfg.moods.axes.top_k, 8);
         assert_eq!(cfg.moods.source, PathBuf::from("my-moods.toml"));
+        assert!(cfg.moods.backfill);
 
         // A missing `source` key defaults to the empty path.
         let empty: Config = toml::from_str("").expect("empty toml parses");
         assert!(empty.moods.source.as_os_str().is_empty());
+        assert!(!empty.moods.backfill);
 
         // Unknown keys under [moods] are rejected (deny_unknown_fields holds
         // through the flattened ColorAxesSettings).
@@ -511,6 +514,7 @@ mod tests {
         let reparsed: Config = toml::from_str(&serialized).expect("re-parses");
         assert_eq!(reparsed.moods.axes.blend_steepness, 3.5);
         assert_eq!(reparsed.moods.source, cfg.moods.source);
+        assert_eq!(reparsed.moods.backfill, cfg.moods.backfill);
     }
 
     #[test]
