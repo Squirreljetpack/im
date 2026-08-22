@@ -62,7 +62,7 @@ pub struct TodayApp {
     pub entries: Vec<TodayEntry>,
     pub horizon: TodayHorizon,
     pub show: ViewVariant,
-    pub day_epoch: Option<i64>,
+    pub day_epoch: i64,
     pub day_label: String,
     pub sort_by_priority: bool,
     /// Raw mood rows for the background color fill (startup fetch): the
@@ -78,7 +78,7 @@ pub struct TodayApp {
 impl TodayApp {
     pub async fn new(
         config: Config,
-        day_epoch: Option<i64>,
+        day_epoch: i64,
         show: ViewVariant,
         horizon: TodayHorizon,
         fullscreen: bool,
@@ -500,6 +500,33 @@ fn handler(action: ImAction, state: &mut MMState<'_, TodayEntry, ()>, ctx: &Toda
         }
         // The editor payload may be staged from an async task (live task
         // fetch); EditExecute raises the interrupt once it is staged.
+        ImAction::Yesterday | ImAction::Tomorrow => {
+            let forward = matches!(action, ImAction::Tomorrow);
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                // The anchored day must never move into the future.
+                let today = crate::date::today_start();
+                let current = {
+                    let v = ctx.view.lock().unwrap();
+                    v.day_epoch
+                };
+                if forward && current >= today {
+                    return;
+                }
+                let new_epoch = if forward {
+                    crate::date::day_end(current) + 1
+                } else {
+                    crate::date::day_start(current - 1)
+                };
+                {
+                    let mut v = ctx.view.lock().unwrap();
+                    v.day_epoch = new_epoch;
+                    v.day_label = day_label_for(v.day_epoch);
+                }
+                refresh_today(&ctx).await;
+            });
+        }
+
         ImAction::EditExecute => {
             state.set_interrupt(Interrupt::Execute, String::new());
         }
@@ -546,12 +573,13 @@ fn today_header(v: &TodayApp) -> String {
     )
 }
 
-fn day_label_for(day_epoch: Option<i64>) -> String {
-    match day_epoch {
-        None => "Today".to_string(),
-        Some(ts) if ts == crate::date::today_start() => "Today".to_string(),
-        Some(ts) if ts == crate::date::today_start() - 86400 => "Yesterday".to_string(),
-        Some(ts) => crate::date::format_date(ts),
+fn day_label_for(day_epoch: i64) -> String {
+    if day_epoch == crate::date::today_start() {
+        "Today".to_string()
+    } else if day_epoch == crate::date::today_start() - 86400 {
+        "Yesterday".to_string()
+    } else {
+        crate::date::format_date(day_epoch)
     }
 }
 
@@ -1149,14 +1177,14 @@ mod tests {
     fn test_day_label() {
         let today = crate::date::today_start();
         // Anchored today (explicit or implicit) → "Today".
-        assert_eq!(day_label_for(None), "Today");
-        assert_eq!(day_label_for(Some(today)), "Today");
+        assert_eq!(day_label_for(today), "Today");
+        assert_eq!(day_label_for(today), "Today");
         // Yesterday.
-        assert_eq!(day_label_for(Some(today - 86400)), "Yesterday");
+        assert_eq!(day_label_for(today - 86400), "Yesterday");
         // Any other day → DD-MM-YY.
         let other = crate::date::parse_datetime("2024-03-15", crate::date::DATE_DIALECT).unwrap();
         assert_eq!(
-            day_label_for(Some(crate::date::day_start(other))),
+            day_label_for(crate::date::day_start(other)),
             "15-03-24"
         );
     }

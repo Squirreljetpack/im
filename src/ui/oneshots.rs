@@ -16,7 +16,7 @@ use anyhow::Result;
 use matchmaker::{
     MatchError, Matchmaker, PickOptions,
     action::{Action as MMAction, Actions},
-    binds::{key},
+    binds::{key, BindMapExt},
     message::Interrupt,
     nucleo::Worker,
 };
@@ -54,6 +54,9 @@ impl OneshotPickerApp {
     /// or `None` when the pick is cancelled (Esc / ctrl-c).
     pub async fn run(self) -> Result<Option<(i64, Option<i64>)>> {
         let (mut render_cfg, mut binds, mut tui_cfg, overlay_cfg) = get_mm_cfg();
+        // The date-shift actions are today-view only; prune them so they
+        // neither fire nor appear in the picker's help.
+        binds.filter_action(|a| !matches!(a, MMAction::Custom(ImAction::Yesterday | ImAction::Tomorrow)));
         // The picker is full-width: no preview pane.
         render_cfg.preview.show = false.into();
         if self.inner.fullscreen {

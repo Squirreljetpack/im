@@ -134,11 +134,9 @@ pub(super) async fn db_backfill(pool: &SqlitePool) -> Result<()> {
                 .then(|| crate::color::predict_saliency(embedder, &mood.mood)),
         )
         .await
-        {
-            if rows > 0 {
+            && rows > 0 {
                 backfilled += 1;
             }
-        }
     }
 
     if backfilled == 0 {

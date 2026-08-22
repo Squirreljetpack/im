@@ -428,8 +428,8 @@ pub async fn compute_mood_colors_and_backfill(
         };
 
         // 3. Persist missing fields to DB if pool is provided and row has valid id
-        if let Some(pool) = pool {
-            if row.id > 0 {
+        if let Some(pool) = pool
+            && row.id > 0 {
                 let _ = crate::db::update_mood_embedding_and_score(
                     pool,
                     row.id,
@@ -440,7 +440,6 @@ pub async fn compute_mood_colors_and_backfill(
                 )
                 .await;
             }
-        }
 
         // 4. Compute color and update in-memory cache directly
         if !cached {

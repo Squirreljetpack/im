@@ -309,7 +309,7 @@ pub async fn fetch_today_entries(
     pool: &SqlitePool,
     config: &Config,
     horizon: TodayHorizon,
-    day_epoch: Option<i64>,
+    day_epoch: i64,
     show: ViewVariant,
 ) -> Result<TodayFetch> {
     // The oneshot filter is bound to the view variant: `All` keeps the
@@ -327,7 +327,7 @@ pub async fn fetch_today_entries(
     // scheduled/recurring fetches below return empty lists.
     let tasks_enabled = filter != TasksFilter::None;
     // `im @<date>` anchors the day; bare `im` is today.
-    let day_start_epoch = day_epoch.unwrap_or_else(date::today_start);
+    let day_start_epoch = day_epoch;
     let day_end_epoch = date::day_end(day_start_epoch);
     let horizon_end = horizon.end_epoch(day_start_epoch);
     let now_ts = date::now();
@@ -685,7 +685,7 @@ pub async fn write_today_view<W: Write>(
     pool: &SqlitePool,
     config: &Config,
     axes: &crate::color::ColorAxes,
-    day_epoch: Option<i64>,
+    day_epoch: i64,
     show: ViewVariant,
     horizon: TodayHorizon,
     _opts: &CliOpts,

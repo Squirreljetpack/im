@@ -67,8 +67,8 @@ pub async fn execute_command<W: Write>(
             // `im @<date>` anchors the view to that day; parse with
             // the fixed `DATE_DIALECT`.
             let day_epoch = match &date {
-                Some(d) => Some(crate::date::parse_date(d, crate::date::DATE_DIALECT)?),
-                None => None,
+                Some(d) => crate::date::parse_date(d, crate::date::DATE_DIALECT)?,
+                None => crate::date::today_start(),
             };
             if tui {
                 crate::ui::today::TodayApp::new(

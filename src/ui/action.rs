@@ -1,9 +1,9 @@
-use std::fmt;
 use std::str::FromStr;
+use strum_macros::Display;
 
 /// Custom actions emitted by keybindings or dispatched by async tasks and
 /// consumed by the TUI handlers.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Display)]
 pub enum ImAction {
     /// Primary action: context-dependent (complete/reset/prompt).
     Update,
@@ -30,25 +30,12 @@ pub enum ImAction {
     /// Dispatched by async tasks that had to fetch payload data first;
     /// not user-bindable.
     EditExecute,
+    /// Shift the today view to the previous day.
+    Yesterday,
+    /// Shift the today view to the next day.
+    Tomorrow,
 }
 
-impl fmt::Display for ImAction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ImAction::Update => write!(f, "Update"),
-            ImAction::Edit => write!(f, "Edit"),
-            ImAction::Link => write!(f, "Link"),
-            ImAction::Delete => write!(f, "Delete"),
-            ImAction::CycleMode => write!(f, "CycleMode"),
-            ImAction::CycleFilter => write!(f, "CycleFilter"),
-            ImAction::ToggleSort => write!(f, "ToggleSort"),
-            ImAction::Refresh => write!(f, "Refresh"),
-            ImAction::Quit => write!(f, "Quit"),
-            ImAction::Repopulate => write!(f, "Repopulate"),
-            ImAction::EditExecute => write!(f, "EditExecute"),
-        }
-    }
-}
 
 impl FromStr for ImAction {
     type Err = String;
@@ -66,6 +53,8 @@ impl FromStr for ImAction {
             "Quit" => Ok(ImAction::Quit),
             "Repopulate" => Ok(ImAction::Repopulate),
             "EditExecute" => Ok(ImAction::EditExecute),
+            "Yesterday" => Ok(ImAction::Yesterday),
+            "Tomorrow" => Ok(ImAction::Tomorrow),
             // Unrecognized names fall through to matchmaker's builtin
             // action grammar (e.g. `NextColumn`, `Help`) — an empty error
             // signals the builtin parser to take over.

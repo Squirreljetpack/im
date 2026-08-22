@@ -661,8 +661,6 @@ pub async fn fetch_tasks_for_view(
                 let not_done = scoped.is_none() || scoped.unwrap_or(0) < task.target_count;
                 if is_scheduled {
                     scoped.is_none() || recent
-                } else if is_recurring {
-                    not_done || recent
                 } else {
                     not_done || recent
                 }
@@ -741,7 +739,7 @@ pub async fn fetch_tasks_for_view(
                 (key, task)
             })
             .collect();
-        keyed.sort_by(|a, b| b.0.cmp(&a.0));
+        keyed.sort_by_key(|k| std::cmp::Reverse(k.0));
         out = keyed.into_iter().map(|(_, t)| t).collect();
     }
 

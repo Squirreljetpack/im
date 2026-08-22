@@ -217,7 +217,7 @@ pub async fn embedder_async() -> &'static Embedder {
     if let Some(e) = EMBEDDER.get() {
         return e;
     }
-    tokio::task::spawn_blocking(|| embedder())
+    tokio::task::spawn_blocking(embedder)
         .await
         .expect("Embedding model spawn_blocking panicked")
 }

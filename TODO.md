@@ -3,3 +3,4 @@ Investigate global embedder lazy loading, i think its possible, mood color axes 
 https://www.inkandswitch.com/essay/local-first/
 
 Centralized sync
+

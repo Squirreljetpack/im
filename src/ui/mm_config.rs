@@ -55,6 +55,9 @@ pub fn default_binds() -> BindMap<ImAction> {
         key!(ctrl-e) => ImAction::Edit,
         key!(ctrl-l) => ImAction::Link,
         key!(ctrl-r) => ImAction::Refresh,
+            // Day-shift (today view only): move the anchored day back/forward.
+            key!(shift-left) => ImAction::Yesterday,
+            key!(shift-right) => ImAction::Tomorrow,
         // Results/Preview wrap (mirrors the matchmaker-cli assets binds).
         key!(alt-h) => MMAction::Help("".to_string()),
         key!(alt-'[') => MMAction::ToggleWrap,

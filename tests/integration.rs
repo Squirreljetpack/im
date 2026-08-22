@@ -593,7 +593,7 @@ async fn test_cumulative_interval_today_rows() {
         .await
         .unwrap();
     let im::today::TodayFetch { entries, .. } =
-        im::today::fetch_today_entries(&pool, &config, TodayHorizon::Today, None, ViewVariant::All)
+        im::today::fetch_today_entries(&pool, &config, TodayHorizon::Today, im::date::today_start(), ViewVariant::All)
             .await
             .unwrap();
     let rows: Vec<_> = entries
@@ -1295,7 +1295,7 @@ async fn test_today_view_no_data() {
         &pool,
         &config,
         &axes,
-        None,
+        im::date::today_start(),
         im::types::ViewVariant::All,
         im::types::TodayHorizon::Today,
         &CliOpts::default(),
@@ -1395,7 +1395,7 @@ async fn test_today_view_with_data() {
         &pool,
         &config,
         &axes,
-        None,
+        im::date::today_start(),
         im::types::ViewVariant::All,
         im::types::TodayHorizon::Today,
         &CliOpts::default(),
@@ -1480,7 +1480,7 @@ async fn test_today_view_linked_trackers_and_tasks() {
         .unwrap();
 
     let im::today::TodayFetch { entries, .. } =
-        im::today::fetch_today_entries(&pool, &config, TodayHorizon::Today, None, ViewVariant::All)
+        im::today::fetch_today_entries(&pool, &config, TodayHorizon::Today, im::date::today_start(), ViewVariant::All)
             .await
             .unwrap();
     let mood = entries
@@ -1595,7 +1595,7 @@ async fn test_today_view_null_labels_relog_and_prev() {
         .unwrap();
 
     let im::today::TodayFetch { entries, .. } =
-        im::today::fetch_today_entries(&pool, &config, TodayHorizon::Today, None, ViewVariant::All)
+        im::today::fetch_today_entries(&pool, &config, TodayHorizon::Today, im::date::today_start(), ViewVariant::All)
             .await
             .unwrap();
 
@@ -1635,7 +1635,7 @@ async fn test_today_view_null_labels_relog_and_prev() {
         .unwrap();
 
     let im::today::TodayFetch { entries, .. } =
-        im::today::fetch_today_entries(&pool, &config, TodayHorizon::Today, None, ViewVariant::All)
+        im::today::fetch_today_entries(&pool, &config, TodayHorizon::Today, im::date::today_start(), ViewVariant::All)
             .await
             .unwrap();
     let water = entries
@@ -1737,7 +1737,7 @@ async fn test_today_view_horizon_includes_moods_and_trackers() {
                 &pool,
                 &config,
                 $horizon,
-                Some(anchored_day),
+                anchored_day,
                 im::types::ViewVariant::All,
             )
             .await
@@ -1872,7 +1872,7 @@ async fn test_today_view_backfills_mood_score() {
         &pool,
         &config,
         &axes,
-        None,
+        im::date::today_start(),
         im::types::ViewVariant::All,
         im::types::TodayHorizon::Today,
         &CliOpts::default(),
@@ -1941,7 +1941,7 @@ async fn test_moods_backfill_config_and_render() {
         &pool,
         &config,
         &axes,
-        None,
+        im::date::today_start(),
         im::types::ViewVariant::All,
         im::types::TodayHorizon::Today,
         &CliOpts::default(),
@@ -2604,7 +2604,7 @@ async fn test_today_view_completed_today_inclusion_and_time_label() {
         &pool,
         &config,
         im::types::TodayHorizon::Today,
-        Some(anchored_day),
+        anchored_day,
         im::types::ViewVariant::All,
     )
     .await
@@ -2635,7 +2635,7 @@ async fn test_today_view_completed_today_inclusion_and_time_label() {
         &pool,
         &config,
         im::types::TodayHorizon::Today,
-        Some(anchored_day),
+        anchored_day,
         im::types::ViewVariant::A,
     )
     .await
@@ -2687,7 +2687,7 @@ async fn test_today_view_per_window_recurring_rows() {
                 &pool,
                 &config,
                 im::types::TodayHorizon::Today,
-                Some(anchored_day),
+        anchored_day,
                 $show,
             )
             .await
@@ -2759,7 +2759,7 @@ async fn test_today_view_open_done_window_shows_completion() {
                 &pool,
                 &config,
                 im::types::TodayHorizon::Today,
-                Some(anchored_day),
+                anchored_day,
                 $show,
             )
             .await
@@ -2957,7 +2957,7 @@ async fn test_today_view_interval_aware_recurring_overlap() {
         &pool,
         &config,
         im::types::TodayHorizon::Today,
-        None,
+        im::date::today_start(),
         im::types::ViewVariant::All,
     )
     .await
@@ -3030,7 +3030,7 @@ async fn test_today_view_done_time_label_and_b_filter() {
         &pool,
         &config,
         im::types::TodayHorizon::Today,
-        Some(yesterday_start),
+        yesterday_start,
         im::types::ViewVariant::All,
     )
     .await
@@ -3971,7 +3971,7 @@ async fn test_today_view_tasks_filters() {
         async move {
             let mut cfg = base.clone();
             cfg.today_view.initial_tasks_filter = filter;
-            im::today::fetch_today_entries(&pool, &cfg, im::types::TodayHorizon::Today, None, show)
+            im::today::fetch_today_entries(&pool, &cfg, im::types::TodayHorizon::Today, im::date::today_start(), show)
                 .await
                 .unwrap()
                 .entries
@@ -5733,7 +5733,7 @@ async fn test_fetch_today_entries_carries_tracker_ids() {
         &pool,
         &config,
         im::types::TodayHorizon::Today,
-        None,
+        im::date::today_start(),
         im::types::ViewVariant::All,
     )
     .await
@@ -5802,7 +5802,7 @@ async fn test_fetch_today_entries_completed_task_has_check_badge() {
         &pool,
         &config,
         im::types::TodayHorizon::Today,
-        None,
+        im::date::today_start(),
         im::types::ViewVariant::All,
     )
     .await
@@ -5857,7 +5857,7 @@ async fn test_today_view_stale_completed_oneshot_hidden() {
         &pool,
         &config,
         im::types::TodayHorizon::Today,
-        None,
+        im::date::today_start(),
         im::types::ViewVariant::All,
     )
     .await
@@ -5913,7 +5913,7 @@ async fn test_today_view_journal_badge() {
         &pool,
         &config,
         &axes,
-        None,
+        im::date::today_start(),
         im::types::ViewVariant::All,
         im::types::TodayHorizon::Today,
         &CliOpts::default(),
@@ -5943,7 +5943,7 @@ async fn test_today_view_journal_badge() {
         &pool,
         &config,
         &axes,
-        None,
+        im::date::today_start(),
         im::types::ViewVariant::All,
         im::types::TodayHorizon::Today,
         &CliOpts::default(),
@@ -5976,7 +5976,7 @@ async fn test_today_view_journal_badge() {
         &pool,
         &config,
         &axes,
-        None,
+        im::date::today_start(),
         im::types::ViewVariant::All,
         im::types::TodayHorizon::Today,
         &CliOpts::default(),

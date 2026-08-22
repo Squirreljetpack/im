@@ -12,6 +12,8 @@ use matchmaker::{
     },
     render::MMState,
 };
+use matchmaker::binds::BindMapExt;
+
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -99,7 +101,10 @@ impl TasksApp {
     }
 
     pub async fn run(self) -> Result<()> {
-        let (mut render_cfg, binds, mut tui_cfg, overlay_cfg) = get_mm_cfg();
+        let (mut render_cfg, mut binds, mut tui_cfg, overlay_cfg) = get_mm_cfg();
+        // The date-shift actions are today-view only; prune them so they
+        // neither fire nor appear in the tasks view's help.
+        binds.filter_action(|a| !matches!(a, MMAction::Custom(ImAction::Yesterday | ImAction::Tomorrow)));
         if self.fullscreen {
             tui_cfg.layout = None;
         }
@@ -404,6 +409,10 @@ pub(crate) fn handler(action: ImAction, state: &mut MMState<'_, TaskRow, ()>, ct
         }
         // The tasks app has no link targets; the editor payload is always
         // staged synchronously here, so EditExecute is unused.
+        // The tasks view anchors no day, so the date-shift actions are inert
+        // (and already filtered out of its binds above).
+        ImAction::Yesterday | ImAction::Tomorrow => {}
+
         ImAction::Link | ImAction::EditExecute => {}
     }
 }
