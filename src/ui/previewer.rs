@@ -80,6 +80,8 @@ impl Previewer {
             let lines = if let Some(task_id) = entry.task_id {
                 let task_opt = if let Some(w) = &entry.recurring_window {
                     Some(w.task.clone())
+                } else if let Some(task) = &entry.task {
+                    Some(task.clone())
                 } else {
                     crate::db::fetch_task_by_id(&pool, task_id, crate::date::now())
                         .await

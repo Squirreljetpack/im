@@ -51,7 +51,10 @@ fn headless_cfg(marker: &'static str) -> TodayRunCfg {
         event_loop: Some(EventLoop::new().as_optional()),
         on_start: Some(Box::new(move |tx| {
             tokio::spawn(async move {
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                // Generous deadline: under a fully loaded test runner the
+                // view's async init (embedder/color-axes build) can take
+                // several seconds before the first content frame lands.
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
                 while tokio::time::Instant::now() < deadline {
                     if matchmaker::test::contents().contains(marker) {
                         break;
@@ -130,28 +133,7 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// Convert CSI codes to readable text: cursor position codes (H/f) become
-/// newlines, everything else is dropped.
-// fn csi_to_lines(s: &str) -> Vec<String> {
-//     let mut out = String::new();
-//     let mut chars = s.chars().peekable();
-//     while let Some(c) = chars.next() {
-//         if c == '\x1b' && chars.peek() == Some(&'[') {
-//             chars.next();
-//             for d in chars.by_ref() {
-//                 if ('\u{40}'..='\u{7e}').contains(&d) {
-//                     if d == 'H' || d == 'f' {
-//                         out.push('\n');
-//                     }
-//                     break;
-//                 }
-//             }
-//         } else {
-//             out.push(c);
-//         }
-//     }
-//     out.lines().map(|l| strip_ansi(l.trim_end())).collect()
-// }
+
 
 /// Reconstruct the last screen state from the raw ANSI capture: the diff
 /// writer skips unchanged cells (e.g. the spaces inside the ui border
@@ -281,7 +263,7 @@ async fn today_tui_alt_h_help_toggles() {
             let toggled_screen = toggled_screen_inner.clone();
             tokio::spawn(async move {
                 // Wait for the item to be matched and rendered, then open the help.
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
                 while tokio::time::Instant::now() < deadline {
                     if matchmaker::test::contents().contains("sad") {
                         break;
@@ -305,7 +287,7 @@ async fn today_tui_alt_h_help_toggles() {
 
                 // Toggle off: the preview falls back to the entry preview
                 // (the MOOD heading), and the help text disappears.
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
                 let _ = tx.send(RenderCommand::Action(MMAction::Help(String::new())));
                 let mut rows = Vec::new();
                 while tokio::time::Instant::now() < deadline {

@@ -19,6 +19,9 @@ pub fn display_entry(
     if !entry.mood.is_empty() {
         rows.push(("Mood".to_string(), entry.mood.clone()));
     }
+    if let Some(dur) = entry.duration {
+        rows.push(("Duration".to_string(), crate::date::format_duration(dur)));
+    }
     for tracker in &entry.trackers {
         // Null tracker rows store score 0 (the entry is a timestamp/count
         // marker) and carry no payload — the confirmation shows an empty

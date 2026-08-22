@@ -48,13 +48,16 @@ backfill = true
 [preview]
 # Show a `last:` field for done tasks in the preview pane.
 show_last_when_done = true
+# Format dates with abbreviated month names (e.g. "15 Mar 14:30") instead of numeric ("03-15 14:30").
+named_months = true
 
 [today_view]
-# initial_tasks_filter = "all"   # all | overdue | pending | horizon
-
 # Merge a task's adjacent completion entries into a single done row
 # in the today view.
 coalesce_completions = true
+# Optional styling for priority and time columns in today view TUI.
+# tui_priority_style = { fg = "dark_gray" }
+# tui_time_style = { fg = "white" }
 
 [badges]
 # Badge for journal-only entries (a mood entry with no mood word): a
@@ -68,6 +71,9 @@ journal_badge = '·'
 # Keep a just-completed task visible in the pending view (@) for this many
 # seconds after its last completion entry.
 persist_pending_seconds = 300
+# Optional styling for priority and time columns in task list TUI.
+# tui_priority_style = { fg = "dark_gray" }
+# tui_time_style = { fg = "white" }
 
 [editor]
 # Body-editor templates per entry kind (arrays): a bare `.` opens the
@@ -81,6 +87,7 @@ persist_pending_seconds = 300
 # task_template = []
 # recurring_template = []
 # scheduled_template = []
+# pomo_prompt = "Thoughts:"
 
 # --- TRACKERS ---
 #

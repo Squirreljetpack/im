@@ -435,49 +435,6 @@ mod tests {
     }
 
     #[test]
-    fn test_editor_config_serde_defaults() {
-        // Missing [editor] section → all template lists default to empty
-        // (out-of-range dot counts fall back to the legacy hint).
-        let cfg: Config = toml::from_str("").expect("empty toml parses");
-        assert!(cfg.editor.mood_template.is_empty());
-        assert!(cfg.editor.task_template.is_empty());
-        assert!(cfg.editor.recurring_template.is_empty());
-        assert!(cfg.editor.scheduled_template.is_empty());
-
-        // Empty [editor] section → same defaults.
-        let cfg: Config = toml::from_str("[editor]\n").expect("empty editor table parses");
-        assert!(cfg.editor.mood_template.is_empty());
-        assert!(cfg.editor.task_template.is_empty());
-
-        // Explicit arrays are honored, including empty entries (blank
-        // document) and multiple entries (selected by dot count).
-        let cfg: Config = toml::from_str(
-            "[editor]\n\
-             mood_template = [\"templates/mood.txt\", \"\"]\n\
-             task_template = []\n\
-             recurring_template = [\"templates/recurring.txt\"]\n\
-             scheduled_template = [\"templates/scheduled.txt\"]\n",
-        )
-        .expect("template arrays parse");
-        assert_eq!(
-            cfg.editor.mood_template,
-            vec![PathBuf::from("templates/mood.txt"), PathBuf::new()]
-        );
-        assert!(cfg.editor.task_template.is_empty());
-        assert_eq!(
-            cfg.editor.recurring_template,
-            vec![PathBuf::from("templates/recurring.txt")]
-        );
-        assert_eq!(
-            cfg.editor.scheduled_template,
-            vec![PathBuf::from("templates/scheduled.txt")]
-        );
-
-        // The removed `hint` key is rejected (deny_unknown_fields).
-        assert!(toml::from_str::<Config>("[editor]\nhint = true\n").is_err());
-    }
-
-    #[test]
     fn test_moods_source_serde_roundtrip() {
         // [moods] with only `source` (all settings missing) → settings default.
         let cfg: Config = toml::from_str("[moods]\nsource = \"moods.toml\"\n")

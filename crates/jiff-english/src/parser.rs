@@ -139,13 +139,13 @@ impl<'a> DateParser<'a> {
                 let n = t.to_int_result::<u32>()?;
                 let t = self.scanner.get();
                 if t.finished() {
-                    // A bare integer is a year (`2024`, `3`), unless it
-                    // carries the days-ago sign: `-3` is 3 days ago, not
-                    // the year 0003.
+                    // A bare integer is rejected unless it carries the days-ago
+                    // sign: `-3` is 3 days ago. Bare positive numbers (e.g. `2024`,
+                    // `202`) are not supported.
                     return if sign {
                         Ok(Some(DateSpec::skip(TimeUnit::Day.to_interval(), -(n as i32))))
                     } else {
-                        Ok(Some(DateSpec::absolute(n, 1, 1)))
+                        date_result("expected a date, duration, or time (bare numbers are not supported)")
                     };
                 }
                 // The sign is only consumed by a number+unit skip

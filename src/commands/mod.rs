@@ -8,6 +8,7 @@ use crate::config::Config;
 
 
 mod diagnostics;
+mod edit_task;
 mod entry;
 mod maintenance;
 mod task;
@@ -44,9 +45,7 @@ pub async fn execute_command<W: Write>(
 
         Command::Task(task) => task::create_task_command(pool, config, opts, task).await,
 
-        Command::Update { target, count } => {
-            update::update_task_command(pool, opts, target, count).await
-        }
+        Command::TaskEdit { task } => edit_task::handle_task_edit(pool, config, opts, task).await,
 
         Command::Embed => {
             let stdin = std::io::stdin();
@@ -89,8 +88,6 @@ pub async fn execute_command<W: Write>(
                 .await
             }
         }
-
-        Command::TasksEdit => maintenance::edit_tasks().await,
 
         Command::Help => {
             // assets/help.txt is bundled via `include_str!` so the compiled

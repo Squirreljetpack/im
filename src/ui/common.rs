@@ -32,3 +32,14 @@ pub fn ct_to_ratatui_color(c: crossterm::style::Color) -> ratatui::style::Color 
         crossterm::style::Color::AnsiValue(v) => ratatui::style::Color::Indexed(v),
     }
 }
+
+pub fn format_text(
+    text: &str,
+    style: &matchmaker::config::StyleSetting,
+) -> ratatui::text::Text<'static> {
+    let rat_style: ratatui::style::Style = (*style).into();
+    ratatui::text::Text::from(ratatui::text::Line::from(ratatui::text::Span::styled(
+        text.to_string(),
+        rat_style,
+    )))
+}

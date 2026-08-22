@@ -668,6 +668,8 @@ async fn seed_entry(
         embedding: None,
         score: None,
         trackers,
+        duration: None,
+        todo_id: None,
     };
     create_entry(pool, &entry).await?;
     Ok(())

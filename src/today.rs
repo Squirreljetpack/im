@@ -55,7 +55,7 @@ pub struct LinkedTracker {
     pub color: RatColor,
 }
 
-/// A task linked to a mood via `task_moods`, pre-rendered for the
+/// A task linked to a mood via `mood.todo_id`, pre-rendered for the
 /// preview's `linked:` section: the badge glyph with its color plus the
 /// task name.
 #[derive(Debug, Clone)]
@@ -109,10 +109,12 @@ pub struct TodayEntry {
     /// earlier entry exists.
     pub tracker_prev: Option<Epoch>,
     /// Mood entries only: trackers attached to the mood row
-    /// (`tracker.mood`) and tasks linked via `task_moods`, rendered as
+    /// (`tracker.mood`) and tasks linked via `mood.todo_id`, rendered as
     /// the preview's `linked:` section. Empty for every other entry kind.
     pub linked_trackers: Vec<LinkedTracker>,
     pub linked_tasks: Vec<LinkedTask>,
+    /// Mood session duration in seconds (for mood/journal session entries).
+    pub duration: Option<i64>,
 }
 
 impl TodayEntry {
@@ -296,15 +298,14 @@ pub struct TodayFetch {
 
 /// Fetch all today-view entries within the given horizon.
 ///
-/// All variants share the same task base — tasks active at any point
-/// during the period (interval-aware availability-window overlap for
-/// recurring). `show` selects what rides on top: `All` also merges tasks
-/// with a completion today (time = last completion); `A` filters completed
-/// tasks out and shows no completions; `B` is the same as `All` but
-/// tasks-only (no moods/trackers) and carries `coalesce_completions`
-/// (D11 — no behavior yet). The oneshot section's task filter is bound to
-/// the variant: `All` uses `config.today_view.initial_tasks_filter`, `A`
-/// pins `Horizon`, `B` pins `Overdue`. See docs/VIEWS.md.
+/// `show` selects what is displayed:
+/// - `All`: moods, trackers, open tasks, scheduled tasks, recurring windows,
+///   and tasks completed today.
+/// - `A` ("journal"): moods, trackers, and completion events in the horizon (displaying
+///   completions instead of tasks, with cumulative completion counts).
+/// - `B` ("tasks"): tasks only (no moods/trackers), showing overdue/due oneshot tasks,
+///   scheduled tasks, and the next recurring window per task (without explicitly merging
+///   completed-today tasks).
 pub async fn fetch_today_entries(
     pool: &SqlitePool,
     config: &Config,
@@ -312,20 +313,6 @@ pub async fn fetch_today_entries(
     day_epoch: i64,
     show: ViewVariant,
 ) -> Result<TodayFetch> {
-    // The oneshot filter is bound to the view variant: `All` keeps the
-    // configured filter (default `All` — any oneshot task), `A` pins the
-    // old default (open tasks due within the horizon), `B` pins the old
-    // include_overdue behavior (dated tasks due in the horizon or
-    // overdue). Undated open tasks therefore surface in `All` (with the
-    // default filter) — the today view's incomplete-tasks guarantee.
-    let filter = match show {
-        ViewVariant::All => config.today_view.initial_tasks_filter,
-        ViewVariant::A => TasksFilter::Horizon,
-        ViewVariant::B => TasksFilter::Overdue,
-    };
-    // `None` (journal-only mode) hides the entire task section — the
-    // scheduled/recurring fetches below return empty lists.
-    let tasks_enabled = filter != TasksFilter::None;
     // `im @<date>` anchors the day; bare `im` is today.
     let day_start_epoch = day_epoch;
     let day_end_epoch = date::day_end(day_start_epoch);
@@ -352,6 +339,7 @@ pub async fn fetch_today_entries(
         for mut f in moods {
             let id = f.id;
             let mood = f.mood.clone();
+            let mood_duration = f.duration;
             // Take the body for the entry; the handoff row keeps its
             // embedding/score and needs no body.
             let body = std::mem::take(&mut f.body);
@@ -390,7 +378,7 @@ pub async fn fetch_today_entries(
                     });
                 }
             }
-            // Tasks linked via `task_moods`: badge + color like the today
+            // Tasks linked via `mood.todo_id`: badge + color like the today
             // view's own task rows.
             let mut l_tasks = Vec::new();
             if let Some(tasks) = linked_tasks.get(&id) {
@@ -424,6 +412,7 @@ pub async fn fetch_today_entries(
                 tracker_prev: None,
                 linked_trackers: l_trackers,
                 linked_tasks: l_tasks,
+                duration: mood_duration,
             });
         }
 
@@ -489,169 +478,30 @@ pub async fn fetch_today_entries(
                 tracker_prev: tracker_prevs.get(&tracker_id).copied().flatten(),
                 linked_trackers: Vec::new(),
                 linked_tasks: Vec::new(),
+                duration: None,
             });
         }
     } // show != ShowVariant::B
 
-    // 3. Oneshot tasks per the variant-bound task filter (see the match
-    // above): `Horizon` keeps tasks due from today through the horizon
-    // end; `Overdue` adds dated tasks due before today (undated tasks are
-    // never overdue, so they stay out); `Pending` and `All` have no date
-    // bounds. Every filter is incomplete-only — the completed-today merge
-    // in step 5 surfaces tasks completed today.
-    let due_tasks = if tasks_enabled {
-        crate::db::fetch_oneshot_tasks(pool, filter, horizon_end, day_start_epoch).await?
-    } else {
-        Vec::new()
-    };
-
-    for task in &due_tasks {
-        // A filters completed tasks out.
-        if show == ViewVariant::A && task.is_done() {
-            continue;
-        }
-        // Time: done → completion time; else the due time (`end_time` when
-        // set — `! name @<time>`; undated oneshots are untimed).
-        let time = pending_sort_time(task, now_ts);
-        let time_label = task_time_label(task, time, day_start_epoch);
-        entries.push(TodayEntry {
-            id: None,
-            time,
-            time_label,
-            kind: EntryKind::Task(task.kind()),
-            label: task.name.clone(),
-            body: task.body.clone(),
-            task_id: Some(task.id),
-            priority: task.priority,
-            task: Some(task.clone()),
-            score: None,
-            linked_mood: None,
-            recurring_window: None,
-            tracker_interval: None,
-            tracker_prev: None,
-            linked_trackers: Vec::new(),
-            linked_tasks: Vec::new(),
-        });
-    }
-
-    // 3b. Scheduled tasks overlapping the horizon (window overlap: started
-    // before horizon_end, still open past today_start). All states show —
-    // ongoing, completed / auto-completed, failed — with the same badge
-    // semantics as the tasks app.
-    let scheduled_tasks = if tasks_enabled {
-        crate::db::fetch_scheduled_today(pool, horizon_end, day_start_epoch).await?
-    } else {
-        Vec::new()
-    };
-
-    for task in &scheduled_tasks {
-        // A filters completed tasks out (incl. auto-completed).
-        if show == ViewVariant::A && task.is_done() {
-            continue;
-        }
-        // Time: done → completion time (auto-completed has no entry, so it
-        // falls back to the window end); else `start_time`.
-        let time = pending_sort_time(task, now_ts);
-        let time_label = task_time_label(task, time, day_start_epoch);
-        entries.push(TodayEntry {
-            id: None,
-            time,
-            time_label,
-            kind: EntryKind::Task(task.kind()),
-            label: task.name.clone(),
-            body: task.body.clone(),
-            task_id: Some(task.id),
-            priority: task.priority,
-            task: Some(task.clone()),
-            score: None,
-            linked_mood: None,
-            recurring_window: None,
-            tracker_interval: None,
-            tracker_prev: None,
-            linked_trackers: Vec::new(),
-            linked_tasks: Vec::new(),
-        });
-    }
-
-    // 4. Recurring tasks: one entry per availability window intersecting
-    // the period (all variants; interval-aware availability-window overlap
-    // — VIEWS.md). Each window's completions / last completion are scoped
-    // to its own interval, so time, done state, and badge are per window.
-    // `B` keeps only the next (earliest) window per task.
-    let recurring_windows = if tasks_enabled {
-        crate::db::fetch_recurring_windows_for_period(pool, day_start_epoch, horizon_end).await?
-    } else {
-        Vec::new()
-    };
-
-    let mut seen_recurring = std::collections::HashSet::new();
-    for w in &recurring_windows {
-        // B: only the next recurring window per task.
-        if show == ViewVariant::B && !seen_recurring.insert(w.task.id) {
-            continue;
-        }
-        // A filters completed windows out (the window's own completion
-        // state, not the current interval's).
-        if show == ViewVariant::A && w.task.is_done() {
-            continue;
-        }
-        // Time (VIEWS.md): a completed or passed (`now >= window_end`)
-        // window shows the last completion within its interval, else the
-        // window end; an open or future window shows the window start.
-        let time = recurring_window_time(w, now_ts);
-        let time_label = task_time_label(&w.task, time, day_start_epoch);
-        entries.push(TodayEntry {
-            id: None,
-            time,
-            time_label,
-            kind: EntryKind::Task(w.task.kind()),
-            label: w.task.name.clone(),
-            body: w.task.body.clone(),
-            task_id: Some(w.task.id),
-            priority: w.task.priority,
-            task: Some(w.task.clone()),
-            score: None,
-            linked_mood: None,
-            recurring_window: Some(w.clone()),
-            tracker_interval: None,
-            tracker_prev: None,
-            linked_trackers: Vec::new(),
-            linked_tasks: Vec::new(),
-        });
-    }
-
-    // 5. Tasks with a completion entry today (All and B — B is the same as
-    // All minus the moods/trackers sections): merged over the regular
-    // rows (dedup by task_id — the completed-today row wins, time = last
-    // completion timestamp) so a task completed today shows its completion
-    // time even when it is no longer active (or not in the regular lists
-    // at all). Recurring tasks with a per-window entry (step 4) are
-    // skipped: the window rows already carry the window-scoped completion
-    // state and rule-based times. `A` filters completed tasks out, so the
-    // fetch is skipped there.
-    if tasks_enabled && show != ViewVariant::A {
-        let completed_today =
-            crate::db::fetch_tasks_completed_on(pool, day_start_epoch, day_end_epoch).await?;
-        for task in &completed_today {
-            // Recurring windows already have entries (step 4) carrying the
-            // window-scoped completion state — merging here would override
-            // the rule-based window time with a day-scoped one. Tasks with
-            // no window row (expired chain with a late completion) still
-            // merge in below.
-            if task.is_recurring() && entries.iter().any(|e| e.task_id == Some(task.id)) {
-                continue;
-            }
-            let last_time = task.last_time.unwrap_or(now_ts);
-            let entry = TodayEntry {
+    if show == ViewVariant::A {
+        // Journal view: displays completions instead of tasks.
+        // Each completion within the horizon appears as an entry at its completion time,
+        // with the cumulative completion progress at that point in time.
+        let completions =
+            crate::db::fetch_completion_events_in_range(pool, day_start_epoch, horizon_end).await?;
+        for (comp, task) in completions {
+            let time = comp.time;
+            let time_label = today_time_label(time, day_start_epoch);
+            entries.push(TodayEntry {
                 id: None,
-                time: last_time,
-                time_label: today_time_label(last_time, day_start_epoch),
+                time,
+                time_label,
                 kind: EntryKind::Task(task.kind()),
                 label: task.name.clone(),
                 body: task.body.clone(),
                 task_id: Some(task.id),
                 priority: task.priority,
-                task: Some(task.clone()),
+                task: Some(task),
                 score: None,
                 linked_mood: None,
                 recurring_window: None,
@@ -659,10 +509,154 @@ pub async fn fetch_today_entries(
                 tracker_prev: None,
                 linked_trackers: Vec::new(),
                 linked_tasks: Vec::new(),
-            };
-            match entries.iter_mut().find(|e| e.task_id == Some(task.id)) {
-                Some(existing) => *existing = entry,
-                None => entries.push(entry),
+                duration: None,
+            });
+        }
+    } else {
+        let filter = match show {
+            ViewVariant::All => TasksFilter::All,
+            ViewVariant::B => TasksFilter::Due,
+            ViewVariant::A => unreachable!(),
+        };
+        let tasks_enabled = filter != TasksFilter::None;
+
+        if tasks_enabled {
+            // 3. Oneshot tasks per the variant-bound task filter: `Due` keeps
+            // dated tasks due before or within the horizon; `All` / `Pending` have
+            // no date bounds. Incomplete only — completed tasks in `All` surface
+            // through step 5 below.
+            let due_tasks =
+                crate::db::fetch_oneshot_tasks(pool, filter, horizon_end, day_start_epoch).await?;
+
+            for task in &due_tasks {
+                let time = pending_sort_time(task, now_ts);
+                let time_label = task_time_label(task, time, day_start_epoch);
+                entries.push(TodayEntry {
+                    id: None,
+                    time,
+                    time_label,
+                    kind: EntryKind::Task(task.kind()),
+                    label: task.name.clone(),
+                    body: task.body.clone(),
+                    task_id: Some(task.id),
+                    priority: task.priority,
+                    task: Some(task.clone()),
+                    score: None,
+                    linked_mood: None,
+                    recurring_window: None,
+                    tracker_interval: None,
+                    tracker_prev: None,
+                    linked_trackers: Vec::new(),
+                    linked_tasks: Vec::new(),
+                    duration: None,
+                });
+            }
+
+            // 3b. Scheduled tasks overlapping the horizon (window overlap: started
+            // before horizon_end, still open past today_start). All states show —
+            // ongoing, completed / auto-completed, failed — with the same badge
+            // semantics as the tasks app.
+            let scheduled_tasks =
+                crate::db::fetch_scheduled_today(pool, horizon_end, day_start_epoch).await?;
+
+            for task in &scheduled_tasks {
+                let time = pending_sort_time(task, now_ts);
+                let time_label = task_time_label(task, time, day_start_epoch);
+                entries.push(TodayEntry {
+                    id: None,
+                    time,
+                    time_label,
+                    kind: EntryKind::Task(task.kind()),
+                    label: task.name.clone(),
+                    body: task.body.clone(),
+                    task_id: Some(task.id),
+                    priority: task.priority,
+                    task: Some(task.clone()),
+                    score: None,
+                    linked_mood: None,
+                    recurring_window: None,
+                    tracker_interval: None,
+                    tracker_prev: None,
+                    linked_trackers: Vec::new(),
+                    linked_tasks: Vec::new(),
+                    duration: None,
+                });
+            }
+
+            // 4. Recurring tasks: one entry per availability window intersecting
+            // the period (all variants; interval-aware availability-window overlap
+            // — VIEWS.md). Each window's completions / last completion are scoped
+            // to its own interval, so time, done state, and badge are per window.
+            // `B` keeps only the next (earliest) window per task.
+            let recurring_windows =
+                crate::db::fetch_recurring_windows_for_period(pool, day_start_epoch, horizon_end).await?;
+
+            let mut seen_recurring = std::collections::HashSet::new();
+            for w in &recurring_windows {
+                // B: only the next recurring window per task.
+                if show == ViewVariant::B && !seen_recurring.insert(w.task.id) {
+                    continue;
+                }
+                let time = recurring_window_time(w, now_ts);
+                let time_label = task_time_label(&w.task, time, day_start_epoch);
+                entries.push(TodayEntry {
+                    id: None,
+                    time,
+                    time_label,
+                    kind: EntryKind::Task(w.task.kind()),
+                    label: w.task.name.clone(),
+                    body: w.task.body.clone(),
+                    task_id: Some(w.task.id),
+                    priority: w.task.priority,
+                    task: Some(w.task.clone()),
+                    score: None,
+                    linked_mood: None,
+                    recurring_window: Some(w.clone()),
+                    tracker_interval: None,
+                    tracker_prev: None,
+                    linked_trackers: Vec::new(),
+                    linked_tasks: Vec::new(),
+                    duration: None,
+                });
+            }
+
+            // 5. Tasks with a completion entry today (All only — B does not
+            // explicitly include tasks completed today): merged over the regular
+            // rows (dedup by task_id — the completed-today row wins, time = last
+            // completion timestamp). Recurring tasks with a per-window entry
+            // (step 4) are skipped.
+            if show == ViewVariant::All {
+                let completed_today =
+                    crate::db::fetch_tasks_completed_on(pool, day_start_epoch, day_end_epoch).await?;
+                for task in &completed_today {
+                    if task.is_recurring() && entries.iter().any(|e| e.task_id == Some(task.id)) {
+                        continue;
+                    }
+                    let last_time = task.last_time.unwrap_or(now_ts);
+                    let entry = TodayEntry {
+                        id: None,
+                        time: last_time,
+                        time_label: today_time_label(last_time, day_start_epoch),
+                        kind: EntryKind::Task(task.kind()),
+                        label: task.name.clone(),
+                        body: task.body.clone(),
+                        task_id: Some(task.id),
+                        priority: task.priority,
+                        task: Some(task.clone()),
+                        score: None,
+                        linked_mood: None,
+                        recurring_window: None,
+                        tracker_interval: None,
+                        tracker_prev: None,
+                        linked_trackers: Vec::new(),
+                        linked_tasks: Vec::new(),
+                        duration: None,
+                    };
+                    match entries.iter_mut().find(|e| e.task_id == Some(task.id)) {
+                        Some(existing) => *existing = entry,
+                        None => entries.push(entry),
+                    }
+                }
             }
         }
     }
@@ -1034,6 +1028,7 @@ mod tests {
             tracker_prev: None,
             linked_trackers: Vec::new(),
             linked_tasks: Vec::new(),
+            duration: None,
         };
         let mut entries = [
             entry(200, "20:00", 1),

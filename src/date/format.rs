@@ -8,6 +8,24 @@ pub fn format_duration(secs: i64) -> String {
     humantime::format_duration(std::time::Duration::from_secs(secs as u64)).to_string()
 }
 
+/// Format a remaining-time countdown for the interactive session timer.
+///
+/// Renders `MM:SS` when the remaining time is under one hour, or `HH:MM`
+/// once it exceeds one hour (seconds are dropped, minutes zero-padded). The
+/// decision is made from the passed-in `remaining_secs`, so the call is stateless.
+pub fn format_countdown(remaining_secs: i64) -> String {
+    let remaining = remaining_secs.max(0) as u64;
+    let s = remaining % 60;
+    let m = remaining / 60;
+    if remaining > 3600 {
+        let h = m / 60;
+        let m = m % 60;
+        format!("{h:02}:{m:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    }
+}
+
 /// Format a tracker's stored duration value (seconds as f64) for display:
 /// rounds fractional seconds (`6.5` → `"7s"`, `390` → `"6m 30s"`) and
 /// clamps negatives to `"0s"` defensively (legacy/manual rows). Duration
@@ -59,12 +77,34 @@ pub fn format_datetime(ts: Epoch) -> String {
 }
 
 /// Human-friendly datetime for preview field lines (`prev:`, `next:`,
-/// `last:`, ...). Currently defers to [`format_datetime`]; a future
-/// humanization (e.g. relative phrasing like "today 14:30") goes here
-/// without touching the field renderers. The right-aligned dark-gray date
-/// line keeps [`format_datetime`].
-pub fn format_human_datetime(ts: Epoch) -> String {
-    format_datetime(ts)
+/// `last:`, ...) and task dates.
+///
+/// Year is omitted when `ts` falls in the current calendar year.
+/// When `named_months` is true, months are formatted with abbreviated names (e.g. "15 Mar 14:30").
+/// When false, months/days are numeric (e.g. "03-15 14:30").
+pub fn format_human_datetime(ts: Epoch, named_months: bool) -> String {
+    let Ok(z) = crate::date::zoned_from_unix_secs(ts) else {
+        return "--".to_string();
+    };
+    let current_year = crate::date::zoned_from_unix_secs(crate::date::now())
+        .map(|nz| nz.year())
+        .unwrap_or(z.year());
+
+    let fmt = if z.year() == current_year {
+        if named_months {
+            "%d %b %H:%M"
+        } else {
+            "%m-%d %H:%M"
+        }
+    } else {
+        if named_months {
+            "%d %b %Y %H:%M"
+        } else {
+            "%Y-%m-%d %H:%M"
+        }
+    };
+
+    jiff::fmt::strtime::format(fmt, &z).unwrap_or_else(|_| "--".to_string())
 }
 
 /// Short datetime form for per-entry annotations (e.g. the text-tracker
@@ -99,6 +139,18 @@ mod tests {
     }
 
     #[test]
+    fn test_format_countdown() {
+        assert_eq!(format_countdown(60), "01:00");
+        assert_eq!(format_countdown(59), "00:59");
+        assert_eq!(format_countdown(0), "00:00");
+        assert_eq!(format_countdown(600), "10:00");
+        assert_eq!(format_countdown(3600), "60:00"); // exactly one hour stays MM:SS
+        assert_eq!(format_countdown(3601), "01:00"); // over an hour drops seconds
+        assert_eq!(format_countdown(7265), "02:01");
+        assert_eq!(format_countdown(-5), "00:00"); // defensive clamp
+    }
+
+    #[test]
     fn test_format_duration_roundtrip() {
         let secs = 86400;
         let s = format_duration(secs);
@@ -122,9 +174,18 @@ mod tests {
     }
 
     #[test]
-    fn test_format_human_datetime_defers_to_format_datetime() {
+    fn test_format_human_datetime() {
         let ts = parse::parse_datetime("2024-03-15 14:30", crate::date::DATE_DIALECT).unwrap();
-        assert_eq!(format_human_datetime(ts), format_datetime(ts));
+        let now_year = crate::date::zoned_from_unix_secs(crate::date::now())
+            .unwrap()
+            .year();
+        if now_year == 2024 {
+            assert_eq!(format_human_datetime(ts, true), "15 Mar 14:30");
+            assert_eq!(format_human_datetime(ts, false), "03-15 14:30");
+        } else {
+            assert_eq!(format_human_datetime(ts, true), "15 Mar 2024 14:30");
+            assert_eq!(format_human_datetime(ts, false), "2024-03-15 14:30");
+        }
     }
 
     #[test]

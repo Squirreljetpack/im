@@ -44,16 +44,22 @@ impl TaskObject {
     }
 }
 
-/// The recurring-task fields editable via the interactive edit flow.
+/// The task fields editable via the interactive edit flow.
 #[derive(Debug, Clone)]
 pub struct UpdateTaskObject {
     pub id: i64,
+    pub short_id: Option<i64>,
+    pub name: String,
+    pub body: String,
+    pub priority: i32,
+    pub start_time: Option<i64>,
+    pub available_duration_secs: Option<i64>,
     /// Recurrence interval as a packed [`crate::date::DbSpan`].
     pub interval_secs: Option<i64>,
-    pub available_duration_secs: Option<i64>,
     pub target_count: i32,
     pub optional: bool,
     pub end_time: Option<i64>,
+    pub parent: Option<i64>,
 }
 
 /// A logged mood entry plus any linked tracker values.
@@ -71,6 +77,8 @@ pub struct EntryObject {
     /// creation (`None` for journal-only rows or failed embeddings).
     pub score: Option<f32>,
     pub trackers: Vec<TrackerObject>,
+    pub duration: Option<i64>,
+    pub todo_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -180,8 +188,8 @@ impl TaskRow {
         self.start_time.map(crate::date::format_datetime)
     }
 
-    pub fn end_datetime(&self) -> Option<String> {
-        self.end_time.map(crate::date::format_human_datetime)
+    pub fn end_datetime(&self, named_months: bool) -> Option<String> {
+        self.end_time.map(|ts| crate::date::format_human_datetime(ts, named_months))
     }
 }
 
@@ -196,6 +204,8 @@ pub struct MoodRow {
     /// Cached emotional-saliency score for the mood text, backfilled by
     /// `ColorAxes::mood_color_cached`; `None` until first computed.
     pub score: Option<f32>,
+    pub duration: Option<i64>,
+    pub todo_id: Option<i64>,
 }
 
 /// A tracker row with the score decoded as text (the `score` column is a

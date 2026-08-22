@@ -147,7 +147,10 @@ pub fn build_preview(
             task.last_time
         };
         if let Some(last) = last {
-            lines.push(field_line("last", date::format_human_datetime(last)));
+            lines.push(field_line(
+                "last",
+                date::format_human_datetime(last, config.preview.named_months),
+            ));
         }
     }
 
@@ -167,12 +170,18 @@ pub fn build_preview(
                 }
                 _ => st,
             };
-            lines.push(field_line("next", date::format_human_datetime(next)));
+            lines.push(field_line(
+                "next",
+                date::format_human_datetime(next, config.preview.named_months),
+            ));
         }
     } else if task.is_scheduled() {
         // Scheduled tasks show the window start.
         if let Some(st) = task.start_time {
-            lines.push(field_line("start", date::format_human_datetime(st)));
+            lines.push(field_line(
+                "start",
+                date::format_human_datetime(st, config.preview.named_months),
+            ));
         }
     } else {
         // Oneshot tasks: the creation time always, and the due time only
@@ -180,7 +189,10 @@ pub fn build_preview(
         // color the `due:` label with the configured overdue color
         // (`badge::task_label_color`, falling back to the usual yellow).
         if let Some(st) = task.start_time {
-            lines.push(field_line("creation", date::format_human_datetime(st)));
+            lines.push(field_line(
+                "creation",
+                date::format_human_datetime(st, config.preview.named_months),
+            ));
         }
         if let Some(et) = task.end_time {
             let color =
@@ -189,7 +201,7 @@ pub fn build_preview(
                     .unwrap_or(Color::Yellow);
             lines.push(Line::from(vec![
                 Span::styled("  due: ", Style::default().fg(color)),
-                Span::raw(date::format_human_datetime(et)),
+                Span::raw(date::format_human_datetime(et, config.preview.named_months)),
             ]));
         }
     }
@@ -224,7 +236,7 @@ pub fn build_preview(
         }
         // Today-view rows carry the unscoped last completion in `end_time`
         // instead of the expiry — no `ends` field there.
-        if !today && let Some(ref s) = task.end_datetime() {
+        if !today && let Some(ref s) = task.end_datetime(config.preview.named_months) {
             lines.push(field_line("ends", s.clone()));
         }
         // The optional flag is only shown when the task is skippable.
@@ -252,9 +264,8 @@ pub fn build_preview(
                 })
                 .unwrap_or(Color::DarkGray);
             lines.push(Line::from(vec![
-                Span::raw("  - "),
                 Span::styled(
-                    config.badges.mood.unwrap_or('●').to_string(),
+                    format!("  - {}", config.badges.mood.unwrap_or('●')),
                     Style::default().fg(color),
                 ),
                 Span::raw(format!(" {}", mood.mood)),
@@ -372,6 +383,9 @@ pub(crate) fn build_today_preview(
         // Journal-only: skip the mood segment — the date, then the body
         // directly (always a blank line after the date).
         lines.push(date_line(entry.time));
+        if let Some(dur) = entry.duration {
+            lines.push(field_line("duration", date::format_duration(dur)));
+        }
         lines.push(Line::default());
         for line_str in entry.body.lines() {
             lines.push(Line::from(format!("  {}", line_str)));
@@ -392,6 +406,11 @@ pub(crate) fn build_today_preview(
     // Date after the name, right-aligned and dark gray, with a blank
     // line always following it.
     lines.push(date_line(entry.time));
+
+    if let Some(dur) = entry.duration {
+        lines.push(field_line("duration", date::format_duration(dur)));
+    }
+
     lines.push(Line::default());
 
     // Interval trackers show when the next interval opens — like recurring
@@ -406,12 +425,18 @@ pub(crate) fn build_today_preview(
             // Next interval start = end of the current interval.
             crate::date::interval_end_unix_secs(anchor, span, now).unwrap_or(anchor)
         };
-        lines.push(field_line("next", date::format_human_datetime(next)));
+        lines.push(field_line(
+            "next",
+            date::format_human_datetime(next, config.preview.named_months),
+        ));
     }
 
     // `prev:` shows the previous entry of this kind whenever one exists.
     if let Some(prev) = entry.tracker_prev {
-        lines.push(field_line("prev", date::format_human_datetime(prev)));
+        lines.push(field_line(
+            "prev",
+            date::format_human_datetime(prev, config.preview.named_months),
+        ));
     }
 
     // Tracker entries attached to a mood (`tracker.mood`): a `mood:`
@@ -530,9 +555,10 @@ mod tests {
         // `last` reads the unscoped completion carried in `end_time`, and
         // the `ends` field is skipped (end_time is not the expiry here).
         assert!(
-            fields
-                .iter()
-                .any(|f| f == &format!("last: {}", date::format_human_datetime(1_700_500_000))),
+            fields.iter().any(|f| f == &format!(
+                "last: {}",
+                date::format_human_datetime(1_700_500_000, true)
+            )),
             "expected last: from end_time, got {fields:?}"
         );
         assert!(!fields.iter().any(|f| f.starts_with("ends:")), "{fields:?}");
@@ -544,16 +570,16 @@ mod tests {
         let lines = build_preview(&task, false, &config(), &[], None, None, None);
         let fields = fields(&lines);
         assert!(
-            fields
-                .iter()
-                .any(|f| f == &format!("last: {}", date::format_human_datetime(1_700_400_000))),
+            fields.iter().any(|f| f == &format!(
+                "last: {}",
+                date::format_human_datetime(1_700_400_000, true)
+            )),
             "expected last: from last_time, got {fields:?}"
         );
-        assert!(
-            fields
-                .iter()
-                .any(|f| f == &format!("ends: {}", date::format_human_datetime(1_700_500_000)))
-        );
+        assert!(fields.iter().any(|f| f == &format!(
+            "ends: {}",
+            date::format_human_datetime(1_700_500_000, true)
+        )));
     }
 
     #[test]
@@ -570,9 +596,10 @@ mod tests {
             None,
         ));
         assert!(
-            fields
-                .iter()
-                .any(|f| f == &format!("last: {}", date::format_human_datetime(1_700_500_000))),
+            fields.iter().any(|f| f == &format!(
+                "last: {}",
+                date::format_human_datetime(1_700_500_000, true)
+            )),
             "expected last: on a done row, got {fields:?}"
         );
     }
@@ -599,15 +626,17 @@ mod tests {
             tracker_prev,
             linked_trackers: Vec::new(),
             linked_tasks: Vec::new(),
+            duration: None,
         };
         let rendered: Vec<String> = build_today_preview(&mk(Some(1_699_000_000)), &config())
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
             .collect();
         assert!(
-            rendered
-                .iter()
-                .any(|l| l == &format!("  prev: {}", date::format_human_datetime(1_699_000_000))),
+            rendered.iter().any(|l| l == &format!(
+                "  prev: {}",
+                date::format_human_datetime(1_699_000_000, true)
+            )),
             "expected a prev: field, got {rendered:?}"
         );
         assert!(
@@ -665,6 +694,7 @@ mod tests {
                 color: Color::Green,
                 name: "water plants".to_string(),
             }],
+            duration: None,
         };
         let rendered: Vec<String> = build_today_preview(&entry, &config())
             .iter()
@@ -715,6 +745,7 @@ mod tests {
             tracker_prev: None,
             linked_trackers: Vec::new(),
             linked_tasks: Vec::new(),
+            duration: None,
         };
         let rendered: Vec<String> = build_today_preview(&mk(Some("good".to_string())), &config())
             .iter()
@@ -769,6 +800,7 @@ mod tests {
             tracker_prev: None,
             linked_trackers: Vec::new(),
             linked_tasks: Vec::new(),
+            duration: None,
         };
         for kind in [EntryKind::Journal, EntryKind::Mood] {
             let rendered: Vec<String> = build_today_preview(&mk(kind), &config())
@@ -984,6 +1016,8 @@ mod tests {
             time: 1_700_000_000,
             embedding: None,
             score: None,
+            duration: None,
+            todo_id: None,
         };
         let lines = build_preview(&task, true, &config(), &[mood], None, None, None);
         let rendered: Vec<String> = lines

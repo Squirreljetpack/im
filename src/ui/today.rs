@@ -142,10 +142,16 @@ impl TodayApp {
             // Column cells carry no base Text style; badge colors (and
             // other per-span styling) live on the spans inside.
             Column::new("pri", |item: &TodayEntry, _: &()| {
-                Text::from(item.priority.to_string())
+                crate::ui::common::format_text(
+                    &item.priority.to_string(),
+                    &config().today_view.tui_priority_style,
+                )
             }),
             Column::new("datetime", |item: &TodayEntry, _: &()| {
-                Text::from(item.time_label.clone())
+                crate::ui::common::format_text(
+                    &item.time_label,
+                    &config().today_view.tui_time_style,
+                )
             }),
             Column::new("label", move |item: &TodayEntry, _: &()| {
                 // Journal entries show the first body line in the label column.
@@ -275,8 +281,8 @@ impl TodayApp {
         mm.register_event_handler(Event::CursorChange, {
             let view = view.clone();
             move |state, _| {
-                if let Some(idx) = state.current_index() {
-                    view.lock().unwrap().cursor = idx;
+                if !state.picker_ui.results.cursor_disabled() {
+                    view.lock().unwrap().cursor = state.picker_ui.results.index();
                 }
             }
         });
@@ -426,7 +432,7 @@ enum EditPayload {
 /// kind when the prompt opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LinkKind {
-    /// Mood/journal entry → task: inserts a `task_moods` row.
+    /// Mood/journal entry → task: sets `mood.todo_id`.
     MoodToTask,
     /// Tracker entry → mood: sets the tracker's `mood` column (replacing
     /// any existing link).

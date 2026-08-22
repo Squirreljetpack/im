@@ -107,7 +107,10 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
             -- Cached emotional-saliency score for the mood text (nullable;
             -- backfilled by mood_color_cached). No migration: an existing
             -- DB without the column is deleted by the user.
-            score REAL
+            score REAL,
+            duration INTEGER,
+            -- Optional link to a single task (1 task per mood).
+            todo_id INTEGER REFERENCES todos(id) ON DELETE SET NULL
         )
         "#,
     )
@@ -185,22 +188,12 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS task_moods (
-            todo_id INTEGER NOT NULL,
-            mood_id INTEGER NOT NULL,
-            PRIMARY KEY (todo_id, mood_id),
-            FOREIGN KEY (todo_id) REFERENCES todos(id) ON DELETE CASCADE,
-            FOREIGN KEY (mood_id) REFERENCES mood(id) ON DELETE CASCADE
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
     // Add indexes for common queries
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_mood_time ON mood(time)")
+        .execute(pool)
+        .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_mood_todo_id ON mood(todo_id)")
         .execute(pool)
         .await?;
 

@@ -1,8 +1,8 @@
 use std::env::args;
 
 use super::parse::{
-    parse_dash_command, parse_entry_command, parse_special_command, parse_task_command,
-    parse_view_command,
+    parse_entry_command, parse_special_command, parse_task_command,
+    parse_task_edit_command, parse_view_command,
 };
 use super::{Cli, CliOpts, Command, FLAG_CHARACTERS};
 use crate::types::{TodayHorizon, ViewVariant};
@@ -95,9 +95,18 @@ pub fn parse_from(args: Vec<String>) -> anyhow::Result<Command> {
         return parse_view_command(&args);
     }
 
-    // Tasks edit ('-') or update ('- <id> / - <words…>')
-    if first == "-" {
-        return parse_dash_command(&args[1..]);
+    // A leading '-' falls through to the entry parser: a bare `-` logs a
+    // mood entry whose mood is `-`.
+
+    // A single argument starting with '+' is the interactive task editor
+    // (`im +`, `im +<id>`, `im +<words>`). Any other shape routes to the
+    // entry parser, where a `+ref` links (and optionally completes) a task
+    // as part of an entry.
+    if first.starts_with('+') {
+        if args.len() == 1 {
+            return parse_task_edit_command(&args);
+        }
+        return parse_entry_command(&args);
     }
 
     // Otherwise, it's an entry command
@@ -106,9 +115,9 @@ pub fn parse_from(args: Vec<String>) -> anyhow::Result<Command> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{DbSubcommand, TrackerItem, TrackerPeriod, UpdateTarget, BODY_DELIMITER};
+    use super::super::{DbSubcommand, TrackerItem, TrackerPeriod, BODY_DELIMITER};
     use super::*;
-    use crate::types::{Entry, Task, TaskKind, ViewMode};
+    use crate::types::{Entry, Task, TaskKind, TaskRef, ViewMode};
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -217,12 +226,12 @@ mod tests {
 
     #[test]
     fn test_parse_task_oneshot_with_parent() {
-        let cmd = parse_from(args(&["!", "-7", "do", "something"])).unwrap();
+        let cmd = parse_from(args(&["!", "+7", "do", "something"])).unwrap();
         match cmd {
             Command::Task(task) => {
                 assert_eq!(task.task_type, TaskKind::Oneshot);
                 assert_eq!(task.name, Some("do something".to_string()));
-                assert_eq!(task.parent, Some(7));
+                assert_eq!(task.parent, Some(TaskRef::Id(7)));
             }
             _ => panic!("Expected Task command"),
         }
@@ -230,39 +239,27 @@ mod tests {
 
     #[test]
     fn test_parse_task_oneshot_parent_only_is_interactive() {
-        let cmd = parse_from(args(&["!", "-7"])).unwrap();
+        let cmd = parse_from(args(&["!", "+7"])).unwrap();
         match cmd {
             Command::Task(task) => {
                 assert_eq!(task.task_type, TaskKind::Oneshot);
                 assert_eq!(task.name, None);
-                assert_eq!(task.parent, Some(7));
-                assert!(!task.pick_parent);
+                assert_eq!(task.parent, Some(TaskRef::Id(7)));
             }
             _ => panic!("Expected Task command"),
         }
     }
 
     #[test]
-    fn test_parse_task_oneshot_bare_dash_picks_parent_interactively() {
-        // A bare `-` in the initial position: the parent is picked in the
+    fn test_parse_task_oneshot_bare_plus_picks_parent_interactively() {
+        // A bare `+` in the initial position: the parent is picked in the
         // oneshot picker TUI (interactive creation).
-        let cmd = parse_from(args(&["!", "-"])).unwrap();
+        let cmd = parse_from(args(&["!", "+"])).unwrap();
         match cmd {
             Command::Task(task) => {
                 assert_eq!(task.task_type, TaskKind::Oneshot);
                 assert_eq!(task.name, None);
-                assert_eq!(task.parent, None);
-                assert!(task.pick_parent);
-            }
-            _ => panic!("Expected Task command"),
-        }
-        // With a name it still carries the picker flag; the handler bails
-        // (the picker requires the interactive flow).
-        let cmd = parse_from(args(&["!", "-", "buy", "milk"])).unwrap();
-        match cmd {
-            Command::Task(task) => {
-                assert_eq!(task.name, Some("buy milk".to_string()));
-                assert!(task.pick_parent);
+                assert_eq!(task.parent, Some(TaskRef::Pick));
             }
             _ => panic!("Expected Task command"),
         }
@@ -271,12 +268,12 @@ mod tests {
     #[test]
     fn test_parse_task_oneshot_parent_initial_position_only() {
         // Once a parent is parsed, later '-' words are ordinary text.
-        let cmd = parse_from(args(&["!", "-7", "buy", "-milk"])).unwrap();
+        let cmd = parse_from(args(&["!", "+7", "buy", "-milk"])).unwrap();
         match cmd {
             Command::Task(task) => {
                 assert_eq!(task.task_type, TaskKind::Oneshot);
                 assert_eq!(task.name, Some("buy -milk".to_string()));
-                assert_eq!(task.parent, Some(7));
+                assert_eq!(task.parent, Some(TaskRef::Id(7)));
             }
             _ => panic!("Expected Task command"),
         }
@@ -400,14 +397,29 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_task_recurring_create_bare() {
-        // ! @ → interactive recurring creation, no pre-filled name.
+    fn test_parse_task_scheduled_create_bare() {
+        // ! @ → interactive scheduled creation with unprefilled start time.
         let cmd = parse_from(args(&["!", "@"])).unwrap();
+        match cmd {
+            Command::Task(task) => {
+                assert_eq!(task.task_type, TaskKind::Scheduled);
+                assert_eq!(task.name, None);
+                assert_eq!(task.date, None);
+            }
+            _ => panic!("Expected Task command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_task_recurring_create_bare() {
+        // ! % → interactive recurring creation, prompting for duration.
+        let cmd = parse_from(args(&["!", "%"])).unwrap();
         match cmd {
             Command::Task(task) => {
                 assert_eq!(task.task_type, TaskKind::Recurring);
                 assert_eq!(task.name, None);
                 assert_eq!(task.prefill, None);
+                assert!(task.pick_duration);
             }
             _ => panic!("Expected Task command"),
         }
@@ -415,20 +427,21 @@ mod tests {
 
     #[test]
     fn test_parse_task_recurring_create_with_name() {
-        // ! @ <name> → recurring creation with the name
-        // pre-filling the name prompt (like oneshot creation).
-        let cmd = parse_from(args(&["!", "@", "exercise", "more"])).unwrap();
+        // ! %30m <name> → recurring creation with available duration and name prefill.
+        let cmd = parse_from(args(&["!", "%30m", "exercise", "more"])).unwrap();
         match cmd {
             Command::Task(task) => {
                 assert_eq!(task.task_type, TaskKind::Recurring);
                 assert_eq!(task.name, None);
                 assert_eq!(task.prefill, Some("exercise more".to_string()));
+                assert_eq!(task.available_duration, Some(1800));
+                assert!(!task.pick_duration);
             }
             _ => panic!("Expected Task command"),
         }
 
         // Whitespace-only name trims to absent.
-        let cmd = parse_from(args(&["!", "@", "  "])).unwrap();
+        let cmd = parse_from(args(&["!", "%", "  "])).unwrap();
         match cmd {
             Command::Task(task) => {
                 assert_eq!(task.prefill, None);
@@ -605,10 +618,10 @@ mod tests {
 
     #[test]
     fn test_parse_task_recurring_body() {
-        // `! @ exercise . notes` → recurring creation with the name
+        // `! %30m exercise . notes` → recurring creation with the name
         // pre-filling the name prompt and the post-delimiter text as the
         // body.
-        let cmd = parse_from(args(&["!", "@", "exercise", ".", "notes"])).unwrap();
+        let cmd = parse_from(args(&["!", "%30m", "exercise", ".", "notes"])).unwrap();
         match cmd {
             Command::Task(task) => {
                 assert_eq!(task.task_type, TaskKind::Recurring);
@@ -621,7 +634,7 @@ mod tests {
 
     #[test]
     fn test_parse_task_recurring_bare_delimiter_empty_body() {
-        let cmd = parse_from(args(&["!", "@", "exercise", "."])).unwrap();
+        let cmd = parse_from(args(&["!", "%30m", "exercise", "."])).unwrap();
         match cmd {
             Command::Task(task) => {
                 assert_eq!(task.task_type, TaskKind::Recurring);
@@ -643,8 +656,8 @@ mod tests {
 
     #[test]
     fn test_parse_task_recurring_create() {
-        // Recurring task creation via ! @
-        let cmd = parse_from(args(&["!", "@"])).unwrap();
+        // Recurring task creation via ! %
+        let cmd = parse_from(args(&["!", "%"])).unwrap();
         match cmd {
             Command::Task(task) => {
                 assert_eq!(task.task_type, TaskKind::Recurring);
@@ -967,109 +980,130 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_dash_alone_is_tasks_edit() {
-        // `im -` (bare) → TasksEdit (stub); `- <id> [count]` and
-        // `- <words…> [count]` remain the update forms (tested below).
+    fn test_parse_dash_falls_through_to_entry() {
+        // Every leading-dash argument list is an entry command; a bare
+        // `im -` logs a mood entry whose mood is `-`.
         let cmd = parse_from(args(&["-"])).unwrap();
-        assert_eq!(cmd, Command::TasksEdit);
-    }
+        assert_eq!(
+            cmd,
+            Command::Entry(crate::types::Entry {
+                mood: "-".to_string(),
+                trackers: vec![],
+                task_ref: None,
+                count: None,
+                body: Err(0),
+                duration: None,
+            })
+        );
 
-    #[test]
-    fn test_parse_update() {
-        let cmd = parse_from(args(&["-", "5"])).unwrap();
+        // `im -7 ran` is entry text (a tracker pair), never a task update
+        // or a link — links use the '+' task_ref syntax now.
+        let cmd = parse_from(args(&["-7", "ran"])).unwrap();
         match cmd {
-            Command::Update { target, count } => {
-                assert_eq!(target, UpdateTarget::OneShot(5));
-                assert_eq!(count, None);
+            Command::Entry(entry) => {
+                assert_eq!(entry.mood, "");
+                assert_eq!(entry.trackers, vec![("7".to_string(), "ran".to_string())]);
+                assert_eq!(entry.task_ref, None);
             }
-            _ => panic!("Expected Update command"),
+            _ => panic!("Expected Entry command"),
         }
     }
 
     #[test]
-    fn test_parse_update_with_count() {
-        let cmd = parse_from(args(&["-", "5", "3"])).unwrap();
-        match cmd {
-            Command::Update { target, count } => {
-                assert_eq!(target, UpdateTarget::OneShot(5));
-                assert_eq!(count, Some(3));
-            }
-            _ => panic!("Expected Update command"),
-        }
-    }
+    fn test_parse_plus_command_edit_and_entry_variants() {
+        // ---- single argument: the interactive editor ------------------
+        // im + -> edit flow (empty task_ref -> picker)
+        let cmd = parse_from(args(&["+"])).unwrap();
+        assert_eq!(cmd, Command::TaskEdit { task: None });
 
-    #[test]
-    fn test_parse_update_at_name_is_query_not_recurring() {
-        // The `- @name` recurring form was removed: `- @exercise` is now a
-        // word query (which matches nothing, since task names don't carry
-        // the '@' prefix).
-        let cmd = parse_from(args(&["-", "@exercise"])).unwrap();
-        match cmd {
-            Command::Update { target, count } => {
-                assert_eq!(
-                    target,
-                    UpdateTarget::Query {
-                        words: vec!["@exercise".to_string()]
-                    }
-                );
-                assert_eq!(count, None);
+        // im +7 -> edit task 7
+        let cmd = parse_from(args(&["+7"])).unwrap();
+        assert_eq!(
+            cmd,
+            Command::TaskEdit {
+                task: Some(TaskRef::Id(7)),
             }
-            _ => panic!("Expected Update command"),
-        }
-    }
+        );
 
-    #[test]
-    fn test_parse_update_query_words() {
-        // im - buy milk
-        let cmd = parse_from(args(&["-", "buy", "milk"])).unwrap();
-        match cmd {
-            Command::Update { target, count } => {
-                assert_eq!(
-                    target,
-                    UpdateTarget::Query {
-                        words: vec!["buy".to_string(), "milk".to_string()]
-                    }
-                );
-                assert_eq!(count, None);
+        // im +groceries -> edit the unique word-query match
+        let cmd = parse_from(args(&["+groceries"])).unwrap();
+        assert_eq!(
+            cmd,
+            Command::TaskEdit {
+                task: Some(TaskRef::Words(vec!["groceries".to_string()])),
             }
-            _ => panic!("Expected Update command"),
-        }
-    }
+        );
 
-    #[test]
-    fn test_parse_update_query_words_with_count() {
-        // im - buy milk 2 — trailing numeric word is the count
-        let cmd = parse_from(args(&["-", "buy", "milk", "2"])).unwrap();
-        match cmd {
-            Command::Update { target, count } => {
-                assert_eq!(
-                    target,
-                    UpdateTarget::Query {
-                        words: vec!["buy".to_string(), "milk".to_string()]
-                    }
-                );
-                assert_eq!(count, Some(2));
+        // ---- anything more: an entry carrying a task_ref ---------------
+        fn entry_of(cmd: Command) -> crate::types::Entry {
+            match cmd {
+                Command::Entry(e) => e,
+                other => panic!("Expected Entry command, got {other:?}"),
             }
-            _ => panic!("Expected Update command"),
         }
-    }
 
-    #[test]
-    fn test_parse_update_query_words_single_word() {
-        // A lone non-numeric word is a name query, not an id.
-        let cmd = parse_from(args(&["-", "buy"])).unwrap();
-        match cmd {
-            Command::Update { target, count } => {
-                assert_eq!(
-                    target,
-                    UpdateTarget::Query {
-                        words: vec!["buy".to_string()]
-                    }
-                );
-                assert_eq!(count, None);
-            }
-            _ => panic!("Expected Update command"),
-        }
+        // im + 2 — a bare '+' takes no payload; "2" is the mood.
+        let e = entry_of(parse_from(args(&["+", "2"])).unwrap());
+        assert_eq!(e.task_ref, Some(TaskRef::Pick));
+        assert_eq!(e.count, None);
+        assert_eq!(e.mood, "2");
+
+        // im +7 2 — completion payload, no mood row needed.
+        let e = entry_of(parse_from(args(&["+7", "2"])).unwrap());
+        assert_eq!(e.task_ref, Some(TaskRef::Id(7)));
+        assert_eq!(e.count, Some(2));
+        assert_eq!(e.mood, "");
+
+        // im +7 2 felt good — payload applied AND mood logged/linked.
+        let e = entry_of(parse_from(args(&["+7", "2", "felt", "good"])).unwrap());
+        assert_eq!(e.task_ref, Some(TaskRef::Id(7)));
+        assert_eq!(e.count, Some(2));
+        assert_eq!(e.mood, "felt good");
+
+        // im +7 buy milk — non-numeric follower: no payload, mood instead.
+        let e = entry_of(parse_from(args(&["+7", "buy", "milk"])).unwrap());
+        assert_eq!(e.task_ref, Some(TaskRef::Id(7)));
+        assert_eq!(e.count, None);
+        assert_eq!(e.mood, "buy milk");
+
+        // im +buy milk — word-query ref linking mood "milk".
+        let e = entry_of(parse_from(args(&["+buy", "milk"])).unwrap());
+        assert_eq!(
+            e.task_ref,
+            Some(TaskRef::Words(vec!["buy".to_string()]))
+        );
+        assert_eq!(e.count, None);
+        assert_eq!(e.mood, "milk");
+
+        // Trailing ref: link-only when nothing follows.
+        let e = entry_of(parse_from(args(&["good", "+7", ".", "stuff"])).unwrap());
+        assert_eq!(e.mood, "good");
+        assert_eq!(e.task_ref, Some(TaskRef::Id(7)));
+        assert_eq!(e.count, None);
+        assert_eq!(e.body, Ok("stuff".to_string()));
+
+        // Trailing ref with numeric payload: link AND complete.
+        let e = entry_of(parse_from(args(&["good", "+7", "3"])).unwrap());
+        assert_eq!(e.mood, "good");
+        assert_eq!(e.task_ref, Some(TaskRef::Id(7)));
+        assert_eq!(e.count, Some(3));
+
+        // Untoggle via a negative numeric payload.
+        let e = entry_of(parse_from(args(&["+toggle", "-1"])).unwrap());
+        assert_eq!(e.task_ref, Some(TaskRef::Words(vec!["toggle".to_string()])));
+        assert_eq!(e.count, Some(-1));
+
+        // A trailing ref closes the line like a tracker pair: a bare word
+        // after it is rejected.
+        assert!(parse_from(args(&["good", "+7", "later"])).is_err());
+
+        // Sessions compose with refs.
+        let e = entry_of(parse_from(args(&["%25m", "+7"])).unwrap());
+        assert_eq!(e.duration, Some(1500));
+        assert_eq!(e.task_ref, Some(TaskRef::Id(7)));
+
+        // At most one ref per entry.
+        assert!(parse_from(args(&["+1", "good", "+2"])).is_err());
     }
 
     #[test]
@@ -1119,19 +1153,20 @@ mod tests {
             _ => panic!("Expected Entry command"),
         }
 
-        // Links interleave with valueless trackers after the mood.
+        // Valueless trackers interleave after the mood.
         let cmd = parse_from(args(&["good", "-sleep", "-1", "-xyz"])).unwrap();
         match cmd {
             Command::Entry(entry) => {
                 assert_eq!(entry.mood, "good");
-                assert_eq!(entry.task_links, vec![1]);
                 assert_eq!(
                     entry.trackers,
                     vec![
                         ("sleep".to_string(), String::new()),
+                        ("1".to_string(), String::new()),
                         ("xyz".to_string(), String::new()),
                     ]
                 );
+                assert_eq!(entry.task_ref, None);
             }
             _ => panic!("Expected Entry command"),
         }
@@ -1238,6 +1273,76 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_tracker_plus_ref_rejected() {
+        // A tracker-only line (`-tracker +x`) creates no mood row, so a
+        // '+' task reference has nothing to attach to → rejected.
+        assert!(parse_from(args(&["-tracker", "+x"])).is_err());
+
+        // With a mood present, the '+' token is the task ref (never
+        // tracker text).
+        let cmd = parse_from(args(&["good", "-tracker", "+7"])).unwrap();
+        match cmd {
+            Command::Entry(entry) => {
+                assert_eq!(entry.mood, "good");
+                assert_eq!(
+                    entry.trackers,
+                    vec![("tracker".to_string(), String::new())]
+                );
+                assert_eq!(entry.task_ref, Some(TaskRef::Id(7)));
+            }
+            _ => panic!("Expected Entry command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_entry_task_ref() {
+        // The reference example: '-tracker +7 mood' parses into two
+        // entities plus the mood word — a valueless tracker pair and an
+        // Id task ref ('+' is never consumed as a tracker value).
+        let cmd = parse_from(args(&["-tracker", "+7", "mood"])).unwrap();
+        match cmd {
+            Command::Entry(entry) => {
+                assert_eq!(entry.mood, "mood");
+                assert_eq!(
+                    entry.trackers,
+                    vec![("tracker".to_string(), String::new())]
+                );
+                assert_eq!(entry.task_ref, Some(TaskRef::Id(7)));
+            }
+            _ => panic!("Expected Entry command"),
+        }
+
+        // Word query ref.
+        let cmd = parse_from(args(&["good", "+groceries"])).unwrap();
+        match cmd {
+            Command::Entry(entry) => {
+                assert_eq!(entry.mood, "good");
+                assert_eq!(
+                    entry.task_ref,
+                    Some(TaskRef::Words(vec!["groceries".to_string()]))
+                );
+            }
+            _ => panic!("Expected Entry command"),
+        }
+
+        // Bare '+' picks interactively. Digits are always ids (+0 too).
+        let cmd = parse_from(args(&["ok", "+"])).unwrap();
+        assert!(matches!(
+            cmd,
+            Command::Entry(e) if e.task_ref == Some(TaskRef::Pick)
+        ));
+        let cmd = parse_from(args(&["ok", "+0"])).unwrap();
+        assert!(matches!(
+            cmd,
+            Command::Entry(e) if e.task_ref == Some(TaskRef::Id(0))
+        ));
+
+        // At most one '+' per entry.
+        assert!(parse_from(args(&["+1", "good", "+2"])).is_err());
+        assert!(parse_from(args(&["good", "+1", "+2"])).is_err());
+    }
+
+    #[test]
     fn test_parse_tracker_then_delimiter_body_split_first() {
         // Body split comes first (like tasks): the delimiter never becomes
         // a tracker's value, and free text after it is body verbatim.
@@ -1285,8 +1390,10 @@ mod tests {
             Command::Entry(Entry {
                 mood: "ok".to_string(),
                 trackers: vec![],
-                task_links: vec![],
+                task_ref: None,
+                count: None,
                 body: Err(0),
+                duration: None,
             })
         );
 
@@ -1314,7 +1421,10 @@ mod tests {
         // order is not tracked: -vq is the same counts as -qv
         let cli = parse_cli(args(&["-vq", "-", "ok"])).unwrap();
         assert_eq!(cli.opts.qv, [1, 1]);
-        assert!(matches!(cli.cmd, Command::Update { .. }));
+        assert!(
+            matches!(cli.cmd, Command::Entry(e) if e.mood == "- ok"),
+            "'-' and 'ok' are entry text now that the dash update form is gone"
+        );
 
         // repeated flags stack up as counts (-vvq → 1 quiet, 2 verbose)
         let cli = parse_cli(args(&["-vvq", "ok"])).unwrap();
@@ -1367,10 +1477,18 @@ mod tests {
         assert_eq!(cli.opts.qv, [1, 1]);
         assert!(matches!(cli.cmd, Command::Entry(_)));
 
-        // A bare dash is the update/today command, never a flag.
+        // A bare dash is entry text (mood '-'), never a flag; the -q after
+        // it is a valueless tracker, not a flag either.
         let cli = parse_cli(args(&["-", "-q"])).unwrap();
         assert_eq!(cli.opts.qv, [0, 0]);
-        assert!(matches!(cli.cmd, Command::Update { .. }));
+        assert!(
+            matches!(
+                cli.cmd,
+                Command::Entry(e)
+                    if e.mood == "-"
+                        && e.trackers == vec![("q".to_string(), String::new())]
+            )
+        );
 
         // Tokens with non-flag characters stop the flag run (-q5 is entry
         // text: a valueless tracker reference, like any trailing -<name>).
@@ -1378,12 +1496,11 @@ mod tests {
         assert!(
             matches!(cli.cmd, Command::Entry(e) if e.trackers == vec![("q5".to_string(), String::new())])
         );
-        // A purely numeric -<name> is a task short-id link (single token).
+        // A purely numeric -<name> is a tracker token now; links use '+<id>'.
         let cli = parse_cli(args(&["-5"])).unwrap();
-        assert!(matches!(
-            cli.cmd,
-            Command::Entry(e) if e.task_links == vec![5] && e.trackers.is_empty()
-        ));
+        assert!(
+            matches!(cli.cmd, Command::Entry(e) if e.trackers == vec![("5".to_string(), String::new())])
+        );
     }
 
     #[test]
@@ -1599,6 +1716,70 @@ mod tests {
         let result = parse_from(args(&["ok\ttab"]));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("tab characters"));
+    }
+
+    #[test]
+    fn test_parse_mood_session_variants() {
+        // im %25m
+        let cmd = parse_from(args(&["%25m"])).unwrap();
+        match cmd {
+            Command::Entry(entry) => {
+                assert_eq!(entry.mood, "");
+                assert_eq!(entry.duration, Some(1500));
+            }
+            _ => panic!("Expected Entry command"),
+        }
+
+        // im % (bare % not supported -> error)
+        assert!(parse_from(args(&["%"])).is_err());
+
+        // im % 25m
+        let cmd = parse_from(args(&["%", "25m"])).unwrap();
+        match cmd {
+            Command::Entry(entry) => {
+                assert_eq!(entry.mood, "");
+                assert_eq!(entry.duration, Some(1500));
+            }
+            _ => panic!("Expected Entry command"),
+        }
+
+        // im -sleep 8 %25m
+        let cmd = parse_from(args(&["-sleep", "8", "%25m"])).unwrap();
+        match cmd {
+            Command::Entry(entry) => {
+                assert_eq!(entry.mood, "");
+                assert_eq!(entry.duration, Some(1500));
+                assert_eq!(entry.trackers, vec![("sleep".to_string(), "8".to_string())]);
+            }
+            _ => panic!("Expected Entry command"),
+        }
+
+        // im %25m -sleep 8
+        let cmd = parse_from(args(&["%25m", "-sleep", "8"])).unwrap();
+        match cmd {
+            Command::Entry(entry) => {
+                assert_eq!(entry.mood, "");
+                assert_eq!(entry.duration, Some(1500));
+                assert_eq!(entry.trackers, vec![("sleep".to_string(), "8".to_string())]);
+            }
+            _ => panic!("Expected Entry command"),
+        }
+
+        // im %25m +5 . notes
+        let cmd = parse_from(args(&["%25m", "+5", ".", "notes"])).unwrap();
+        match cmd {
+            Command::Entry(entry) => {
+                assert_eq!(entry.mood, "");
+                assert_eq!(entry.duration, Some(1500));
+                assert_eq!(entry.task_ref, Some(crate::types::TaskRef::Id(5)));
+                assert_eq!(entry.body, Ok("notes".to_string()));
+            }
+            _ => panic!("Expected Entry command"),
+        }
+
+        // Mood cannot be specified alongside duration on CLI (e.g. %25m good or %good)
+        assert!(parse_from(args(&["%25m", "good"])).is_err());
+        assert!(parse_from(args(&["%good"])).is_err());
     }
 
     #[test]

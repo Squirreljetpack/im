@@ -14,29 +14,33 @@ use super::views::attach_full_completions;
 pub async fn create_entry(pool: &SqlitePool, entry: &EntryObject) -> Result<Option<i64>> {
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
 
-    let insert_mood = !entry.mood.is_empty() || !entry.body.is_empty();
+    let insert_mood = !entry.mood.is_empty() || !entry.body.is_empty() || entry.duration.is_some() || entry.todo_id.is_some();
     let mood_id: Option<i64> = if insert_mood {
         let id: i64 = if let Some(blob) = &entry.embedding {
             sqlx::query(
-                "INSERT INTO mood (mood, body, time, embedding, score) VALUES (?, ?, ?, ?, ?) RETURNING id",
+                "INSERT INTO mood (mood, body, time, embedding, score, duration, todo_id) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
             )
             .bind(&entry.mood)
             .bind(&entry.body)
             .bind(entry.time)
             .bind(blob)
             .bind(entry.score)
+            .bind(entry.duration)
+            .bind(entry.todo_id)
             .fetch_one(&mut *tx)
             .await
             .context("Failed to insert mood")?
             .get("id")
         } else {
             sqlx::query(
-                "INSERT INTO mood (mood, body, time, score) VALUES (?, ?, ?, ?) RETURNING id",
+                "INSERT INTO mood (mood, body, time, score, duration, todo_id) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
             )
             .bind(&entry.mood)
             .bind(&entry.body)
             .bind(entry.time)
             .bind(entry.score)
+            .bind(entry.duration)
+            .bind(entry.todo_id)
             .fetch_one(&mut *tx)
             .await
             .context("Failed to insert mood")?
@@ -136,7 +140,7 @@ pub async fn fetch_moods_between(
     end: i64,
 ) -> Result<Vec<MoodRow>> {
     let rows = sqlx::query(
-        "SELECT id, mood, body, time, embedding, score FROM mood WHERE time >= ? AND time <= ? ORDER BY time ASC",
+        "SELECT id, mood, body, time, embedding, score, duration, todo_id FROM mood WHERE time >= ? AND time <= ? ORDER BY time ASC",
     )
     .bind(start)
     .bind(end)
@@ -153,6 +157,8 @@ pub async fn fetch_moods_between(
             time: row.get("time"),
             embedding: row.get("embedding"),
             score: row.get("score"),
+            duration: row.get("duration"),
+            todo_id: row.get("todo_id"),
         })
         .collect())
 }
@@ -299,37 +305,33 @@ pub async fn fetch_completions_between(
         .collect())
 }
 
-/// Link a mood entry to tasks (by stable row id) in one transaction.
-/// Duplicate links are ignored (`INSERT OR IGNORE`).
+/// Link a mood entry to a task (by stable row id). Since each mood can only
+/// link to 1 task, any existing task link for this mood is replaced.
 pub async fn link_mood_to_tasks(
     pool: &SqlitePool,
     mood_id: i64,
     task_ids: &[i64],
 ) -> Result<()> {
-    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
-    for task_id in task_ids {
-        sqlx::query("INSERT OR IGNORE INTO task_moods (todo_id, mood_id) VALUES (?, ?)")
-            .bind(task_id)
-            .bind(mood_id)
-            .execute(&mut *tx)
-            .await
-            .context("Failed to insert task-mood link")?;
-    }
-    tx.commit().await.context("Failed to commit transaction")?;
-    Ok(())
-}
-
-/// Link a mood entry to a task by the task's raw row id (the today-view
-/// Link prompt): inserts the `task_moods` row. Duplicate links are
-/// ignored (`INSERT OR IGNORE`); a nonexistent task or mood id fails the
-/// FK constraint — callers just log the result.
-pub async fn link_mood_to_task(pool: &SqlitePool, mood_id: i64, task_id: i64) -> Result<u64> {
-    let result = sqlx::query("INSERT OR IGNORE INTO task_moods (todo_id, mood_id) VALUES (?, ?)")
+    let task_id = task_ids.last().copied();
+    sqlx::query("UPDATE mood SET todo_id = ? WHERE id = ?")
         .bind(task_id)
         .bind(mood_id)
         .execute(pool)
         .await
-        .context("Failed to insert task-mood link")?;
+        .context("Failed to link mood to task")?;
+    Ok(())
+}
+
+/// Link a mood entry to a task by the task's raw row id (the today-view
+/// Link prompt): replaces any existing task link for the mood. A nonexistent task or mood id fails the
+/// FK constraint — callers just log the result.
+pub async fn link_mood_to_task(pool: &SqlitePool, mood_id: i64, task_id: i64) -> Result<u64> {
+    let result = sqlx::query("UPDATE mood SET todo_id = ? WHERE id = ?")
+        .bind(task_id)
+        .bind(mood_id)
+        .execute(pool)
+        .await
+        .context("Failed to link mood to task")?;
     Ok(result.rows_affected())
 }
 
@@ -354,9 +356,8 @@ pub async fn link_tracker_to_mood(
 /// `moods:` field).
 pub async fn fetch_linked_moods(pool: &SqlitePool, task_id: i64) -> Result<Vec<MoodRow>> {
     let rows = sqlx::query(
-        "SELECT f.id, f.mood, f.body, f.time, f.embedding, f.score FROM mood f \
-         JOIN task_moods tm ON tm.mood_id = f.id \
-         WHERE tm.todo_id = ? ORDER BY f.time ASC",
+        "SELECT id, mood, body, time, embedding, score, duration, todo_id FROM mood \
+         WHERE todo_id = ? ORDER BY time ASC",
     )
     .bind(task_id)
     .fetch_all(pool)
@@ -372,6 +373,8 @@ pub async fn fetch_linked_moods(pool: &SqlitePool, task_id: i64) -> Result<Vec<M
             time: r.get("time"),
             embedding: r.get("embedding"),
             score: r.get("score"),
+            duration: r.get("duration"),
+            todo_id: r.get("todo_id"),
         })
         .collect())
 }
@@ -388,7 +391,7 @@ pub async fn fetch_moods_by_ids(
         return Ok(map);
     }
     let sql = format!(
-        "SELECT id, mood, body, time, embedding, score FROM mood WHERE id IN ({})",
+        "SELECT id, mood, body, time, embedding, score, duration, todo_id FROM mood WHERE id IN ({})",
         ids.iter().map(|_| "?").collect::<Vec<_>>().join(",")
     );
     let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
@@ -409,6 +412,8 @@ pub async fn fetch_moods_by_ids(
                 time: row.get("time"),
                 embedding: row.get("embedding"),
                 score: row.get("score"),
+                duration: row.get("duration"),
+                todo_id: row.get("todo_id"),
             },
         );
     }
@@ -455,7 +460,7 @@ pub async fn fetch_mood_trackers(
     Ok(map)
 }
 
-/// Tasks linked to moods via `task_moods`, grouped by mood id,
+/// Tasks linked to moods via `mood.todo_id`, grouped by mood id,
 /// ordered by name. Completions/last_time follow the today-view convention
 /// (full completion scoping via [`attach_full_completions`]). An empty
 /// input returns an empty map.
@@ -468,9 +473,9 @@ pub async fn fetch_mood_tasks(
         return Ok(map);
     }
     let sql = format!(
-        "SELECT t.*, tm.mood_id, NULL AS completions, NULL AS last_time \
-         FROM todos t JOIN task_moods tm ON tm.todo_id = t.id \
-         WHERE tm.mood_id IN ({}) ORDER BY t.name ASC",
+        "SELECT t.*, m.id AS mood_id, NULL AS completions, NULL AS last_time \
+         FROM todos t JOIN mood m ON m.todo_id = t.id \
+         WHERE m.id IN ({}) ORDER BY t.name ASC",
         mood_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",")
     );
     let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
@@ -722,6 +727,8 @@ mod tests {
                 embedding: None,
                 score: None,
                 trackers: Vec::new(),
+                duration: None,
+                todo_id: None,
             },
         )
         .await
@@ -765,10 +772,12 @@ mod tests {
         assert_eq!(linked.len(), 1);
         assert_eq!(linked[0].id, mood_id);
 
-        // Duplicate link: ignored (0 rows affected).
-        let affected = link_mood_to_task(&pool, mood_id, task_id).await.unwrap();
-        assert_eq!(affected, 0);
-        assert_eq!(fetch_linked_moods(&pool, task_id).await.unwrap().len(), 1);
+        // Re-linking replaces the link:
+        let task_id2 = seed_task(&pool, "t2").await;
+        let affected = link_mood_to_task(&pool, mood_id, task_id2).await.unwrap();
+        assert_eq!(affected, 1);
+        assert_eq!(fetch_linked_moods(&pool, task_id).await.unwrap().len(), 0);
+        assert_eq!(fetch_linked_moods(&pool, task_id2).await.unwrap().len(), 1);
 
         // Nonexistent task id fails the FK constraint.
         assert!(link_mood_to_task(&pool, mood_id, 9999).await.is_err());
@@ -792,6 +801,8 @@ mod tests {
                         value: TrackerValue::Integer(7),
                         replace_slot: None,
                     }],
+                    duration: None,
+                    todo_id: None,
                 },
             )
             .await

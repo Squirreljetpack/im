@@ -1,173 +1,152 @@
-# VIEWS.md — ViewVariant view system
+# VIEWS.md — ViewVariant View System
 
-The shared `ViewVariant` enum controls the `All → A → B` view cycle used by
-both TUIs and the CLI. Its interpretation is context-specific: task views use
-`A` for oneshots and `B` for recurring/scheduled tasks, while today views use
-`A` to exclude completed items and `B` for tasks-only output.
+The shared `ViewVariant` enum controls the three-stage view cycle (`All → A → B → All`) used across the CLI and TUIs. Its interpretation depends on the active view mode:
+- **Tasks Views (`@` and `@done`)**: `A` filters to oneshot tasks, while `B` filters to recurring and scheduled tasks.
+- **Today View (bare `im`, `@due`, and `@<date>`)**: `A` selects the **journal timeline** (moods, trackers, and completion events), while `B` selects the **tasks-only agenda** (overdue/due tasks, scheduled tasks, and next recurring windows).
 
-## Predicates
+---
 
-`now` = current Unix timestamp; `t` = a task row; `entry` = a completion
-record in `todo_completions`. Shorthand used in the matrices below:
+## 1. Predicates and Shorthand
 
-| shorthand | meaning |
-| --- | --- |
-| `O` / `R` / `S` | oneshot / recurring / scheduled (from `interval_secs` + `available_duration_secs`) |
-| `done(t)` | `O`: `completions >= target` (target 0: any entry) · `R`: reached target in current interval · `S`: entry ≥ 1 or auto-completed |
-| `ongoing(S)` | no entry, window still open |
-| `failed(S)` | has an entry with count 0 |
-| `auto_completed(S)` | no entry, window elapsed |
-| `expired(R)` | `end_time` set, `now > end_time`, not done — tasks TUI only; TodayView window rows carry the unscoped last completion in `end_time` instead of the expiry, and the per-window badge has no expired state |
-| `has_entry(t)` | any completion row exists |
-| `availability_passed(t)` | window end `<= now` — recurring: current-interval-anchored; scheduled: absolute (`start + duration`); the TodayView D10 confirm uses the per-window check instead (see below) |
+* `now`: current Unix timestamp.
+* `t`: a task row in `todos`.
+* `entry`: a completion event record in `todo_completions`.
 
-Completion sums are scoped to the current interval for recurring tasks in the
-pending/done views; the TodayView per-window fetch scopes them per availability
-window instead. The `@done` history view uses an unscoped sum. `last_time`
-follows the completion sum's scoping, except: the tasks-TUI fetches carry the
-unscoped last completion for recurring tasks (last completion ever — used by
-the pending D9 sort, the done-view sort, and the preview `last:` field), and
-TodayView window rows carry the unscoped last completion in `end_time` (the
-expiry is not used there). Availability-window checks must first exclude
-`expired(t)` tasks — an expired task has no current interval.
+| Shorthand | Meaning |
+| :--- | :--- |
+| **`O`** | Oneshot task (`interval_secs IS NULL` and `available_duration_secs IS NULL`). |
+| **`R`** | Recurring task (`interval_secs IS NOT NULL`). |
+| **`S`** | Scheduled task (`interval_secs IS NULL` and `available_duration_secs IS NOT NULL`). |
+| **`done(t)`** | `O`: `completions >= target_count` (or any completion when `target_count <= 0`).<br>`R`: reached target count within the current interval.<br>`S`: has a completion entry (count ≥ 1) or auto-completed when the window elapsed. |
+| **`ongoing(S)`** | Scheduled task with no completion entry whose availability window is still open (`now < start_time + duration`). |
+| **`failed(S)`** | Scheduled task with an explicit completion entry of count 0. |
+| **`auto_completed(S)`** | Scheduled task with no completion entries whose availability window has fully passed (`now >= start_time + duration`). |
+| **`expired(R)`** | Recurring task with `end_time` set, `now > end_time`, and not completed in the current interval (tasks view only). |
+| **`has_entry(t)`** | At least one completion record exists for task `t` in `todo_completions`. |
+| **`availability_passed(t)`** | The availability window end timestamp is `_<= now_` (`start_time + duration` for scheduled tasks, or current interval anchor + duration for recurring tasks). |
 
-## CLI syntax
+### Completion Scoping Rules
+- **Interval Scoping**: In the pending and done task views, completion sums for recurring tasks are scoped to their current recurrence interval.
+- **Window Scoping**: In the Today View, recurring availability windows scope completions to each window's respective interval.
+- **Unscoped History**: The `@done:O` (`ViewVariant::B`) view sums all historical completions across all time.
+- **`last_time` Timestamp**: Matches the scope of the completion sum. In task view fetches, recurring tasks carry the unscoped last completion timestamp for sorting and the preview pane's `last:` field.
 
-| Command | Effect |
-| --- | --- |
-| `im !` | Interactive oneshot creation (name prompted) |
-| `im @` | Pending view — `ViewVariant::All` |
-| `im @:o` | Pending view — `ViewVariant::A` (oneshots only) |
-| `im @:O` | Pending view — `ViewVariant::B` (recurring not availability-filtered + scheduled) |
-| `im @done` | Completed tasks — `ViewVariant::All` |
-| `im @done:o` | Completed oneshots only — `ViewVariant::A` |
-| `im @done:O` | Completed recurring history + completed scheduled — `ViewVariant::B` |
-| `im @due` | TodayView, `ViewVariant::B`, `TodayHorizon::Today` |
-| `im @due:t` | Tomorrow view, `ViewVariant::B`, `TodayHorizon::Tomorrow` |
-| `im @due:w` | Week view, `ViewVariant::B`, `TodayHorizon::Week` |
-| `im @<date>` | Anchored TodayView, `ViewVariant::All`, `TodayHorizon::Today` |
+---
 
-## View matrix
+## 2. CLI Syntax
 
-### `@` — Pending view
+| Command | View Mode | Default Variant | Horizon / Date | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| `im !` | Task Creation | — | — | Interactive oneshot task creation prompt. |
+| `im @` | Pending Tasks | `All` | — | All open tasks (oneshot, recurring, scheduled). |
+| `im @:o` | Pending Tasks | `A` | — | Open oneshot tasks only. |
+| `im @:O` | Pending Tasks | `B` | — | Open recurring & scheduled tasks only. |
+| `im @done` | Done Tasks | `All` | — | Completed tasks in the current interval / oneshots. |
+| `im @done:o` | Done Tasks | `A` | — | Completed oneshot tasks only. |
+| `im @done:O` | Done Tasks | `B` | — | Completed recurring history and completed scheduled tasks. |
+| `im @due` | Today View | `B` (`tasks`) | `Today` | Pure tasks agenda due today or overdue. |
+| `im @due:t` | Today View | `B` (`tasks`) | `Tomorrow` | Tasks agenda for tomorrow. |
+| `im @due:w` | Today View | `B` (`tasks`) | `Week` | Tasks agenda for the next 7 days. |
+| `im @<date>` | Today View | `All` | `Today` (anchored) | Anchored today view for a specific date. |
 
-| Variant | Behavior |
-| --- | --- |
-| `All` | `not done(O)` + `R` (interval-scoped, availability-filtered, not expired) + `ongoing(S)` |
-| `A` | `not done(O)` only |
-| `B` | `not done(R)` (any not expired, not just availability-filtered) + `! availability_passed(S)` |
+---
 
-all of these also include + any task (all/oneshot_only/not_oneshot_only) with a completion entry within the last `persist_pending_seconds`
+## 3. View Matrix
 
-Non-complete scheduled tasks in `All` are exactly `ongoing(S)` — failed,
-auto-completed and completed `S` are excluded.
+### 3.1. `@` — Pending Tasks View
 
-### `@done` — Completed tasks
+| Variant | Label | Filter Behavior |
+| :--- | :--- | :--- |
+| **`All`** | `all` | Open oneshots (`not done(O)`), active recurring tasks (`R`, interval-scoped, availability-filtered, not expired), and open scheduled tasks (`ongoing(S)`). |
+| **`A`** | `oneshot` | Open oneshots only (`not done(O)`). |
+| **`B`** | `other` | Open recurring tasks (`not done(R)`, all non-expired, not availability-filtered) and open scheduled tasks (`!availability_passed(S)`). |
 
-| Variant | Behavior |
-| --- | --- |
-| `All` | `done(O)` + `S` `has_entry` + `done(R)` in current interval |
-| `A` | `done(O)` only |
-| `B` | (ALL `R`) + `S` `has_entry` or `auto_completed` |
+* **Recent Completions Persistence**: All pending variants include tasks that had a completion recorded within the last `persist_pending_seconds` (default: 300s), scoped to the matching task kinds.
+* **Scheduled Exclusion**: Failed, auto-completed, and completed scheduled tasks are excluded from `All`.
 
-`@done:o` shows more scheduled tasks than `All` — it adds auto-completed `S`
-and every recurring task (never-completed rows included).
-Order: done time, newest first — the last completion entry; entry-less
-rows fall back per kind: auto-completed `S` to
-`start_time + available_duration_secs`, zero-entry `R` history rows to
-`start_time` (their `available_duration_secs` is the availability window,
-not a completion moment).
+---
 
-### `@due` / `@<date>` — TodayView
+### 3.2. `@done` — Completed Tasks View
 
-Note: the two spellings use different defaults — `@due` starts at
-`ViewVariant::B` with the day horizon, `@<date>` at `ViewVariant::All`.
+| Variant | Label | Filter Behavior |
+| :--- | :--- | :--- |
+| **`All`** | `all` | Completed oneshots (`done(O)`), scheduled tasks with completions (`S` with `has_entry`), and recurring tasks completed in their current interval (`done(R)`). |
+| **`A`** | `oneshot` | Completed oneshots only (`done(O)`). |
+| **`B`** | `other` | Full recurring task history (all `R`, including zero-entry rows) plus scheduled tasks with completions or auto-completed (`S` with `has_entry` or `auto_completed`). |
 
-| Variant | Behavior |
-| --- | --- |
-| `All` | All tasks/trackers/mood sections for the day (oneshots, recurring, scheduled, completed today) |
-| `A` | Same but completed tasks filtered out; done rows dropped from regular task lists — for recurring tasks this is per window (a window whose own interval reached target is dropped, not-done windows stay) |
-| `B` | Tasks only — no trackers, no mood sections; otherwise the same as `All` (completed tasks and completion-today rows included) |
+* **Sorting**: Sorted by completion timestamp descending (newest first). Entry-less fallback: auto-completed scheduled tasks fall back to `start_time + available_duration_secs`; zero-entry recurring history rows fall back to `start_time`.
 
-Time cell: done rows show the completion time (an entry-less auto-completed
-scheduled task falls back to `start + duration`); not-done scheduled rows
-show `start_time`. Recurring tasks appear once per availability window that
-intersects the horizon — `All` shows every such window, `B` shows only the
-next (earliest) window per task, `A` shows only not-done windows. A recurring
-window's time cell is the last completion inside the window's interval once
-it is completed — and also once it has passed (`now >= window_end`), falling
-back to the window end when the interval has no completion — while an open
-or future not-done window shows the window start. The D10 confirm modal
-("availability window passed") applies per window: it triggers when
-`now >= window_end` on a not-done window. The preview pane for a recurring
-window shows `last:` from the window row's `end_time` — the unscoped last
-completion, not the expiry — and omits the `ends` field; in the tasks TUI the
-preview's `last:` reads `last_time` (unscoped for recurring tasks) and `ends`
-reads the real expiry.
+---
 
-### Task filter (oneshot section)
+### 3.3. Today View (`im`, `@due`, `@<date>`)
 
-The oneshot section is scoped by a `TasksFilter`, bound to the view
-variant: `All` uses `config.today_view.initial_tasks_filter` (the CLI and
-the TUI's starting state), `A` pins `Horizon`, `B` pins `Overdue`. The
-TUI header shows the variant's filter label — today app: `[show:
-all|journal|tasks]` (A is called "journal" even though it carries task
-rows, minus completed ones); tasks app: `[show: all|oneshot|other]`.
-Scheduled and recurring fetches are unaffected. Due time = `end_time`
-when set, else the `start_time` fallback (legacy rows / undated tasks).
+The Today View renders a combined timeline/agenda of entries within the selected horizon (`Today`, `Tomorrow`, or `Week`).
 
-| Filter (variant) | Oneshot rows |
-| --- | --- |
-| `None` (config only) | No task rows at all — the entire task section (oneshots, scheduled, recurring, completed-today) is hidden: a journal-only view |
-| `All` (default; `All` variant) | Any oneshot task — open or completed, any date, no bounds |
-| `Overdue` (`B` variant) | Dated oneshots due within the horizon or overdue (`end_time` set and `<= horizon_end`); undated tasks are never overdue and stay out |
-| `Pending` (config only) | Open (incomplete) oneshot tasks, any date — the undated inbox |
-| `Horizon` (`A` variant) | Open oneshot tasks due within the horizon; overdue (due before the day start) excluded |
+| Variant | Label | Contents |
+| :--- | :--- | :--- |
+| **`All`** | `[show: all]` | **Complete day summary**: Moods, tracker entries, open oneshot tasks, scheduled tasks overlapping the horizon, recurring windows, and tasks completed today (merged with completion timestamps). |
+| **`A`** | `[show: journal]` | **Journal event timeline**: Moods, tracker entries, and **task completion events** occurring within the horizon. Open/uncompleted tasks are hidden; each logged completion appears at its exact timestamp, showing cumulative progress (e.g. 1/5, 2/5, 3/5). |
+| **`B`** | `[show: due]` | **Tasks agenda**: Tasks only (moods and tracker entries hidden). Shows dated oneshots due within the horizon or overdue (`end_time <= horizon_end`), scheduled tasks overlapping the horizon, and the earliest upcoming availability window per recurring task. Completed-today tasks are not explicitly merged. |
 
-Completed-today rows (the step-5 merge) are independent of the filter and
-still surface in `All` and `B`; in `Pending` / `Horizon` / `Overdue` the
-regular oneshot list is incomplete-only, so a completed task appears once,
-via its completion row.
+#### Today View Time Cell Rules
+- **Journal Entries & Completions**: Timestamp of the mood, tracker, or task completion event (`today_time_label`).
+- **Open Oneshots**: Empty for undated oneshots (sort after timed entries); deadline (`end_time`) for dated oneshots.
+- **Scheduled Tasks**: Done rows show the completion timestamp (or window end for auto-completed tasks); open rows show the start time.
+- **Recurring Windows**:
+  - `All`: Emits an entry for every availability window intersecting the horizon.
+  - `B`: Emits only the next (earliest) upcoming window per recurring task.
+  - Completed or passed windows (`now >= window_end`) display the last completion in the interval, or fallback to the window end.
+  - Open or future windows display the window start time.
 
-## Who sets the variant
+---
 
-- **CLI**: `@` / `@done` start at `All`, with the `:o` / `:O` suffixes;
-  `@due[:t|:w]` is fixed at `B`; `@<date>` at `All`. The oneshot task
-  filter follows the variant: `All` uses
-  `config.today_view.initial_tasks_filter`, `A` pins `Horizon`, `B` pins
-  `Overdue`.
-- **TUI**: cycles `All → A → B → All` via the `CycleFilter` action, starting
-  from the command's suffix. The tasks app cycles modes; the today app cycles
-  horizons (`Today → Tomorrow → Week`).
+## 4. Variant Cycling
 
-## Plain (non-TTY) output
+- **CLI**: Variant selection is specified via command suffixes (`:o` for `A`, `:O` for `B`, default `All`). `@due` starts fixed at variant `B`.
+- **TUI**: Pressing `f` (`CycleFilter`) cycles variants in order: `All → A → B → All`.
+  - In the **Tasks TUI**, this toggles between `all`, `oneshot`, and `other`.
+  - In the **Today TUI**, this toggles between `all`, `journal`, and `tasks`. Pressing `h` cycles horizons (`Today → Tomorrow → Week`).
 
-All non-TTY output is newline-separated rows, tab-separated columns. The TUI
-and the text writers consume the same `TodayEntry`s, so badge/color logic is
-shared.
+---
 
-- **Task lists** (`format_tasks_simple`): `id \t interval \t next_available \t pri \t name \t status`. `id` is the user-facing short id — empty for completed oneshot tasks (their short id was cleared). `interval`/`next_available` are single spaces for oneshot tasks; `next_available` is the next interval-window start for recurring tasks. `status` is the completion badge (see ARCHITECTURE §8).
-- **Today view** (`format_today_simple`): `ts \t marker \t label \t detail` rows from moods, tracker entries, and tasks. Markers: `●` mood (Oklab projection), `◆` tracker, `○`/`✓` oneshot, `↻`/`✓` recurring, `✓`/`◷` scheduled; the mood and tracker glyphs are configurable via `[badges] mood` / `[badges] tracker`, and journal entries (empty mood) use `[badges] journal_badge` (glyph and/or color; color defaults to `Reset`) when set. Empty day → `Nothing logged today.`
-- **Tracker grids** (`write_tracker_grid`, `: [week|month|year] [ids]`): per-day/per-interval dot sequences — mood dots colored by the Oklab projection, tracker dots binned by score vs `low`/`high` (cumulative slots bin the per-slot sum; null replace markers bin the circular `[low, high]` time-offset zone, cumulative null markers bin the per-slot count), recurring-task dots from the per-interval completion sum via the completion badge.
+## 5. Plain (Non-TTY) Output
 
-## Appendix: formal definitions
+When stdout is not a TTY (or piped), output is printed as tab-separated columns with newline-terminated rows:
 
-All terms below are used throughout this document. `now` = current Unix
-timestamp; `t` = a task row; `entry` = a completion record in
-`todo_completions`.
+- **Task Lists (`format_tasks_simple`)**:
+  ```text
+  id \t interval \t next_available \t priority \t name \t status
+  ```
+  - `id`: Short ID (empty for completed oneshots whose short IDs were cleared).
+  - `interval` / `next_available`: Spaced for oneshots; next availability window start for recurring tasks.
+  - `status`: Derived completion badge.
+
+- **Today View (`format_today_simple`)**:
+  ```text
+  time_label \t badge \t label \t detail
+  ```
+  - Markers: `●` mood (Oklab color projection), `◆` tracker, `○`/`✓` oneshot, `↻`/`✓` recurring, `✓`/`◷` scheduled.
+  - Empty day outputs: `Nothing logged today.`
+
+- **Tracker Grids (`write_tracker_grid`)**:
+  Per-interval dot sequences colored by mood Oklab projections, numeric tracker scores binned into threshold ranges, and recurring task completion sums.
+
+---
+
+## Appendix: Formal Definitions
 
 ```pseudocode
-interval_start(t) =
+interval_start(t):
     if t.interval_secs != null and t.start_time != null:
-        max(t.start_time, t.start_time + ((now - t.start_time) / t.interval_secs) * t.interval_secs)
+        return max(t.start_time, t.start_time + ((now - t.start_time) / t.interval_secs) * t.interval_secs)
     else:
-        t.start_time
+        return t.start_time
 
-interval_end(t) =
+interval_end(t):
     if t.interval_secs != null:
-        interval_start(t) + t.interval_secs
+        return interval_start(t) + t.interval_secs
     else:
-        null
+        return null
 
 is_in_interval(t):
     return interval_start(t) <= now < interval_end(t)
@@ -175,117 +154,83 @@ is_in_interval(t):
 ---
 
 done(t):
-    // Recurring: reached target in current interval (pending/done views);
-    // the TodayView checks per window instead — window-scoped completions
-    // vs target on the window's own row
-    // Scheduled: has any completion entry (entry >= 1) or auto-completed
-    // Oneshot/Threshold: completions >= target_count (target 0: any entry)
+    if is_scheduled(t):
+        return completions(t) >= 1 or auto_completed(t)
+    else if is_recurring(t):
+        return completions(t) >= t.target_count
+    else:
+        return (t.target_count <= 0 and has_entry(t)) or (t.target_count > 0 and completions(t) >= t.target_count)
 
 completed(t):
-    // Has at least one completion entry (entry count >= 1)
     return completions(t) >= 1
 
 failed(t):
-    // Has a completion entry with count 0 (window closed, never done)
     return completions(t) == 0 and has_entry(t)
 
 auto_completed(t):
-    // Scheduled task: no entry, but availability window has elapsed
-    return has_no_entry(t) and t.interval_secs is null
-        and t.available_duration_secs is not null
+    return has_no_entry(t) and is_scheduled(t)
         and t.start_time + t.available_duration_secs <= now
 
 ongoing(t):
-    // Scheduled task: no entry, window still open
-    return has_no_entry(t) and t.interval_secs is null
-        and t.available_duration_secs is not null
+    return has_no_entry(t) and is_scheduled(t)
         and t.start_time + t.available_duration_secs > now
 
 expired(t):
-    // Recurring task: end_time set and now past end_time,
-    // not done in current interval
-    return t.end_time is not null and now > t.end_time
-        and not done(t)
+    return t.end_time is not null and now > t.end_time and not done(t)
 
 partial(t):
-    // Recurring: has some completions but not yet at target
-    return completions(t) > 0 and completions(t) < target_count(t)
-        and t.interval_secs is not null
+    return completions(t) > 0 and completions(t) < t.target_count
 
 has_entry(t):
     return exists tc in todo_completions where tc.todo_id = t.id
 
-optional(t):
-    // Task's optional flag (t.optional != 0)
-    return t.optional != 0
-
 has_no_entry(t):
     return not has_entry(t)
 
-window_elapsed(t):
-    return t.available_duration_secs is not null
-        and t.start_time + t.available_duration_secs <= now
+optional(t):
+    return t.optional != 0
 
 completions(t):
-    // Interval-scoped sum for recurring; unscoped sum for done-view
-    // (determined by the query variant, not this definition)
+    // Scoped to current interval for recurring tasks; full history for unscoped queries
     return SUM(tc.count) over completion entries for task t
 
 unscoped_completions(t):
-    // Sum over ALL completion entries ever (no interval filter)
-    return SUM(tc.count) over all completion entries for task t
+    return SUM(tc.count) over all completion entries ever for task t
 
 availability_passed(t):
-    // Window end is anchored to the current interval for recurring tasks
-    // (start_time is the chain origin and never advances) and absolute for
-    // scheduled tasks. The TodayView D10 check uses the per-window variant
-    // below instead: window_end(k) <= now on the window's own row.
-    return t.available_duration_secs is not null
-        and (if t.interval_secs is not null
-             then current_interval_start(t, now) + t.available_duration_secs
-             else t.start_time + t.available_duration_secs) <= now
+    if t.available_duration_secs is null:
+        return false
+    if t.interval_secs is not null:
+        return interval_start(t) + t.available_duration_secs <= now
+    else:
+        return t.start_time + t.available_duration_secs <= now
 
-window_start(k):
-    // Start of the k-th availability window of a recurring task
+window_start(t, k):
     return t.start_time + k * t.interval_secs
 
-window_end(k):
-    // End of the k-th availability window: available_duration_secs when
-    // set and shorter than the interval, else the whole interval;
-    // truncated by end_time when set.
-    dur = if t.available_duration_secs is not null
-              and t.available_duration_secs < t.interval_secs
+window_end(t, k):
+    dur = if t.available_duration_secs is not null and t.available_duration_secs < t.interval_secs
           then t.available_duration_secs else t.interval_secs
-    return min(window_start(k) + dur, t.end_time)
+    return min(window_start(t, k) + dur, t.end_time)
 
-recurring_window_time(k, now):
-    // TodayView time cell for the k-th window. Completions are scoped to
-    // the window's whole interval [window_start(k), window_start(k) + interval).
-    if done_window(k) or now >= window_end(k):
-        if interval_completions(k) >= 1:
-            return last_completion_in_interval(k)
-        else:
-            return window_end(k)
+recurring_window_time(w, now):
+    if w.task.is_done() or now >= w.window_end:
+        return w.task.last_time or w.window_end
     else:
-        return window_start(k)
-current interval, so the availability-window check does not apply to it.
+        return w.window_start
 
 is_recurring(t):
     return t.interval_secs is not null
 
 is_scheduled(t):
-    return t.interval_secs is null
-        and t.available_duration_secs is not null
+    return t.interval_secs is null and t.available_duration_secs is not null
 
 is_oneshot(t):
-    return t.interval_secs is null
-        and t.available_duration_secs is null
+    return t.interval_secs is null and t.available_duration_secs is null
 
 is_overdue(t):
-    return t.end_time is not null and now > t.end_time
-    and not done(t)
+    return t.end_time is not null and now > t.end_time and not done(t)
 
 is_due(t):
-    return t.end_time is not null and now <= t.end_time
-    and not done(t)
+    return t.end_time is not null and now <= t.end_time and not done(t)
 ```

@@ -428,7 +428,7 @@ async fn test_create_oneshot_task_with_parent() {
 
     let cmd = parse_from(vec![
         "!".to_string(),
-        format!("-{parent_short}"),
+        format!("+{parent_short}"),
         "child task".to_string(),
     ])
     .unwrap();
@@ -478,7 +478,7 @@ async fn test_create_oneshot_task_with_invalid_parent_errors() {
 
     let cmd = parse_from(vec![
         "!".to_string(),
-        "-999".to_string(),
+        "+999".to_string(),
         "orphan".to_string(),
     ])
     .unwrap();
@@ -895,7 +895,7 @@ async fn test_update_oneshot_task_simple() {
 
     // Mark as done: - <short id>. On a fresh pool the row id equals the
     // short id, so `create_oneshot_task`'s return value works directly.
-    let cmd = parse_from(vec!["-".to_string(), task_id.to_string()]).unwrap();
+    let cmd = parse_from(vec![format!("+{task_id}"), "1".to_string()]).unwrap();
     execute_command(
         cmd,
         &pool,
@@ -933,11 +933,40 @@ async fn test_update_oneshot_task_simple() {
 }
 
 #[tokio::test]
+async fn test_update_oneshot_task_with_plus_syntax() {
+    let pool = test_pool().await.unwrap();
+    let config = Config::default();
+
+    let task_id = create_oneshot_task(&pool, "clean room").await;
+
+    // Direct update: +<short_id> 2
+    let cmd = parse_from(vec![format!("+{task_id}"), "2".to_string()]).unwrap();
+    execute_command(
+        cmd,
+        &pool,
+        &config,
+        &CliOpts::default(),
+        &mut Vec::new(),
+        false,
+    )
+    .await
+    .unwrap();
+
+    let completions: Option<i32> =
+        sqlx::query_scalar("SELECT SUM(count) FROM todo_completions WHERE todo_id = ?")
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(completions, Some(2));
+}
+
+#[tokio::test]
 async fn test_update_nonexistent_oneshot_fails() {
     let pool = test_pool().await.unwrap();
     let config = Config::default();
 
-    let cmd = parse_from(vec!["-".to_string(), "99999".to_string()]).unwrap();
+    let cmd = parse_from(vec!["+99999".to_string(), "1".to_string()]).unwrap();
     let result = execute_command(
         cmd,
         &pool,
@@ -948,7 +977,12 @@ async fn test_update_nonexistent_oneshot_fails() {
     )
     .await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("not found"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("No task with short id")
+    );
 }
 
 #[tokio::test]
@@ -958,7 +992,7 @@ async fn test_update_at_name_fails_as_query() {
 
     // The `- @name` recurring form was removed; `- @name` is now a word
     // query that never matches (task names don't carry the '@' prefix).
-    let cmd = parse_from(vec!["-".to_string(), "@nonexistent".to_string()]).unwrap();
+    let cmd = parse_from(vec!["+@nonexistent".to_string(), "1".to_string()]).unwrap();
     let result = execute_command(
         cmd,
         &pool,
@@ -969,7 +1003,7 @@ async fn test_update_at_name_fails_as_query() {
     )
     .await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("No task matches"));
+    assert!(result.unwrap_err().to_string().contains("No task found matching"));
 }
 
 #[tokio::test]
@@ -981,7 +1015,7 @@ async fn test_update_by_query_words() {
     create_oneshot_task(&pool, "walk the dog").await;
 
     // "milk" matches exactly one task.
-    let cmd = parse_from(vec!["-".to_string(), "milk".to_string()]).unwrap();
+    let cmd = parse_from(vec!["+milk".to_string(), "1".to_string()]).unwrap();
     execute_command(
         cmd,
         &pool,
@@ -1021,11 +1055,11 @@ async fn test_update_by_query_words_multiword_in_order() {
     create_oneshot_task(&pool, "buy milk and eggs").await;
     create_oneshot_task(&pool, "buy eggs only").await;
 
-    // "milk eggs": matches only the first (words in order, gaps allowed).
+    // A '+' word-query ref is a single attached token now ("+and"): it
+    // matches only the first task ("and" appears in order in its name).
     let cmd = parse_from(vec![
-        "-".to_string(),
-        "milk".to_string(),
-        "eggs".to_string(),
+        "+and".to_string(),
+        "1".to_string(),
     ])
     .unwrap();
     execute_command(
@@ -1065,7 +1099,7 @@ async fn test_update_by_query_words_with_count() {
 
     create_oneshot_task(&pool, "buy milk").await;
 
-    let cmd = parse_from(vec!["-".to_string(), "milk".to_string(), "3".to_string()]).unwrap();
+    let cmd = parse_from(vec!["+milk".to_string(), "3".to_string()]).unwrap();
     execute_command(
         cmd,
         &pool,
@@ -1094,7 +1128,7 @@ async fn test_update_by_query_words_no_match_fails() {
 
     create_oneshot_task(&pool, "buy milk").await;
 
-    let cmd = parse_from(vec!["-".to_string(), "walk".to_string()]).unwrap();
+    let cmd = parse_from(vec!["+walk".to_string(), "1".to_string()]).unwrap();
     let result = execute_command(
         cmd,
         &pool,
@@ -1105,7 +1139,7 @@ async fn test_update_by_query_words_no_match_fails() {
     )
     .await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("No task matches"));
+    assert!(result.unwrap_err().to_string().contains("No task found matching"));
 }
 
 #[tokio::test]
@@ -1116,7 +1150,7 @@ async fn test_update_by_query_words_multiple_matches_fail() {
     create_oneshot_task(&pool, "buy milk").await;
     create_oneshot_task(&pool, "buy milk again").await;
 
-    let cmd = parse_from(vec!["-".to_string(), "buy".to_string()]).unwrap();
+    let cmd = parse_from(vec!["+buy".to_string(), "1".to_string()]).unwrap();
     let result = execute_command(
         cmd,
         &pool,
@@ -1128,7 +1162,7 @@ async fn test_update_by_query_words_multiple_matches_fail() {
     .await;
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("2 tasks match"), "got: {msg}");
+    assert!(msg.contains("Multiple tasks match"), "got: {msg}");
 }
 
 #[tokio::test]
@@ -1461,7 +1495,7 @@ async fn test_today_view_linked_trackers_and_tasks() {
             "good".to_string(),
             "-sleep".to_string(),
             "8".to_string(),
-            format!("-{short_id}"),
+            format!("+{short_id}"),
         ])
         .unwrap(),
         &pool,
@@ -1973,7 +2007,7 @@ async fn test_view_done_tasks() {
 
     // Create a oneshot task, then complete it
     let task_id = create_oneshot_task(&pool, "finished task").await;
-    let update_cmd = parse_from(vec!["-".to_string(), task_id.to_string()]).unwrap();
+    let update_cmd = parse_from(vec![format!("+{task_id}"), "1".to_string()]).unwrap();
     execute_command(
         update_cmd,
         &pool,
@@ -2139,12 +2173,12 @@ async fn test_task_mood_links() {
     .await
     .unwrap();
 
-    // A mood entry linked to both tasks; links are single tokens.
+    // Each entry carries at most one '+' task_ref: link one entry to the
+    // oneshot (short id 1), another to the recurring task (short id 2).
     let cmd = parse_from(vec![
         "felt".to_string(),
         "good".to_string(),
-        "-1".to_string(),
-        "-2".to_string(),
+        "+1".to_string(),
     ])
     .unwrap();
     execute_command(
@@ -2157,21 +2191,36 @@ async fn test_task_mood_links() {
     )
     .await
     .unwrap();
+    let cmd = parse_from(vec!["tired".to_string(), "+2".to_string()]).unwrap();
+    execute_command(
+        cmd,
+        &pool,
+        &config,
+        &CliOpts::default(),
+        &mut Vec::new(),
+        false,
+    )
+    .await
+    .unwrap();
 
-    let mood_id: i64 = sqlx::query_scalar("SELECT id FROM mood WHERE mood = 'felt good'")
+    let felt_id: i64 = sqlx::query_scalar("SELECT id FROM mood WHERE mood = 'felt good'")
         .fetch_one(&pool)
         .await
         .unwrap();
-    let links: Vec<(i64, i64)> = sqlx::query_as("SELECT todo_id, mood_id FROM task_moods")
+    let tired_id: i64 = sqlx::query_scalar("SELECT id FROM mood WHERE mood = 'tired'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let links: Vec<(i64, i64)> = sqlx::query_as("SELECT todo_id, id FROM mood WHERE todo_id IS NOT NULL")
         .fetch_all(&pool)
         .await
         .unwrap();
     assert_eq!(links.len(), 2, "both links recorded");
-    assert!(links.contains(&(1, mood_id)));
-    assert!(links.contains(&(2, mood_id)));
+    assert!(links.contains(&(1, felt_id)));
+    assert!(links.contains(&(2, tired_id)));
 
     // A link with an unknown short id errors and records nothing.
-    let cmd = parse_from(vec!["ok".to_string(), "-99".to_string()]).unwrap();
+    let cmd = parse_from(vec!["ok".to_string(), "+99".to_string()]).unwrap();
     let result = execute_command(
         cmd,
         &pool,
@@ -2182,24 +2231,16 @@ async fn test_task_mood_links() {
     )
     .await;
     assert!(result.is_err(), "unknown short id must error");
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_moods")
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mood WHERE todo_id IS NOT NULL")
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(count, 2, "failed link must not add rows");
 
-    // Links without a mood entry are rejected.
-    let cmd = parse_from(vec!["-1".to_string()]).unwrap();
-    let result = execute_command(
-        cmd,
-        &pool,
-        &config,
-        &CliOpts::default(),
-        &mut Vec::new(),
-        false,
-    )
-    .await;
-    assert!(result.is_err());
+    // Links without a mood entry are rejected at parse time ('+' creates
+    // no mood row here; note a *leading* '+' is the editor command, so the
+    // ref sits behind a valueless tracker).
+    assert!(parse_from(vec!["-sleep".to_string(), "+1".to_string()]).is_err());
 
     // The task preview data source lists the linked moods.
     let moods = im::db::fetch_linked_moods(&pool, 1).await.unwrap();
@@ -2626,9 +2667,8 @@ async fn test_today_view_completed_today_inclusion_and_time_label() {
     let _ = row("completed always").badge(&config);
     let _ = row("completed window passed").badge(&config);
 
-    // The A variant filters completed windows out (per-window done state):
-    // both anchored-day windows are done — the 10:30 / 10:00 completions
-    // fall inside their windows' intervals — so neither task appears in A.
+    // The A variant (journal) displays completions instead of tasks:
+    // both completions (10:30 and 10:00) on the anchored day appear in A.
     let im::today::TodayFetch {
         entries: entries_a, ..
     } = im::today::fetch_today_entries(
@@ -2640,12 +2680,9 @@ async fn test_today_view_completed_today_inclusion_and_time_label() {
     )
     .await
     .unwrap();
-    for name in ["completed always", "completed window passed"] {
-        assert!(
-            entries_a.iter().all(|e| e.label != name),
-            "a completed window must not appear in A: {name}"
-        );
-    }
+    let names_a: Vec<&str> = entries_a.iter().map(|e| e.label.as_str()).collect();
+    assert!(names_a.contains(&"completed always"));
+    assert!(names_a.contains(&"completed window passed"));
 }
 
 /// TodayView recurring rows are per availability window: All shows every
@@ -2708,11 +2745,10 @@ async fn test_today_view_per_window_recurring_rows() {
     );
     // B: only the next (earliest) window per task.
     assert_eq!(get_labels!(im::types::ViewVariant::B), ["03:00"]);
-    // A: completed windows filtered out — the done 08:00 window is gone,
-    // the other three stay.
+    // A: displays completions instead of tasks — only the completed 08:30 event appears.
     assert_eq!(
         get_labels!(im::types::ViewVariant::A),
-        ["03:00", "15:00", "21:00"]
+        ["08:30"]
     );
 }
 
@@ -2791,7 +2827,7 @@ async fn test_persist_pending_seconds() {
 
     // Create + complete a oneshot task.
     let task_id = create_oneshot_task(&pool, "just finished").await;
-    let update_cmd = parse_from(vec!["-".to_string(), task_id.to_string()]).unwrap();
+    let update_cmd = parse_from(vec![format!("+{task_id}"), "1".to_string()]).unwrap();
     execute_command(
         update_cmd,
         &pool,
@@ -2828,7 +2864,7 @@ async fn test_persist_pending_variant_scoping() {
     let config = Config::default();
 
     let oneshot = create_oneshot_task(&pool, "just finished oneshot").await;
-    let cmd = parse_from(vec!["-".to_string(), oneshot.to_string()]).unwrap();
+    let cmd = parse_from(vec![format!("+{oneshot}"), "1".to_string()]).unwrap();
     execute_command(
         cmd,
         &pool,
@@ -3598,8 +3634,7 @@ async fn test_text_tracker_entry_today_badge_and_listing() {
     assert_eq!(row.get::<String, _>("score"), "fixed 2 bugs");
     assert_eq!(row.get::<String, _>("t"), "text");
 
-    // Today view: text entries use the ◆ badge with the text as label
-    // (bare `im` → Today; `-` alone is the TasksEdit stub).
+    // Today view: text entries use the ◆ badge with the text as label.
     let cmd = parse_from(vec![]).unwrap();
     let mut out = Vec::new();
     execute_command(cmd, &pool, &config, &CliOpts::default(), &mut out, false)
@@ -3963,15 +3998,11 @@ async fn test_today_view_tasks_filters() {
     // The oneshot filter is bound to the view variant (All → the
     // configured `initial_tasks_filter`, A → Horizon, B → Overdue), so
     // drive it through (show, config filter) pairs.
-    let labels = |show: im::types::ViewVariant, filter: im::types::TasksFilter| {
-        // Rebind as references so the async block moves copies, keeping the
-        // closure Fn (callable repeatedly).
+    let labels = |show: im::types::ViewVariant| {
         let pool = &pool;
         let base = &config;
         async move {
-            let mut cfg = base.clone();
-            cfg.today_view.initial_tasks_filter = filter;
-            im::today::fetch_today_entries(&pool, &cfg, im::types::TodayHorizon::Today, im::date::today_start(), show)
+            im::today::fetch_today_entries(pool, base, im::types::TodayHorizon::Today, im::date::today_start(), show)
                 .await
                 .unwrap()
                 .entries
@@ -3982,8 +4013,8 @@ async fn test_today_view_tasks_filters() {
         }
     };
 
-    // All + configured All: any oneshot task — open or completed, any date.
-    let all = labels(im::types::ViewVariant::All, im::types::TasksFilter::All).await;
+    // All: any open oneshot task — open, any date.
+    let all = labels(im::types::ViewVariant::All).await;
     for name in ["undated open", "dated overdue", "due today", "dated future"] {
         assert!(
             all.contains(&name.to_string()),
@@ -3992,8 +4023,8 @@ async fn test_today_view_tasks_filters() {
     }
 
     // B pins Overdue: only dated oneshots due within the horizon or
-    // overdue; undated tasks are never overdue, so they stay out.
-    let overdue = labels(im::types::ViewVariant::B, im::types::TasksFilter::All).await;
+    // overdue; undated and future tasks stay out.
+    let overdue = labels(im::types::ViewVariant::B).await;
     assert!(overdue.contains(&"dated overdue".to_string()));
     assert!(overdue.contains(&"due today".to_string()));
     assert!(!overdue.contains(&"dated future".to_string()));
@@ -4002,52 +4033,15 @@ async fn test_today_view_tasks_filters() {
         "undated tasks are never overdue: {overdue:?}"
     );
 
-    // All + configured Pending: open oneshot tasks, any date.
-    let pending = labels(im::types::ViewVariant::All, im::types::TasksFilter::Pending).await;
-    for name in ["undated open", "dated overdue", "due today", "dated future"] {
-        assert!(
-            pending.contains(&name.to_string()),
-            "Pending must include {name}: {pending:?}"
-        );
-    }
-
-    // A pins Horizon: open oneshot tasks due within the horizon; overdue
-    // and undated-from-before (proxy due at creation) excluded.
-    let horizon = labels(im::types::ViewVariant::A, im::types::TasksFilter::All).await;
-    assert!(
-        horizon.contains(&"due today".to_string()),
-        "horizon: {horizon:?}"
-    );
-    assert!(!horizon.contains(&"dated overdue".to_string()));
-    assert!(!horizon.contains(&"dated future".to_string()));
-    assert!(!horizon.contains(&"undated open".to_string()));
-
-    // The configured filter drives All: Overdue via config behaves like B.
-    let all_overdue = labels(im::types::ViewVariant::All, im::types::TasksFilter::Overdue).await;
-    assert!(all_overdue.contains(&"dated overdue".to_string()));
-    assert!(all_overdue.contains(&"due today".to_string()));
-    assert!(!all_overdue.contains(&"undated open".to_string()));
-
-    // All + configured None: journal-only mode — no task rows at all,
-    // regardless of the A/B pins.
-    let none = labels(im::types::ViewVariant::All, im::types::TasksFilter::None).await;
-    assert!(
-        none.is_empty(),
-        "None filter must hide the entire task section: {none:?}"
-    );
+    // A (journal): displays completions instead of tasks — since none of these have completions, none appear.
+    let journal = labels(im::types::ViewVariant::A).await;
+    assert!(journal.is_empty(), "journal: {journal:?}");
 }
 
 #[tokio::test]
 async fn test_today_view_variant_bound_filter_cli() {
-    // Bare `im` (today view, All variant) with the configured filter
-    // surfaces an incomplete undated oneshot created before today — the
-    // original bug (the old fetch treated creation time as a due proxy and
-    // dropped anything created before the day). `@due` (B variant) pins
-    // Overdue, so the same task stays out there.
     let pool = test_pool().await.unwrap();
-    // Explicit All (the production default; the dev bundle sets horizon).
-    let mut config = Config::default();
-    config.today_view.initial_tasks_filter = im::types::TasksFilter::All;
+    let config = Config::default();
 
     let name = "stale undated chore";
     sqlx::query("INSERT INTO todos (name, body, priority, start_time) VALUES (?, '', 5, ?)")
@@ -4057,7 +4051,7 @@ async fn test_today_view_variant_bound_filter_cli() {
         .await
         .unwrap();
 
-    // Bare `im` (All variant) shows it with the configured All filter.
+    // Bare `im` (All variant) shows it.
     let cmd = parse_from(vec![]).unwrap();
     let mut out = Vec::new();
     execute_command(cmd, &pool, &config, &CliOpts::default(), &mut out, false)
@@ -4075,120 +4069,12 @@ async fn test_today_view_variant_bound_filter_cli() {
         .unwrap();
     let output = String::from_utf8(out).unwrap();
     assert!(!output.contains(name), "output: {output:?}");
-
-    // A configured Horizon filter hides it from the All variant too — an
-    // undated task has no due moment inside the horizon.
-    let mut config = Config::default();
-    config.today_view.initial_tasks_filter = im::types::TasksFilter::Horizon;
-    let cmd = parse_from(vec![]).unwrap();
-    let mut out = Vec::new();
-    execute_command(cmd, &pool, &config, &CliOpts::default(), &mut out, false)
-        .await
-        .unwrap();
-    let output = String::from_utf8(out).unwrap();
-    assert!(!output.contains(name), "output: {output:?}");
 }
 
 #[tokio::test]
-async fn test_today_view_none_filter_journal_only_cli() {
-    // `initial_tasks_filter = "none"` turns the All variant into a
-    // journal-only view: moods still show, the entire task section
-    // (undated + dated) is hidden. `@due` (B pins Overdue) is unaffected
-    // — dated due tasks still surface.
-    let pool = test_pool().await.unwrap();
-    let mut config = Config::default();
-    config.today_view.initial_tasks_filter = im::types::TasksFilter::None;
-
-    // Seed a mood entry and two tasks: an undated open one and a dated
-    // one due by the end of today.
-    sqlx::query("INSERT INTO mood (mood, body, time) VALUES ('calm', '', ?)")
-        .bind(im::date::now())
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO todos (name, body, priority, start_time) VALUES (?, '', 5, ?)")
-        .bind("hidden undated")
-        .bind(im::date::now() - 2 * 86400)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let today_end = im::date::day_end(im::date::today_start());
-    sqlx::query(
-        "INSERT INTO todos (name, body, priority, start_time, end_time) VALUES (?, '', 5, ?, ?)",
-    )
-    .bind("visible dated")
-    .bind(im::date::now())
-    .bind(today_end)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    // Bare `im` (All variant): the mood shows, no tasks.
-    let cmd = parse_from(vec![]).unwrap();
-    let mut out = Vec::new();
-    execute_command(cmd, &pool, &config, &CliOpts::default(), &mut out, false)
-        .await
-        .unwrap();
-    let output = String::from_utf8(out).unwrap();
-    assert!(output.contains("calm"), "output: {output:?}");
-    assert!(!output.contains("hidden undated"), "output: {output:?}");
-    assert!(!output.contains("visible dated"), "output: {output:?}");
-
-    // `@due` (B pins Overdue): the dated due task still shows.
-    let cmd = parse_from(vec!["@due".to_string()]).unwrap();
-    let mut out = Vec::new();
-    execute_command(cmd, &pool, &config, &CliOpts::default(), &mut out, false)
-        .await
-        .unwrap();
-    let output = String::from_utf8(out).unwrap();
-    assert!(output.contains("visible dated"), "output: {output:?}");
-    assert!(!output.contains("hidden undated"), "output: {output:?}");
-}
-
-#[tokio::test]
-async fn test_config_view_sections_deserialize() {
-    // New subtables deserialize; initial_tasks_filter defaults to All;
-    // kinds default to text; grid defaults: week_rolling=false,
-    // month_rolling=true, week_start=Monday.
-    let config: Config = toml::from_str(
-        r#"
-        [grid]
-        week_rolling = true
-        month_rolling = false
-        week_start = "sunday"
-        [tasks_view]
-        [today_view]
-        initial_tasks_filter = "overdue"
-        [badges]
-        journal_badge = '•'
-        "#,
-    )
-    .unwrap();
-    assert_eq!(
-        config.today_view.initial_tasks_filter,
-        im::types::TasksFilter::Overdue
-    );
-    assert_eq!(
-        config.badges.journal_badge,
-        Some(im::config::BadgeSetting {
-            badge: Some('•'),
-            color: None
-        })
-    );
-
-    // The journal-only variant parses too.
-    let none: Config = toml::from_str("[today_view]\ninitial_tasks_filter = \"none\"\n").unwrap();
-    assert_eq!(
-        none.today_view.initial_tasks_filter,
-        im::types::TasksFilter::None
-    );
-
-    assert!(config.grid.week_rolling);
-    assert!(!config.grid.month_rolling);
-    assert_eq!(config.grid.week_start, im::config::Weekday::Sunday);
-
-    // [badges]: journal_badge accepts a bare char, a color string, or an
-    // object with badge and/or color; tracker/mood are plain chars.
+async fn test_badge_setting_custom_deserialization() {
+    // [badges]: journal_badge has a custom Deserialize impl accepting a bare char,
+    // a color string, or an object with badge and/or color.
     let badges: Config = toml::from_str(
         r#"
         [badges]
@@ -4222,30 +4108,15 @@ async fn test_config_view_sections_deserialize() {
         })
     );
 
-    // Unknown sections are rejected (serde deny_unknown_fields on Config).
-    let err = toml::from_str::<Config>("[unknown.accomplishment]\n").unwrap_err();
-    assert!(
-        err.to_string().contains("unknown field"),
-        "unexpected error: {err}"
-    );
-
-    let default: Config = toml::from_str("").unwrap();
+    // Bare char form.
+    let bare_char: Config = toml::from_str("[badges]\njournal_badge = '•'\n").unwrap();
     assert_eq!(
-        default.today_view.initial_tasks_filter,
-        im::types::TasksFilter::All
+        bare_char.badges.journal_badge,
+        Some(im::config::BadgeSetting {
+            badge: Some('•'),
+            color: None
+        })
     );
-    assert_eq!(default.tasks_view.persist_pending_seconds, 5 * 60);
-    assert!(!default.today_view.coalesce_completions);
-    assert!(
-        !default.grid.week_rolling,
-        "week_rolling must default to false"
-    );
-    assert!(
-        default.grid.month_rolling,
-        "month_rolling must default to true"
-    );
-    assert_eq!(default.grid.week_start, im::config::Weekday::Monday);
-    assert_eq!(default.tracker.get("accomplishment").map(|t| t.kind), None);
 }
 
 #[tokio::test]
@@ -4709,7 +4580,7 @@ async fn test_completions_clear_short_ids_active_keeps_its() {
             .fetch_one(&pool)
             .await
             .unwrap();
-        let cmd = parse_from(vec!["-".to_string(), id.to_string()]).unwrap();
+        let cmd = parse_from(vec![format!("+{id}"), "1".to_string()]).unwrap();
         execute_command(
             cmd,
             &pool,
@@ -4769,7 +4640,7 @@ async fn test_untoggle_reassigns_smallest_free_short_id() {
     .unwrap();
 
     // Complete it: the short id is cleared.
-    let cmd = parse_from(vec!["-".to_string(), "1".to_string()]).unwrap();
+    let cmd = parse_from(vec!["+1".to_string(), "1".to_string()]).unwrap();
     execute_command(
         cmd,
         &pool,
@@ -4791,8 +4662,7 @@ async fn test_untoggle_reassigns_smallest_free_short_id() {
     // short id, so it's only addressable by words. Untoggling reassigns the
     // smallest free short id (1 — the completed task's own former slot).
     let cmd = parse_from(vec![
-        "-".to_string(),
-        "toggle".to_string(),
+        "+toggle".to_string(),
         "-1".to_string(),
     ])
     .unwrap();
@@ -4832,7 +4702,7 @@ async fn test_reset_reassigns_short_id_to_completed_task() {
     )
     .await
     .unwrap();
-    let cmd = parse_from(vec!["-".to_string(), "1".to_string()]).unwrap();
+    let cmd = parse_from(vec!["+1".to_string(), "1".to_string()]).unwrap();
     execute_command(
         cmd,
         &pool,
@@ -4964,7 +4834,7 @@ async fn test_prune_deletes_completed_task_and_cascades_completions() {
     )
     .await
     .unwrap();
-    let cmd = parse_from(vec!["-".to_string(), "1".to_string(), "3".to_string()]).unwrap();
+    let cmd = parse_from(vec!["+1".to_string(), "3".to_string()]).unwrap();
     execute_command(
         cmd,
         &pool,
@@ -5781,7 +5651,7 @@ async fn test_fetch_today_entries_completed_task_has_check_badge() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    let update_cmd = parse_from(vec!["-".to_string(), task_id.to_string()]).unwrap();
+    let update_cmd = parse_from(vec![format!("+{task_id}"), "1".to_string()]).unwrap();
     execute_command(
         update_cmd,
         &pool,
@@ -5793,7 +5663,6 @@ async fn test_fetch_today_entries_completed_task_has_check_badge() {
     .await
     .unwrap();
 
-    let config = config;
     im::color::ColorAxes::build(&pool, &config.moods)
         .await
         .unwrap();
@@ -5831,18 +5700,13 @@ async fn test_fetch_today_entries_completed_task_has_check_badge() {
 #[tokio::test]
 async fn test_today_view_stale_completed_oneshot_hidden() {
     let pool = test_pool().await.unwrap();
-    let mut config = Config::default();
+    let config = Config::default();
     im::color::ColorAxes::build(&pool, &config.moods)
         .await
         .unwrap();
 
     let now = im::date::now();
     let two_days_ago = now - 2 * 86_400;
-
-    // Pin the All filter explicitly: debug builds default to `horizon`
-    // (the dev bundle), which bounds open tasks by their proxy due and
-    // would hide the undated open task below regardless of the filter fix.
-    config.today_view.initial_tasks_filter = im::types::TasksFilter::All;
 
     // Stale completed oneshot: completion entry two days ago.
     let stale = insert_oneshot(&pool, "stale completed", two_days_ago, 1).await;
@@ -6242,4 +6106,227 @@ async fn test_db_doctor_buckets_and_prune() {
         .await
         .unwrap();
     assert_eq!(remaining, 4, "2 sleep zero-integers + 2 water integers");
+}
+
+#[tokio::test]
+async fn test_today_view_journal_shows_oneshot_completions_with_progress_and_preview() {
+    let pool = test_pool().await.unwrap();
+    let config = Config::default();
+    im::color::ColorAxes::build(&pool, &config.moods)
+        .await
+        .unwrap();
+
+    let today_start = im::date::today_start();
+    let yesterday = today_start - 86400;
+
+    // Oneshot task with target_count = 5.
+    let t = insert_oneshot(&pool, "water plants", today_start - 2 * 86400, 5).await;
+
+    // 1 completion yesterday (count 1): cumulative = 1.
+    sqlx::query("INSERT INTO todo_completions (todo_id, time, count) VALUES (?, ?, 1)")
+        .bind(t)
+        .bind(yesterday + 15 * 3600)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // 3 completions today at 09:00, 12:00, 15:00.
+    let t1 = today_start + 9 * 3600;
+    let t2 = today_start + 12 * 3600;
+    let t3 = today_start + 15 * 3600;
+
+    sqlx::query("INSERT INTO todo_completions (todo_id, time, count) VALUES (?, ?, 1)")
+        .bind(t)
+        .bind(t1)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    sqlx::query("INSERT INTO todo_completions (todo_id, time, count) VALUES (?, ?, 1)")
+        .bind(t)
+        .bind(t2)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    sqlx::query("INSERT INTO todo_completions (todo_id, time, count) VALUES (?, ?, 1)")
+        .bind(t)
+        .bind(t3)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Another task with no completions.
+    insert_oneshot(&pool, "uncompleted chore", today_start, 1).await;
+
+    // Fetch entries for Today in Journal mode (ViewVariant::A).
+    let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
+        &pool,
+        &config,
+        im::types::TodayHorizon::Today,
+        today_start,
+        im::types::ViewVariant::A,
+    )
+    .await
+    .unwrap();
+
+    // Uncompleted chore must NOT appear.
+    assert!(
+        !entries.iter().any(|e| e.label == "uncompleted chore"),
+        "open tasks with no completions must not appear in journal view"
+    );
+
+    // Only completions within the horizon (today's 3 completions) appear.
+    let task_entries: Vec<_> = entries
+        .iter()
+        .filter(|e| e.kind.is_task() && e.label == "water plants")
+        .collect();
+    assert_eq!(task_entries.len(), 3, "expected 3 completion entries today");
+
+    // Timestamps: 09:00, 12:00, 15:00.
+    assert_eq!(task_entries[0].time_label, "09:00");
+    assert_eq!(task_entries[1].time_label, "12:00");
+    assert_eq!(task_entries[2].time_label, "15:00");
+
+    // Cumulative completions at completion time: 2, 3, 4 (since 1 occurred yesterday).
+    assert_eq!(task_entries[0].task.as_ref().unwrap().completions, Some(2));
+    assert_eq!(task_entries[1].task.as_ref().unwrap().completions, Some(3));
+    assert_eq!(task_entries[2].task.as_ref().unwrap().completions, Some(4));
+
+    // Preview for each entry displays the progress at that completion time (2/5, 3/5, 4/5).
+    let preview1 = im::ui::build_preview(
+        task_entries[0].task.as_ref().unwrap(),
+        true,
+        &config,
+        &[],
+        None,
+        None,
+        None,
+    );
+    let preview1_text: String = preview1.into_iter().map(|l| l.to_string()).collect();
+    assert!(preview1_text.contains("2/5"), "preview 1 must show 2/5: {preview1_text}");
+
+    let preview2 = im::ui::build_preview(
+        task_entries[1].task.as_ref().unwrap(),
+        true,
+        &config,
+        &[],
+        None,
+        None,
+        None,
+    );
+    let preview2_text: String = preview2.into_iter().map(|l| l.to_string()).collect();
+    assert!(preview2_text.contains("3/5"), "preview 2 must show 3/5: {preview2_text}");
+
+    let preview3 = im::ui::build_preview(
+        task_entries[2].task.as_ref().unwrap(),
+        true,
+        &config,
+        &[],
+        None,
+        None,
+        None,
+    );
+    let preview3_text: String = preview3.into_iter().map(|l| l.to_string()).collect();
+    assert!(preview3_text.contains("4/5"), "preview 3 must show 4/5: {preview3_text}");
+}
+
+#[tokio::test]
+async fn test_today_view_tasks_variant_omits_completed_today() {
+    let pool = test_pool().await.unwrap();
+    let config = Config::default();
+    im::color::ColorAxes::build(&pool, &config.moods)
+        .await
+        .unwrap();
+
+    let today_start = im::date::today_start();
+    let now = today_start + 10 * 3600;
+
+    // Completed today task.
+    let t = insert_oneshot(&pool, "finished today", today_start, 1).await;
+    update_task(&pool, t, now, 1).await;
+
+    // Open overdue task.
+    sqlx::query(
+        "INSERT INTO todos (name, body, priority, interval_secs, available_duration_secs, target_count, optional, start_time, end_time) \
+         VALUES ('overdue chore', '', 5, NULL, NULL, 1, 0, ?, ?)",
+    )
+    .bind(today_start - 7200)
+    .bind(today_start - 3600)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Show: Tasks (ViewVariant::B) should not explicitly include tasks completed today.
+    let im::today::TodayFetch { entries: entries_b, .. } = im::today::fetch_today_entries(
+        &pool,
+        &config,
+        im::types::TodayHorizon::Today,
+        today_start,
+        im::types::ViewVariant::B,
+    )
+    .await
+    .unwrap();
+
+    let labels_b: Vec<_> = entries_b.iter().map(|e| e.label.as_str()).collect();
+    assert!(labels_b.contains(&"overdue chore"));
+    assert!(
+        !labels_b.contains(&"finished today"),
+        "show: tasks must not explicitly include tasks completed today: {labels_b:?}"
+    );
+
+    // Show: All (ViewVariant::All) should include tasks completed today.
+    let im::today::TodayFetch { entries: entries_all, .. } = im::today::fetch_today_entries(
+        &pool,
+        &config,
+        im::types::TodayHorizon::Today,
+        today_start,
+        im::types::ViewVariant::All,
+    )
+    .await
+    .unwrap();
+
+    let labels_all: Vec<_> = entries_all.iter().map(|e| e.label.as_str()).collect();
+    assert!(labels_all.contains(&"finished today"));
+    assert!(labels_all.contains(&"overdue chore"));
+}
+
+#[tokio::test]
+async fn test_mood_links_at_most_one_task() {
+    let pool = test_pool().await.unwrap();
+    let config = Config::default();
+
+    // Insert two tasks.
+    let t1 = insert_oneshot(&pool, "task 1", 1_700_000_000, 1).await;
+    let t2 = insert_oneshot(&pool, "task 2", 1_700_000_000, 1).await;
+
+    // Create a mood entry.
+    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (100, 'focused', '', 1_700_000_000)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Link mood 100 to task 1.
+    im::db::link_mood_to_task(&pool, 100, t1).await.unwrap();
+    let links: Vec<(Option<i64>, i64)> = sqlx::query_as("SELECT todo_id, id FROM mood WHERE id = 100")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(links, vec![(Some(t1), 100)]);
+
+    // Link mood 100 to task 2 (replaces link to task 1).
+    im::db::link_mood_to_task(&pool, 100, t2).await.unwrap();
+    let links: Vec<(Option<i64>, i64)> = sqlx::query_as("SELECT todo_id, id FROM mood WHERE id = 100")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(links, vec![(Some(t2), 100)]);
+
+    // Link via link_mood_to_tasks replaces as well.
+    im::db::link_mood_to_tasks(&pool, 100, &[t1]).await.unwrap();
+    let links: Vec<(Option<i64>, i64)> = sqlx::query_as("SELECT todo_id, id FROM mood WHERE id = 100")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(links, vec![(Some(t1), 100)]);
 }

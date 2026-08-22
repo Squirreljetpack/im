@@ -8,7 +8,7 @@ use crate::config::Config;
 use crate::date::format_duration;
 use crate::db::TaskObject;
 use crate::editor::open_editor_for_body;
-use crate::types::{Task, TaskKind};
+use crate::types::{Task, TaskKind, TaskRef};
 
 /// Resolve a `-<parent_id>` short id to its stable row id plus the parent's
 /// name; errors when no task holds that short id (a completed oneshot holds
@@ -21,11 +21,56 @@ async fn resolve_parent_named(pool: &SqlitePool, short_id: i64) -> Result<(i64, 
         })
 }
 
-/// Resolve a `-<parent_id>` short id to a stable row id; errors when no
-/// task holds that short id (a completed oneshot holds `NULL` and is
-/// never resolvable).
-async fn resolve_parent(pool: &SqlitePool, short_id: i64) -> Result<Option<i64>> {
-    Ok(Some(resolve_parent_named(pool, short_id).await?.0))
+/// Resolve a TaskRef to its stable row id plus the task name.
+pub(crate) async fn resolve_task_ref_named(
+    pool: &SqlitePool,
+    task_ref: &TaskRef,
+) -> Result<(i64, String)> {
+    match task_ref {
+        TaskRef::Id(short_id) => resolve_parent_named(pool, *short_id).await,
+        TaskRef::Words(words) => {
+            let matches = crate::db::fetch_task_matching_words(pool, words).await?;
+            match matches.len() {
+                0 => anyhow::bail!("No task found matching query '{}'", words.join(" ")),
+                1 => Ok((matches[0].id, matches[0].name.clone())),
+                n => anyhow::bail!("Multiple tasks match query '{}' (found {})", words.join(" "), n),
+            }
+        }
+        TaskRef::Pick => {
+            anyhow::bail!("Cannot resolve Pick task_ref without interactive TUI");
+        }
+    }
+}
+
+/// Resolve a TaskRef to a stable row id.
+pub(crate) async fn resolve_parent(
+    pool: &SqlitePool,
+    config: &Config,
+    opts: &CliOpts,
+    parent_ref: &TaskRef,
+) -> Result<Option<i64>> {
+    match parent_ref {
+        TaskRef::Id(short_id) => Ok(Some(resolve_parent_named(pool, *short_id).await?.0)),
+        TaskRef::Words(words) => {
+            let matches = crate::db::fetch_task_matching_words(pool, words).await?;
+            match matches.len() {
+                0 => anyhow::bail!("No task found matching query '{}'", words.join(" ")),
+                1 => Ok(Some(matches[0].id)),
+                n => anyhow::bail!("Multiple tasks match query '{}' (found {})", words.join(" "), n),
+            }
+        }
+        TaskRef::Pick => {
+            // Cancelling the picker cancels the whole operation.
+            let picked = crate::ui::oneshots::OneshotPickerApp::new(config.clone(), opts.fullscreen)
+                .await?
+                .run()
+                .await?;
+            match picked {
+                Some((id, _)) => Ok(Some(id)),
+                None => anyhow::bail!("Cancelled"),
+            }
+        }
+    }
 }
 
 /// Resolve a task's body text at creation time. The body delimiter (any
@@ -33,10 +78,6 @@ async fn resolve_parent(pool: &SqlitePool, short_id: i64) -> Result<Option<i64>>
 /// (direct and interactive):
 ///
 /// * `Ok(text)` — post-delimiter text used as-is; the editor never opens.
-/// * `Err(n)` for `n > 0` — a bare delimiter of `n` dots: the body editor
-///   opens at the end of the flow, seeded with the `n`th template (1-based)
-///   from `templates` (config `[editor] *_template` per task kind).
-/// * `Err(0)` — no delimiter: no body.
 /// * `Err(n)` for `n > 0` — a bare delimiter of `n` dots: the body editor
 ///   opens at the end of the flow, seeded with the `n`th template (1-based)
 ///   from `templates` (config `[editor] *_template` per task kind).
@@ -61,8 +102,8 @@ pub(super) async fn create_task_command(
     let date = task.date;
     let prefill = task.prefill;
     let parent = task.parent;
-    let pick_parent = task.pick_parent;
     let available_duration = task.available_duration;
+    let pick_duration = task.pick_duration;
 
     match task_type {
         TaskKind::Oneshot => {
@@ -75,69 +116,142 @@ pub(super) async fn create_task_command(
             // no body.
             let interactive = name.is_none();
 
-            let (name_str, priority_val, target_count, parent_id) = if interactive {
+            let (name_str, body_str, priority_val, target_count, optional_val, parent_id, end_epoch) = if interactive {
                 if !atty::is(atty::Stream::Stdin) {
                     anyhow::bail!("Oneshot task creation requires an interactive terminal");
                 }
 
                 crate::output::task_intro("Create oneshot task")?;
 
-                // (Optional) Parent id: prompted only when no `-<parent_id>`
-                // flag was given; blank input means no parent. The short id
-                // is resolved to a row id here, so an unknown id fails
-                // before anything is created. Before accepting a typed id
-                // the parent's task name is confirmed — a "no" re-prompts
-                // for the parent id.
-                let parent_id = if let Some(short_id) = parent {
-                    resolve_parent(pool, short_id).await?
-                } else if pick_parent {
-                    // A bare `-`: pick the parent in the oneshot picker
-                    // TUI. The pick returns the row id directly; a
-                    // cancelled pick means no parent.
-                    crate::ui::oneshots::OneshotPickerApp::new(config.clone(), opts.fullscreen)
-                        .await?
-                        .run()
-                        .await?
-                        .map(|(id, _)| id)
+                // Name (required, unique among oneshot tasks, no tabs):
+                // prompted before entering the edit menu.
+                let name_val = prompt_unique_name(pool, None, Some(TaskKind::Oneshot)).await?;
+                let mut body_val = resolve_body(body, &config.editor.task_template)?;
+                let mut priority_val = config.tasks.default_priority;
+                let mut parent_id: Option<i64> = if let Some(ref p_ref) = parent {
+                    resolve_parent(pool, config, opts, p_ref).await?
                 } else {
-                    loop {
-                        match crate::prompts::prompt_parent_id()? {
-                            None => break None,
-                            Some(short_id) => {
-                                let (id, name) = resolve_parent_named(pool, short_id).await?;
-                                if crate::prompts::prompt_attach_parent(&name)? {
-                                    break Some(id);
-                                }
-                                // Declined — loop and re-prompt the id.
+                    None
+                };
+                let mut end_time: Option<i64> = date;
+                let mut target_count: i32 = 0;
+                let mut optional: bool = false;
+
+                loop {
+                    let parent_label = if let Some(pid) = parent_id {
+                        if let Ok(Some(pt)) = crate::db::fetch_task_by_id(pool, pid, crate::date::now()).await {
+                            pt.name
+                        } else {
+                            "unknown".to_string()
+                        }
+                    } else {
+                        "none".to_string()
+                    };
+
+                    let body_hint = if body_val.is_empty() {
+                        "empty".to_string()
+                    } else {
+                        let first_line = body_val.lines().next().unwrap_or("");
+                        if first_line.chars().count() > 20 {
+                            let s: String = first_line.chars().take(17).collect();
+                            format!("{}...", s)
+                        } else {
+                            first_line.to_string()
+                        }
+                    };
+
+                    let mut select = cliclack::select("Edit fields:");
+                    select = select.item("save", "Save", "");
+                    select = select.item("priority", "Priority", priority_val.to_string());
+                    select = select.item("body", "Body", &body_hint);
+                    select = select.item("parent", "Parent", &parent_label);
+                    select = select.item(
+                        "due",
+                        "Due",
+                        end_time
+                            .map(|ts| crate::date::format_human_datetime(ts, true))
+                            .unwrap_or_else(|| "none".to_string()),
+                    );
+                    select = select.item(
+                        "target",
+                        "Times to complete",
+                        if target_count == 0 {
+                            "once".to_string()
+                        } else {
+                            target_count.to_string()
+                        },
+                    );
+                    select = select.item("optional", "Optional", if optional { "Yes" } else { "No" });
+                    select = select.item("cancel", "Cancel", "");
+
+                    let action = select.interact()?;
+
+                    match action {
+                        "priority" => {
+                            if let Ok(p) = crate::prompts::prompt_priority(priority_val) {
+                                priority_val = p;
                             }
                         }
+                        "body" => {
+                            if let Ok(b) = crate::editor::open_editor_on_text(&body_val) {
+                                body_val = b;
+                            }
+                        }
+                        "parent" => {
+                            let picked = crate::ui::oneshots::OneshotPickerApp::new(
+                                config.clone(),
+                                opts.fullscreen,
+                            )
+                            .await?
+                            .run()
+                            .await?;
+                            if let Some((id, _)) = picked {
+                                parent_id = Some(id);
+                            }
+                        }
+                        "due" => {
+                            let cur = end_time.map(crate::date::format_datetime);
+                            if let Ok(t) = crate::prompts::prompt_start_time("Due time:", cur.as_deref()) {
+                                end_time = Some(t);
+                            }
+                        }
+                        "target" => {
+                            if let Ok(tc) = crate::prompts::prompt_target_count() {
+                                target_count = tc;
+                            }
+                        }
+                        "optional" => {
+                            if let Ok(opt) = crate::prompts::prompt_optional(optional) {
+                                optional = opt;
+                            }
+                        }
+                        "save" => break,
+                        "cancel" => {
+                            cliclack::outro_cancel("Cancelled.")?;
+                            return Ok(());
+                        }
+                        _ => unreachable!(),
                     }
-                };
+                }
 
-                // Name (required, unique among oneshot tasks, no tabs):
-                // re-prompt on duplicates instead of aborting the flow.
-                let name_str = prompt_unique_name(pool, None, Some(TaskKind::Oneshot)).await?;
-
-                let priority_val = crate::prompts::prompt_priority(config.tasks.default_priority)?;
-                let target_count = crate::prompts::prompt_target_count()?;
-
-                (name_str, priority_val, target_count, parent_id)
+                (name_val, body_val, priority_val, target_count, optional, parent_id, end_time)
             } else {
                 // Command-line name: no prompts, default priority, single
                 // completion (target_count = 0).
                 let name_str = name.expect("a non-interactive oneshot task has a name");
                 let parent_id = match parent {
-                    Some(short_id) => resolve_parent(pool, short_id).await?,
-                    None => {
-                        if pick_parent {
+                    Some(ref p_ref) => {
+                        if matches!(p_ref, TaskRef::Pick) {
                             anyhow::bail!(
-                                "A bare '-' parent picker requires interactive creation (no task name)"
+                                "A bare '+' parent picker requires interactive creation (no task name)"
                             );
                         }
-                        None
+                        resolve_parent(pool, config, opts, p_ref).await?
                     }
+                    None => None,
                 };
-                (name_str, config.tasks.default_priority, 0, parent_id)
+                let body_str = resolve_body(body, &config.editor.task_template)?;
+                (name_str, body_str, config.tasks.default_priority, 0, false, parent_id, date)
             };
 
             // Name validity (non-empty, no tabs) before the task is
@@ -148,22 +262,14 @@ pub(super) async fn create_task_command(
             // Uniqueness for command-line names: the interactive flow
             // re-prompts on duplicates, so only this path bails.
             if !interactive
-                && crate::db::task_name_exists(pool, &name_str, Some(TaskKind::Oneshot)).await?
+                && crate::db::task_name_exists(pool, &name_str, Some(TaskKind::Oneshot), None).await?
             {
                 anyhow::bail!("A task with name '{name_str}' already exists");
             }
 
-            // Body: `delimiter text` is used as-is; a bare delimiter
-            // opens the editor; no delimiter means no body. Same rules in
-            // both flows.
-            let body = resolve_body(body, &config.editor.task_template)?;
-
             // `@<time>` is the due time and lands in `end_time`; `start_time`
-            // records the creation moment. The CLI parser already resolved
-            // the due time to an epoch (`DATE_DIALECT`), so a bad time
-            // fails before anything is created.
+            // records the creation moment.
             let start_epoch = Some(crate::date::now());
-            let end_epoch = date;
 
             // Both the stable row id and the user-facing short id are
             // assigned by the database layer (see sql.rs).
@@ -171,13 +277,13 @@ pub(super) async fn create_task_command(
                 id: None,
                 short_id: None,
                 name: name_str,
-                body,
+                body: body_str,
                 priority: priority_val,
                 start_time: start_epoch,
                 available_duration_secs: None,
                 interval_secs: None,
                 target_count,
-                optional: false,
+                optional: optional_val,
                 end_time: end_epoch,
                 parent: parent_id,
             };
@@ -186,11 +292,19 @@ pub(super) async fn create_task_command(
             task_obj.short_id = Some(new_short_id);
 
             if !opts.quiet() {
-                println!(
-                    "Created task #{}: {}",
-                    task_obj.short_id.unwrap_or_default(),
-                    task_obj.name
-                );
+                if interactive {
+                    cliclack::outro(format!(
+                        "Created task #{}: {}",
+                        task_obj.short_id.unwrap_or_default(),
+                        task_obj.name
+                    ))?;
+                } else {
+                    println!(
+                        "Created task #{}: {}",
+                        task_obj.short_id.unwrap_or_default(),
+                        task_obj.name
+                    );
+                }
                 if opts.verbose() {
                     crate::output::print_rows(&crate::output::task_rows(&task_obj));
                 }
@@ -198,10 +312,19 @@ pub(super) async fn create_task_command(
         }
         TaskKind::Recurring => {
             // Create new recurring task via interactive flow, with an
-            // optional pre-filled name from `im ! @ <name>` and an optional
+            // optional pre-filled name from `im ! %<duration> <name>` and an optional
             // body from the body delimiter (editor only when the delimiter
             // is bare — no delimiter means no body).
-            create_recurring_task(pool, config, opts, prefill, body).await?;
+            create_recurring_task(
+                pool,
+                config,
+                opts,
+                prefill,
+                body,
+                available_duration,
+                pick_duration,
+            )
+            .await?;
         }
         TaskKind::Scheduled => {
             // Scheduled task creation: `! @<time> [:name] [%<duration>]`.
@@ -262,9 +385,11 @@ pub(super) async fn create_task_command(
 async fn create_recurring_task(
     pool: &SqlitePool,
     config: &Config,
-    opts: &CliOpts,
+    _opts: &CliOpts,
     prefill: Option<String>,
     body: Result<String, usize>,
+    cl_duration: Option<i64>,
+    _pick_duration: bool,
 ) -> Result<()> {
     use crate::date::{parse_duration_secs, parse_span};
 
@@ -274,76 +399,138 @@ async fn create_recurring_task(
 
     crate::output::task_intro("Create recurring task")?;
 
-    // 1. Task name (required, unique, no tabs) — re-prompt on duplicates
-    // instead of aborting the whole flow. A pre-fill from `im ! @
-    // <name>` skips the prompt entirely; on a duplicate the prompt
-    // re-opens with the pre-fill as the default input so the user can
-    // change it. The name is trimmed before use. The pre-filled value is
-    // logged so the log file records what skipped the prompt.
+    // 1. Task name (prompted before menu)
     if let Some(p) = &prefill {
         cliclack::log::info(format!("Name: {p}"))?;
     }
     let name = prompt_unique_name(pool, prefill.as_deref(), Some(TaskKind::Recurring)).await?;
 
-    // 2. Priority (1..=999 per validation; blank falls back to default).
-    let priority = crate::prompts::prompt_priority(config.tasks.default_recurring_priority)?;
+    // 2. Start time (prompted before menu)
+    let start_time = crate::prompts::prompt_start_time("Start time:", None)?;
 
-    // 3. Start time (blank = the current moment, `date::now()`). This is the
-    // recurrence anchor: interval boundaries are computed from it
-    // (`task::current_interval_start`), and the placeholder shows the
-    // formatted default so the current anchor is visible before editing.
-    let start_time = crate::prompts::prompt_start_time(None)?;
-
-    // 4. Interval (required, valid duration; calendar-aware)
+    // 3. Duration / interval (prompted before menu)
     let interval_str = crate::prompts::prompt_interval(None)?;
     let interval_span = parse_span(&interval_str)?;
-
-    // 5. Available duration (blank = always available; capped at the
-    // interval — availability beyond it means always available).
     let interval_rough_secs = crate::date::span_rough_seconds(interval_span) as i64;
-    let avail_str =
-        crate::prompts::prompt_available_duration(&interval_str, None, Some(interval_rough_secs))?;
 
-    let available_duration_secs = if avail_str.is_empty() {
-        None
-    } else {
-        let dur = parse_duration_secs(&avail_str)?;
+    // 4. Available duration (prompted before menu)
+    let available_duration_secs: Option<i64> = if let Some(dur) = cl_duration {
+        cliclack::log::info(format!("Available duration: {}", format_duration(dur)))?;
         if dur >= interval_rough_secs {
             None
         } else {
             Some(dur)
         }
+    } else {
+        let avail_str = crate::prompts::prompt_available_duration(
+            &interval_str,
+            None,
+            Some(interval_rough_secs),
+        )?;
+        if avail_str.trim().is_empty() {
+            None
+        } else {
+            let dur = parse_duration_secs(&avail_str)?;
+            if dur >= interval_rough_secs {
+                None
+            } else {
+                Some(dur)
+            }
+        }
     };
 
-    // 6. Target count (blank = 0, task can be completed once)
-    let target_count = crate::prompts::prompt_target_count()?;
+    // Remaining fields configured via edit menu
+    let mut priority_val = config.tasks.default_recurring_priority;
+    let mut body_val = resolve_body(body, &config.editor.recurring_template)?;
+    let mut target_count: i32 = 0;
+    let mut end_time: Option<i64> = None;
+    let mut optional: bool = false;
 
-    // 7. End time (blank = never ends). `prompt_end` accepts a duration
-    // (relative to now) or an absolute date/time and returns the epoch.
-    let end_time = crate::prompts::prompt_end(None)?;
+    loop {
+        let body_hint = if body_val.is_empty() {
+            "empty".to_string()
+        } else {
+            let first_line = body_val.lines().next().unwrap_or("");
+            if first_line.chars().count() > 20 {
+                let s: String = first_line.chars().take(17).collect();
+                format!("{}...", s)
+            } else {
+                first_line.to_string()
+            }
+        };
 
-    // 8. Optional
-    let is_optional = crate::prompts::prompt_optional(false)?;
+        let mut select = cliclack::select("Edit fields:");
+        select = select.item("save", "Save", "");
+        select = select.item("priority", "Priority", priority_val.to_string());
+        select = select.item("body", "Body", &body_hint);
+        select = select.item(
+            "target",
+            "Times to complete",
+            if target_count == 0 {
+                "once".to_string()
+            } else {
+                target_count.to_string()
+            },
+        );
+        select = select.item(
+            "end",
+            "End",
+            end_time
+                .map(|ts| crate::date::format_human_datetime(ts, true))
+                .unwrap_or_else(|| "none".to_string()),
+        );
+        select = select.item("optional", "Optional", if optional { "Yes" } else { "No" });
+        select = select.item("cancel", "Cancel", "");
 
-    // 9. Body: `delimiter text` pre-fills the body (no editor); a bare
-    // delimiter opens the body editor; no delimiter → no body.
-    let body = resolve_body(body, &config.editor.recurring_template)?;
+        let action = select.interact()?;
 
-    // Insert into database. start_time marks the recurrence start (used as the
-    // anchor for interval boundaries when applying completion deltas). Both the
-    // stable row id and the user-facing short id are assigned by the database
-    // layer (see sql.rs).
+        match action {
+            "priority" => {
+                if let Ok(p) = crate::prompts::prompt_priority(priority_val) {
+                    priority_val = p;
+                }
+            }
+            "body" => {
+                if let Ok(b) = crate::editor::open_editor_on_text(&body_val) {
+                    body_val = b;
+                }
+            }
+            "target" => {
+                if let Ok(tc) = crate::prompts::prompt_target_count() {
+                    target_count = tc;
+                }
+            }
+            "end" => {
+                let cur = end_time.map(crate::date::format_datetime);
+                if let Ok(e) = crate::prompts::prompt_end(cur.as_deref()) {
+                    end_time = e;
+                }
+            }
+            "optional" => {
+                if let Ok(opt) = crate::prompts::prompt_optional(optional) {
+                    optional = opt;
+                }
+            }
+            "save" => break,
+            "cancel" => {
+                cliclack::outro_cancel("Cancelled.")?;
+                return Ok(());
+            }
+            _ => unreachable!(),
+        }
+    }
+
     let mut task_obj = TaskObject {
         id: None,
         short_id: None,
         name,
-        body,
-        priority,
+        body: body_val,
+        priority: priority_val,
         start_time: Some(start_time),
         available_duration_secs,
         interval_secs: Some(crate::date::span_to_db(&interval_span)),
         target_count,
-        optional: is_optional,
+        optional,
         end_time,
         parent: None,
     };
@@ -351,13 +538,13 @@ async fn create_recurring_task(
     task_obj.id = Some(new_id);
     task_obj.short_id = Some(new_short_id);
 
-    if !opts.quiet() {
-        println!(
+    if !_opts.quiet() {
+        cliclack::outro(format!(
             "Created task #{}: {}",
             task_obj.short_id.unwrap_or_default(),
             task_obj.name
-        );
-        if opts.verbose() {
+        ))?;
+        if _opts.verbose() {
             crate::output::print_rows(&crate::output::task_rows(&task_obj));
         }
     }
@@ -366,11 +553,9 @@ async fn create_recurring_task(
 }
 
 /// Interactive scheduled creation flow (`! @<time> [:name] [%<duration>]`
-/// with anything missing from the command line). Mirrors the recurring flow:
-/// required name (unique, re-prompt on duplicates) and start time, then the
-/// available duration (blank → 1 hour), then priority. Scheduled tasks always
-/// have target_count 0, so there is no target prompt. Values that came from
-/// the command line skip their prompt.
+/// with anything missing from the command line). Prompts name, start time,
+/// and available duration upfront, then allows editing priority, body,
+/// and optional in the menu before saving.
 async fn create_scheduled_task(
     pool: &SqlitePool,
     config: &Config,
@@ -388,27 +573,22 @@ async fn create_scheduled_task(
 
     crate::output::task_intro("Create scheduled task")?;
 
-    // 1. Task name (required, unique, no tabs). A name from the command
-    // line skips the prompt entirely; on a duplicate the prompt re-opens
-    // with the given name as the default input so the user can change it.
+    // 1. Task name (prompted before menu)
     if let Some(n) = &name {
         cliclack::log::info(format!("Name: {n}"))?;
     }
     let name = prompt_unique_name(pool, name.as_deref(), Some(TaskKind::Scheduled)).await?;
 
-    // 2. Start time (required). A start time from the command line skips
-    // the prompt; blank in the prompt means "now".
+    // 2. Start time (prompted before menu)
     let start = match start {
         Some(s) => {
             cliclack::log::info(format!("Start: {}", crate::date::format_datetime(s)))?;
             s
         }
-        None => crate::prompts::prompt_start_time(None)?,
+        None => crate::prompts::prompt_start_time("Start time:", None)?,
     };
 
-    // 3. Available duration (required for scheduled tasks). A duration from
-    // the command line (parsed to seconds in the caller) skips the prompt;
-    // blank means the 1-hour default.
+    // 3. Available duration (prompted before menu)
     let duration_secs = match duration {
         Some(d) => {
             cliclack::log::info(format!("Duration: {}", format_duration(d)))?;
@@ -424,24 +604,69 @@ async fn create_scheduled_task(
         }
     };
 
-    // 4. Priority (blank falls back to the scheduled default).
-    let priority = crate::prompts::prompt_priority(config.tasks.default_scheduled_priority)?;
+    // Remaining fields configured via edit menu
+    let mut priority_val = config.tasks.default_scheduled_priority;
+    let mut body_val = resolve_body(body, &config.editor.scheduled_template)?;
+    let mut optional: bool = false;
 
-    // 5. Body: `delimiter text` pre-fills the body (no editor); a bare
-    // delimiter opens the body editor; no delimiter → no body.
-    let body = resolve_body(body, &config.editor.scheduled_template)?;
+    loop {
+        let body_hint = if body_val.is_empty() {
+            "empty".to_string()
+        } else {
+            let first_line = body_val.lines().next().unwrap_or("");
+            if first_line.chars().count() > 20 {
+                let s: String = first_line.chars().take(17).collect();
+                format!("{}...", s)
+            } else {
+                first_line.to_string()
+            }
+        };
+
+        let mut select = cliclack::select("Edit fields:");
+        select = select.item("save", "Save", "");
+        select = select.item("priority", "Priority", priority_val.to_string());
+        select = select.item("body", "Body", &body_hint);
+        select = select.item("optional", "Optional", if optional { "Yes" } else { "No" });
+        select = select.item("cancel", "Cancel", "");
+
+        let action = select.interact()?;
+
+        match action {
+            "priority" => {
+                if let Ok(p) = crate::prompts::prompt_priority(priority_val) {
+                    priority_val = p;
+                }
+            }
+            "body" => {
+                if let Ok(b) = crate::editor::open_editor_on_text(&body_val) {
+                    body_val = b;
+                }
+            }
+            "optional" => {
+                if let Ok(opt) = crate::prompts::prompt_optional(optional) {
+                    optional = opt;
+                }
+            }
+            "save" => break,
+            "cancel" => {
+                cliclack::outro_cancel("Cancelled.")?;
+                return Ok(());
+            }
+            _ => unreachable!(),
+        }
+    }
 
     let mut task_obj = TaskObject {
         id: None,
         short_id: None,
         name,
-        body,
-        priority,
+        body: body_val,
+        priority: priority_val,
         start_time: Some(start),
         available_duration_secs: Some(duration_secs),
         interval_secs: None,
         target_count: 0,
-        optional: false,
+        optional,
         end_time: None,
         parent: None,
     };
@@ -450,11 +675,11 @@ async fn create_scheduled_task(
     task_obj.short_id = Some(new_short_id);
 
     if !opts.quiet() {
-        println!(
+        cliclack::outro(format!(
             "Created task #{}: {}",
             task_obj.short_id.unwrap_or_default(),
             task_obj.name
-        );
+        ))?;
         if opts.verbose() {
             crate::output::print_rows(&crate::output::task_rows(&task_obj));
         }
@@ -489,12 +714,12 @@ async fn prompt_unique_name(
 ) -> Result<String> {
     let given = given.map(str::trim).filter(|s| !s.is_empty());
     if let Some(name) = given
-        && !crate::db::task_name_exists(pool, name, task_type).await? {
+        && !crate::db::task_name_exists(pool, name, task_type, None).await? {
             return Ok(name.to_string());
         }
     loop {
         let candidate = crate::prompts::prompt_name(given)?;
-        if crate::db::task_name_exists(pool, &candidate, task_type).await? {
+        if crate::db::task_name_exists(pool, &candidate, task_type, None).await? {
             cliclack::log::error(format!("A task with name '{candidate}' already exists"))?;
             continue;
         }

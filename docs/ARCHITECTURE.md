@@ -24,6 +24,13 @@ use macros from cba crate (_ebog, ebog!) for logging **when outside the TUI loop
 Day/horizon/interval computation is calendar-aware (jiff), so DST transitions
 and variable month lengths are handled correctly; see "4. Date & duration".
 
+`+<parent>` is accepted but ignored for recurring and scheduled task
+  creation. A leading `+…` task_ref parses for every `im !` command, but the
+  recurring (`! %<duration> [name]`) and scheduled (`! @…`) creation flows do
+  not attach a parent — the parsed ref is dropped silently. This is
+  intentional.
+
+
 ## 1. Crate layout
 
 The crate is a **library + thin binary** so that integration tests can import it
@@ -150,7 +157,8 @@ converts a pre-existing WAL db).
 
 ```text
 mood:           id, mood TEXT NOT NULL, body TEXT NOT NULL DEFAULT '',
-                time INTEGER (unixepoch), embedding BLOB, score REAL
+                time INTEGER (unixepoch), embedding BLOB, score REAL,
+                duration INTEGER, todo_id INTEGER → todos(id) ON DELETE SET NULL
 tracker:        id, type TEXT, score BLOB NOT NULL        -- storage class = declared kind
                 CHECK (typeof(score) IN ('integer','text','real')),
                 time, mood INTEGER → mood(id)             -- nullable
@@ -165,8 +173,6 @@ todos:          id (AUTOINCREMENT), name TEXT NOT NULL, body, priority DEFAULT 5
                 -- deleting a parent re-parents its children to root
 todo_completions: id, todo_id → todos(id) ON DELETE CASCADE,
                 time INTEGER, count INTEGER NOT NULL DEFAULT 1
-task_moods:     todo_id → todos(id) ON DELETE CASCADE,
-                mood_id → mood(id) ON DELETE CASCADE     -- `im <mood> -<short id>`; today-view Ctrl+L prompt
 embedding_cache: text TEXT PRIMARY KEY, embedding BLOB
 ```
 
@@ -365,8 +371,8 @@ follows the selected entry kind, and the typed number is the **raw row id**
 passed straight to the db function, whose `Result` is just logged
 (`.elog()`):
 
-- mood/journal entry → `db::link_mood_to_task` — `INSERT OR IGNORE` into
-  `task_moods` (the task preview's `moods:` section picks it up).
+- mood/journal entry → `db::link_mood_to_task` — `UPDATE mood SET todo_id`
+  (the task preview's `moods:` section picks it up).
 - tracker entry → `db::link_tracker_to_mood` — `UPDATE tracker SET mood`,
   replacing the tracker's attachment or inserting one (the tracker
   preview's `mood:` field).
@@ -438,7 +444,11 @@ stripped after editing.
 
 - Unit tests live in each module: parsers (`parse_from` on arg vecs),
   `apply_delta_to_counts`, interval math, `accept_action` over the full task
-  grid, config serde round-trips.
+  grid, and custom serde deserializers.
+- No deserialization tests for structs unless the struct has a custom
+  `Deserialize` implementation (e.g. `impl<'de> Deserialize<'de>` or custom
+  visitor/deserializer logic). Plain `#[derive(Deserialize)]` structs do not
+  have deserialization tests.
 - Integration tests (`tests/integration.rs`) run the full parse → handler →
   DB path (`parse_from` + `execute_command`, `tui: false`, `Vec<u8>` writer)
   and assert on captured stdout. Recurring tasks are seeded via raw SQL

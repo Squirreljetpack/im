@@ -55,7 +55,7 @@ pub async fn fetch_oneshot_tasks(
         .context("Failed to fetch horizon oneshot tasks")?,
         // Strict `end_time` bound: undated tasks are never overdue and have
         // no due-in-horizon moment, so they don't belong to this filter.
-        TasksFilter::Overdue => sqlx::query_as::<_, TaskRow>(
+        TasksFilter::Due => sqlx::query_as::<_, TaskRow>(
             r#"SELECT t.*, NULL AS completions, NULL AS last_time
                FROM todos t
                WHERE t.interval_secs IS NULL
@@ -67,7 +67,7 @@ pub async fn fetch_oneshot_tasks(
         .bind(horizon_end)
         .fetch_all(pool)
         .await
-        .context("Failed to fetch overdue oneshot tasks")?,
+        .context("Failed to fetch due oneshot tasks")?,
     };
 
     let with_completions = attach_full_completions(pool, tasks, crate::date::now()).await?;
@@ -179,6 +179,100 @@ pub async fn fetch_tasks_completed_on(
             }
         })
         .collect())
+}
+
+/// Fetch completion events in `[start, end]` (inclusive) along with their task row,
+/// where each task row's `completions` reflects the cumulative completion count at that
+/// completion event's time (and `last_time` is the completion event's timestamp).
+pub async fn fetch_completion_events_in_range(
+    pool: &SqlitePool,
+    start: i64,
+    end: i64,
+) -> Result<Vec<(CompletionRow, TaskRow)>> {
+    let rows = sqlx::query(
+        r#"SELECT c.id AS completion_id, c.time AS completion_time, c.count AS completion_count,
+                  t.id, t.short_id, t.name, t.body, t.priority, t.start_time,
+                  t.available_duration_secs, t.interval_secs, t.target_count, t.optional,
+                  t.end_time, t.parent
+           FROM todo_completions c
+           JOIN todos t ON t.id = c.todo_id
+           WHERE c.time >= ? AND c.time <= ?
+           ORDER BY c.time ASC, c.id ASC"#,
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch completion events in range")?;
+
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut events = Vec::with_capacity(rows.len());
+    let mut task_map: std::collections::HashMap<i64, TaskRow> = std::collections::HashMap::new();
+
+    for row in rows {
+        let comp = CompletionRow {
+            time: row.get("completion_time"),
+            count: row.get("completion_count"),
+        };
+        let task_id: i64 = row.get("id");
+        task_map.entry(task_id).or_insert_with(|| TaskRow {
+            id: task_id,
+            short_id: row.get("short_id"),
+            name: row.get("name"),
+            body: row.get("body"),
+            priority: row.get("priority"),
+            start_time: row.get("start_time"),
+            available_duration_secs: row.get("available_duration_secs"),
+            interval_secs: row.get("interval_secs"),
+            target_count: row.get("target_count"),
+            optional: row.get("optional"),
+            end_time: row.get("end_time"),
+            parent: row.get("parent"),
+            completions: None,
+            last_time: None,
+        });
+        events.push((comp, task_id));
+    }
+
+    let tasks_vec: Vec<TaskRow> = task_map.values().cloned().collect();
+    let all_completions = fetch_completions_for_tasks(pool, &tasks_vec).await?;
+
+    let mut results = Vec::with_capacity(events.len());
+    for (comp, task_id) in events {
+        if let Some(base_task) = task_map.get(&task_id) {
+            let task_rows = all_completions.get(&task_id).map(|v| v.as_slice()).unwrap_or(&[]);
+            let cumulative = if base_task.is_recurring() {
+                match crate::task::interval_start(base_task, comp.time) {
+                    Some(floor) => task_rows
+                        .iter()
+                        .filter(|c| c.time >= floor && c.time <= comp.time)
+                        .map(|c| c.count)
+                        .sum(),
+                    None => task_rows
+                        .iter()
+                        .filter(|c| c.time <= comp.time)
+                        .map(|c| c.count)
+                        .sum(),
+                }
+            } else {
+                task_rows
+                    .iter()
+                    .filter(|c| c.time <= comp.time)
+                    .map(|c| c.count)
+                    .sum()
+            };
+
+            let mut task = base_task.clone();
+            task.completions = Some(cumulative);
+            task.last_time = Some(comp.time);
+            results.push((comp, task));
+        }
+    }
+
+    Ok(results)
 }
 
 /// Availability windows of a recurring task that intersect

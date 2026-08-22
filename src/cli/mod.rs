@@ -1,4 +1,4 @@
-use crate::types::{Entry, Task, TodayHorizon, ViewMode, ViewVariant};
+use crate::types::{Entry, Task, TaskRef, TodayHorizon, ViewMode, ViewVariant};
 
 pub const FLAG_CHARACTERS: &str = "qvF";
 
@@ -64,9 +64,8 @@ pub enum Command {
         items: Vec<TrackerItem>,
     },
     Task(Task),
-    Update {
-        target: UpdateTarget,
-        count: Option<i32>,
+    TaskEdit {
+        task: Option<TaskRef>,
     },
     Embed,
     Score {
@@ -76,16 +75,12 @@ pub enum Command {
     /// `im` with no args — today view; `im @<date>` anchors it to
     /// an arbitrary day (any date string that parses); `im @due[:t|:w]`
     /// opens the today view at `ShowVariant::B` with the day/tomorrow/week
-    /// horizon. `im -` (bare) is TasksEdit.
+    /// horizon.
     Today {
         date: Option<String>,
         show: ViewVariant,
         horizon: TodayHorizon,
     },
-    /// `im -` (bare) — tasks-edit entry point. The handler is a stub
-    /// for now: `handle_tasks_edit` bails "not yet implemented" (interactive
-    /// task editing is future work, see TODO.md).
-    TasksEdit,
     /// `im --help` / `im -h` in the initial position (handled in
     /// `parse_cli`, before the command dispatchers — `parse_from` never sees
     /// a help token). Handlers print the contents of `assets/help.txt`.
@@ -131,17 +126,6 @@ pub enum DbSubcommand {
     /// tracker's current configured kind and prune the mismatches (orphaned
     /// tracker types included), after an interactive confirm.
     Doctor,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum UpdateTarget {
-    /// `im - <id> [count]` — the oneshot task with that user-facing
-    /// short id. Completed tasks have no short id and are not addressable.
-    OneShot(i64),
-    /// `im - <words…> [count]` — the task whose name contains all
-    /// `words` in order (whitespace-separated subsequence match). The
-    /// handler requires the match to be unique.
-    Query { words: Vec<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

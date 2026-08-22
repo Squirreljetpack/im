@@ -3,8 +3,8 @@
 //!
 //! Reuses the tasks view's shared pieces ([`TasksApp`], its columns, the
 //! accept hook and the action handler) with three differences:
-//! - the done view is unreachable (the `CycleMode` bind is dropped and the
-//!   handler ignores the action even if the config file binds it),
+//! - it starts in the pending view; `tab` (`CycleMode`) toggles pending ↔
+//!   done, so a pick defaults to incomplete tasks but can reach all of them,
 //! - the preview pane is forced off (`preview.show = false`) so the picker
 //!   uses the full width,
 //! - Enter runs the builtin matchmaker `Accept` (fires the accept hook and
@@ -62,17 +62,14 @@ impl OneshotPickerApp {
         if self.inner.fullscreen {
             tui_cfg.layout = None;
         }
-        // The datetime column (visible index 1) is fixed at 8 wide, like
-        // the tasks view.
-        render_cfg.results.width_overrides = vec![0, 8, 0];
+        // The priority column (visible index 0) is 3 wide, datetime (index 1)
+        // is fixed at 8 wide.
+        render_cfg.results.width_overrides = vec![3, 8, 0];
 
         // Enter picks: the builtin Accept fires the accept hook and
-        // finishes the pick. The mode-cycle bind is dropped — the picker
-        // never shows the done view.
+        // finishes the pick. Tab continues to cycle modes (Pending <-> Done).
         binds.remove(&key!(enter).into());
-        binds.remove(&key!(tab).into());
         binds.insert(key!(enter).into(), Actions::from(MMAction::Accept));
-
         let view = Arc::new(Mutex::new(self.inner));
         let worker = Worker::new(
             // The default column: label (index 2).
@@ -118,11 +115,9 @@ impl OneshotPickerApp {
         });
 
         options = options.ext_handler(move |action: ImAction, state| {
-            // The picker never cycles to the done view, even if the config
-            // file binds a key to CycleMode.
-            if matches!(action, ImAction::CycleMode) {
-                return;
-            }
+            // CycleMode (tab) passes through: the picker starts on pending
+            // tasks and tab toggles to the done view and back, so a parent
+            // or edit target can be picked from either sort.
             handler(action, state, &ctx);
         });
 

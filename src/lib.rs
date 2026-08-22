@@ -8,6 +8,7 @@ pub mod db;
 pub mod editor;
 pub mod global;
 pub mod logger;
+pub mod notify;
 pub mod ort_compat;
 pub mod output;
 pub mod paths;

@@ -49,8 +49,7 @@ pub async fn create_task(pool: &SqlitePool, task: &TaskObject) -> Result<(i64, i
     Ok((id, short_id))
 }
 
-/// Update the recurring-task fields of an existing task. Returns the number
-/// of affected rows.
+/// Update a task row with all editable fields. Returns the number of affected rows.
 pub async fn edit_task(pool: &SqlitePool, update: &UpdateTaskObject) -> Result<u64> {
     assert!(
         update.interval_secs.is_none_or(|i| i > 0),
@@ -58,18 +57,25 @@ pub async fn edit_task(pool: &SqlitePool, update: &UpdateTaskObject) -> Result<u
         update.interval_secs
     );
     let res = sqlx::query(
-        r#"UPDATE todos SET interval_secs = ?, available_duration_secs = ?, target_count = ?,
-                   optional = ?, end_time = ? WHERE id = ?"#,
+        r#"UPDATE todos SET name = ?, body = ?, priority = ?, short_id = ?, start_time = ?,
+                   available_duration_secs = ?, interval_secs = ?, target_count = ?,
+                   optional = ?, end_time = ?, parent = ? WHERE id = ?"#,
     )
-    .bind(update.interval_secs)
+    .bind(&update.name)
+    .bind(&update.body)
+    .bind(update.priority)
+    .bind(update.short_id)
+    .bind(update.start_time)
     .bind(update.available_duration_secs)
+    .bind(update.interval_secs)
     .bind(update.target_count)
     .bind(if update.optional { 1 } else { 0 })
     .bind(update.end_time)
+    .bind(update.parent)
     .bind(update.id)
     .execute(pool)
     .await
-    .context("Failed to update recurring task")?;
+    .context("Failed to update task")?;
     Ok(res.rows_affected())
 }
 
@@ -373,26 +379,43 @@ pub async fn fetch_task_id_by_short_id(
 /// the check to a task kind, using the same column discriminators as the
 /// views: recurring tasks have `interval_secs` set, scheduled tasks have
 /// `available_duration_secs` set (oneshots have neither). `None` checks
-/// every task regardless of kind (global uniqueness).
+/// every task regardless of kind (global uniqueness). `exclude_id` omits
+/// one row from the check (the task being edited).
 pub async fn task_name_exists(
     pool: &SqlitePool,
     name: &str,
     task_type: Option<TaskKind>,
+    exclude_id: Option<i64>,
 ) -> Result<bool> {
-    let query = match task_type {
-        None => "SELECT COUNT(*) FROM todos WHERE name = ?",
-        Some(TaskKind::Recurring) => {
+    let query = match (task_type, exclude_id) {
+        (_, Some(_)) => match task_type {
+            None => "SELECT COUNT(*) FROM todos WHERE name = ? AND id != ?",
+            Some(TaskKind::Recurring) => {
+                "SELECT COUNT(*) FROM todos WHERE name = ? AND interval_secs IS NOT NULL AND id != ?"
+            }
+            Some(TaskKind::Oneshot) => {
+                "SELECT COUNT(*) FROM todos WHERE name = ? AND interval_secs IS NULL AND available_duration_secs IS NULL AND id != ?"
+            }
+            Some(TaskKind::Scheduled) => {
+                "SELECT COUNT(*) FROM todos WHERE name = ? AND interval_secs IS NULL AND available_duration_secs IS NOT NULL AND id != ?"
+            }
+        },
+        (None, None) => "SELECT COUNT(*) FROM todos WHERE name = ?",
+        (Some(TaskKind::Recurring), None) => {
             "SELECT COUNT(*) FROM todos WHERE name = ? AND interval_secs IS NOT NULL"
         }
-        Some(TaskKind::Oneshot) => {
+        (Some(TaskKind::Oneshot), None) => {
             "SELECT COUNT(*) FROM todos WHERE name = ? AND interval_secs IS NULL AND available_duration_secs IS NULL"
         }
-        Some(TaskKind::Scheduled) => {
+        (Some(TaskKind::Scheduled), None) => {
             "SELECT COUNT(*) FROM todos WHERE name = ? AND interval_secs IS NULL AND available_duration_secs IS NOT NULL"
         }
     };
-    let count: i64 = sqlx::query_scalar::<_, i64>(query)
-        .bind(name)
+    let mut query = sqlx::query_scalar::<_, i64>(query).bind(name);
+    if let Some(id) = exclude_id {
+        query = query.bind(id);
+    }
+    let count: i64 = query
         .fetch_one(pool)
         .await
         .context("Failed to check task name uniqueness")?;
@@ -545,9 +568,33 @@ pub async fn fetch_oneshot_task_for_update(
     }))
 }
 
+pub async fn fetch_oneshot_task_by_id_for_update(
+    pool: &SqlitePool,
+    id: i64,
+) -> Result<Option<TaskUpdateInfo>> {
+    let row = sqlx::query(
+        r#"SELECT id, name, target_count, short_id,
+                  COALESCE((SELECT SUM(count) FROM todo_completions
+                            WHERE todo_id = todos.id), 0) AS prior_completions
+           FROM todos WHERE id = ? AND interval_secs IS NULL"#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to fetch task")?;
+
+    Ok(row.map(|r| TaskUpdateInfo {
+        id: r.get("id"),
+        short_id: r.get("short_id"),
+        name: r.get("name"),
+        target_count: r.get("target_count"),
+        prior_completions: r.get("prior_completions"),
+    }))
+}
+
 /// Oneshot tasks whose names contain all `words` in order (a subsequence
 /// match over whitespace-split words), with prior completion counts — the
-/// candidates for the `im - <words…> [count]` update form. The
+/// candidates for the `im +<words> [count]` update form. The
 /// subsequence test is done here in Rust: SQL `LIKE` can't express
 /// "in order, with gaps allowed".
 pub async fn fetch_oneshot_matching_words(
@@ -594,6 +641,35 @@ fn name_contains_words_in_order(name: &str, words: &[String]) -> bool {
         }
     }
     wi == words.len()
+}
+
+/// Update a task's user-facing short id (honoring the UNIQUE constraint).
+pub async fn update_task_short_id(pool: &SqlitePool, id: i64, short_id: i64) -> Result<()> {
+    sqlx::query("UPDATE todos SET short_id = ? WHERE id = ?")
+        .bind(short_id)
+        .bind(id)
+        .execute(pool)
+        .await
+        .context("Failed to update task short id")?;
+    Ok(())
+}
+
+/// Tasks of all kinds whose names contain all `words` in order.
+pub async fn fetch_task_matching_words(
+    pool: &SqlitePool,
+    words: &[String],
+) -> Result<Vec<TaskRow>> {
+    let rows = sqlx::query_as::<_, TaskRow>(
+        r#"SELECT t.*, NULL AS completions, NULL AS last_time FROM todos t"#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch tasks for word query")?;
+
+    Ok(rows
+        .into_iter()
+        .filter(|r| name_contains_words_in_order(&r.name, words))
+        .collect())
 }
 
 /// Update a todo's body. Returns the number of affected rows.

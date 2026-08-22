@@ -41,14 +41,14 @@ pub enum ViewVariant {
 }
 
 impl ViewVariant {
-    /// TUI title label for the today app: `[show: all|journal|tasks]`.
-    /// `A` is called "journal" even though it still carries task rows
-    /// (minus completed ones).
+    /// TUI title label for the today app: `[show: all|journal|due]`.
+    /// `A` is "journal" (moods, trackers, and task completion events);
+    /// `B` is "due" (overdue/due tasks, scheduled, recurring).
     pub fn today_label(&self) -> &'static str {
         match self {
             ViewVariant::All => "all",
             ViewVariant::A => "journal",
-            ViewVariant::B => "tasks",
+            ViewVariant::B => "due",
         }
     }
 
@@ -72,9 +72,7 @@ impl ViewVariant {
     }
 }
 
-/// Which oneshot tasks the today view's `All` variant surfaces, from
-/// `config.today_view.initial_tasks_filter` (the `A` and `B` variants pin
-/// `Horizon` and `Overdue` respectively).
+/// Oneshot tasks filter used by internal task fetchers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TasksFilter {
@@ -89,7 +87,7 @@ pub enum TasksFilter {
     /// Only dated oneshots due within the horizon or overdue (`end_time`
     /// set and <= horizon end). Undated tasks are never overdue, so they
     /// don't appear here — use `Pending` or `All`.
-    Overdue,
+    Due,
     /// Open (incomplete) oneshot tasks, any date — the undated-inbox view.
     Pending,
     /// Open oneshot tasks due within the horizon; overdue ones (due before
@@ -134,20 +132,36 @@ impl TodayHorizon {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskRef {
+    Pick,
+    Id(i64),
+    Words(Vec<String>),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
     pub mood: String,
     // Raw tracker values ("-type value"): interpreted per the tracker's
     // declared kind (text/number/float/null) at write time in handle_entry.
     pub trackers: Vec<(String, String)>,
-    /// Task short ids from `-<id>` tokens: resolved to row ids and linked
-    /// to the mood entry at write time (a plain link, not a completion).
-    pub task_links: Vec<i64>,
+    /// Optional task reference (`+[id]` / `+[words]` / bare `+` to pick):
+    /// resolved to one task row and linked to the mood entry at write time
+    /// (a plain link via `mood.todo_id`, not a completion). At most one per
+    /// entry.
+    pub task_ref: Option<TaskRef>,
+    /// Completion delta carried by a nonempty `+<ref>` followed by a plain
+    /// numeric word (`+7 2`, `good +task 3`): applied to the resolved task
+    /// like the old update command. A bare `+` never takes a payload;
+    /// without a payload the ref is a link only.
+    pub count: Option<i32>,
     /// Body text: `Ok(text)` when words followed the body delimiter; `Err(n)`
     /// when the delimiter was bare or absent — `n` is the delimiter's dot
     /// count (0 = no delimiter). `Err(n > 0)` opens the body editor in the
     /// handler with the `n`th template (1-based; see `open_editor_for_body`).
     pub body: Result<String, usize>,
+    /// Session duration in seconds when logged as a timed mood session (`%<duration>`).
+    pub duration: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -164,19 +178,17 @@ pub struct Task {
     /// handler with the `n`th template (1-based; see `open_editor_for_body`).
     pub body: Result<String, usize>,
     /// Pre-filled name for interactive recurring creation
-    /// (`im ! @ <name>`), like oneshot creation where the
+    /// (`im ! % <name>`), like oneshot creation where the
     /// name comes from the command line. `Some` always implies creation.
     pub prefill: Option<String>,
-    /// Parent task's short id from `! -<parent_id>`; `None` for a
-    /// root-level task. Resolved to a row id at creation time (an
-    /// invalid short id errors out in the handler).
-    pub parent: Option<i64>,
-    /// A bare `-` in the first argument (`! -`): pick the parent
-    /// interactively in the oneshot picker TUI.
-    pub pick_parent: bool,
+    /// Parent task reference from `! +<parent_id>` / `! +<words>` / `! +`;
+    /// `None` for a root-level task. Resolved to a row id at creation time.
+    pub parent: Option<TaskRef>,
     /// Available duration in seconds for scheduled creation
-    /// (`! @<time>; …; %<duration>`), parsed at CLI parse time; carried into
-    /// the interactive flow so the duration prompt can be skipped when it
-    /// came from the command line.
+    /// (`! @<time>; …; %<duration>`) or recurring creation (`! %<duration>`);
+    /// carried into the interactive flow so the duration prompt can be skipped
+    /// when it came from the command line.
     pub available_duration: Option<Epoch>,
+    /// `true` when a bare `%` was passed on recurring creation (`! %`) to prompt for the duration.
+    pub pick_duration: bool,
 }

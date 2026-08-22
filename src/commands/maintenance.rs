@@ -140,12 +140,12 @@ pub(super) async fn db_backfill(pool: &SqlitePool) -> Result<()> {
     }
 
     if backfilled == 0 {
-        cba::ibog!("db"; "backfill: nothing to backfill");
+        cba::ibog!("backfill"; "no rows");
     } else {
-        cba::ibog!("db"; "backfilled {} mood row(s)", backfilled);
+        cba::ibog!("backfill"; "updated {} mood row(s)", backfilled);
     }
     if failed > 0 {
-        cba::ebog!("db"; "backfill failed for {} row(s)", failed);
+        cba::ebog!("db"; "{} failed row(s)", failed);
     }
     Ok(())
 }
@@ -395,12 +395,6 @@ pub(super) async fn edit_moods(config: &Config) -> Result<()> {
         );
     }
     open_editor_at(&path)
-}
-
-/// `im -` (bare) — tasks-edit entry point. Stub for now: interactive
-/// task editing is future work (see TODO.md).
-pub(super) async fn edit_tasks() -> Result<()> {
-    anyhow::bail!("Task editing is not yet implemented");
 }
 
 #[cfg(test)]

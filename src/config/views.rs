@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::config::BadgeSetting;
-use crate::types::TasksFilter;
 
 /// The day each week starts on, as configured in `[grid]` (`"Monday"` …
 /// `"Sunday"`, case-insensitive on parse). jiff-english's serde-friendly
@@ -52,18 +51,27 @@ impl Default for GridViewConfig {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PreviewConfig {
     pub show_last_when_done: bool,
+    #[serde(default = "default_true")]
+    pub named_months: bool,
 }
 impl Default for PreviewConfig {
     fn default() -> Self {
         Self {
             show_last_when_done: false,
+            named_months: true,
         }
     }
 }
+
+use matchmaker::config::StyleSetting;
 
 /// `[tasks_view]` section — options for the task-list view (TUI tasks app).
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -73,12 +81,18 @@ pub struct TasksViewConfig {
     /// its last completion entry, so a just-completed task doesn't vanish
     /// from the tui.
     pub persist_pending_seconds: i64,
+    #[serde(default)]
+    pub tui_priority_style: StyleSetting,
+    #[serde(default)]
+    pub tui_time_style: StyleSetting,
 }
 
 impl Default for TasksViewConfig {
     fn default() -> Self {
         Self {
             persist_pending_seconds: 5 * 60,
+            tui_priority_style: StyleSetting::default(),
+            tui_time_style: StyleSetting::default(),
         }
     }
 }
@@ -104,6 +118,13 @@ pub struct EditorConfig {
     /// Body templates for scheduled-task bodies (same semantics as
     /// `mood_template`).
     pub scheduled_template: Vec<PathBuf>,
+    /// Prompt text shown after a pomodoro/timer session when requesting thoughts/notes.
+    #[serde(default = "default_pomo_prompt")]
+    pub pomo_prompt: String,
+}
+
+fn default_pomo_prompt() -> String {
+    "Thoughts:".to_string()
 }
 
 impl Default for EditorConfig {
@@ -113,6 +134,7 @@ impl Default for EditorConfig {
             task_template: Vec::new(),
             recurring_template: Vec::new(),
             scheduled_template: Vec::new(),
+            pomo_prompt: default_pomo_prompt(),
         }
     }
 }
@@ -122,20 +144,15 @@ impl Default for EditorConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct TodayViewConfig {
-    /// Which oneshot tasks the today view's `All` variant surfaces (the
-    /// `A` variant pins `Horizon`, `B` pins `Overdue`). `None` hides the
-    /// entire task section (journal-only view). `All` shows any
-    /// oneshot task (open or completed, any date); `Overdue` only dated
-    /// oneshots due within the horizon or overdue; `Pending` all open
-    /// oneshots; `Horizon` open oneshots due
-    /// within the horizon, overdue excluded.
-    #[serde(default)]
-    pub initial_tasks_filter: TasksFilter,
     /// Merge a task's adjacent completion entries into a single "done" row
     /// in the today view (currently accepted and stored on TodayApp; no
     /// behavior yet).
     #[serde(default)]
     pub coalesce_completions: bool,
+    #[serde(default)]
+    pub tui_priority_style: StyleSetting,
+    #[serde(default)]
+    pub tui_time_style: StyleSetting,
 }
 
 /// `[badges]` section — row marker glyphs for the today view and preview

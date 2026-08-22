@@ -44,7 +44,6 @@ week_start = "Monday"
 show_last_when_done = true
 
 [today_view]
-initial_tasks_filter = "horizon"   # all | overdue | pending | horizon
 # Merge a task's adjacent completion entries into a single done row
 # in the today view (accepted for future use; no behavior yet).
 coalesce_completions = false

@@ -71,49 +71,51 @@ im — immediate mood, journal, and task tracker
 
 Usage:
   im <mood> [. [body]]                           log a mood (with an optional body)
-  im [-tracker <value>]...                       add one or more custom tracker records
-    [mood] [-tracker <value>]...                        (optionally linked to a new mood entry)
-
-  im ! [-<parent_id>] [. body]                   create a oneshot task (interactive)
-  im ! <name> [@<time>]                          create a oneshot task
-  im ! @ [name]                                  create a recurring task (interactive)
-  im ! @<time> [:name] [%duration]               create a scheduled task 
+  im %<duration>                                 start a timed session
+  im [-tracker [value]]...                       add one or more custom tracker records
+  im [link]... [entry] [link]...                 add new tracker records and task completions
+                                                 linked to a new mood entry.
+  where:
+    entry :=             mood | %duration
+    link  := -tracker [value] | +task [count]
+  
+  im !                                           create a oneshot task (interactive)
+  im ! [+[parent_task]] <name> [@<time>]         create a oneshot task
+  im ! %<duration> [name]                        create a recurring task (interactive)
+  im ! @ [<time>] [:<name>] [%<duration>]        create a scheduled task 
                                                         (interactive if partial)
+  im +[task] [count]                             edit a task or update its completion state
+  
+  All the previous subcommands support a trailing [<dots> [body]].
+  - <dots> is an argument of only .'s.
+  - If no body follows, `$EDITOR` will open for writing it.
+  - the number of dots then chooses which template the `$EDITOR` opens with (defined under [editor]).
 
-  All the previous subcommands support a trailing [. [body]].
-  If only . is specified, `$EDITOR` will open for writing the body of the
-  entry (more dots — .., ... — select a configured template per entry
-  kind; out of range falls back to the hint line).
-
-  Oneshot tasks can be optionally linked to a parent (i.e. subtasks)
-  by writing the parent's id prefixed with `-` in the first argument.
-    A bare - allows you to pick the parent interactively.
+  Tasks are referred to (i.e. when editing or linking a oneshot to a parent or a mood),
+  by a single argument that begins with `+`, followed by either:
+  - the short id of the task (+7)
+  - an ordered sequence of query words that matches only one task name (+groceries)
+  - or nothing (+): pick interactively.
 
 Views:
   im @[date]                                     today view
   im @due[:t|:w]                                 due view
                                                         (today / tomorrow / this week)
   im @[:o|:O]                                    pending tasks
-                                                        (all / oneshot / recurring+scheduled)
   im @done[:o|:O]                                completed tasks
+                                                        (all / oneshot / recurring+scheduled)
 
 Trackers and grids:
   im :[week|month|year] [ids]                    dot-sequence tracker grid
                                                         ids: <tracker> or @<recurring-name>
                                                         period defaults to "week"
 
-Cli actions:
-  im - <query words> [count]                     update completion of the unique task
-                                                        whose name contains <query words>
-                                                        in their order
-  im - <id> [count]                              update task completion by id
-
 Other:
   im :config | :c                                open the config in $VISUAL / $EDITOR
   im :moods                                      open the moods config file
   im :embed                                      embed stdin lines (one vector/line)
-  im :color <mood>                            projected mood color diagnostic
-  im :clear [@date]                              clear all mood entries from a day
+  im :color <mood>                               projected mood color diagnostic
+  im :clear [@<date>]                            clear all mood entries from a day
   im :db prune                                   delete completed and expired tasks
   im :db backfill                                compute and persist missing mood embeddings
   im :db doctor                                  check tracker entries vs kinds; prune mismatches

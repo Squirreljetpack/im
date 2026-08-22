@@ -41,11 +41,11 @@ pub fn prompt_priority(default: i32) -> Result<i32> {
         .unwrap_or(default))
 }
 
-/// Prompt for a task's start time. Blank input falls back to the default:
+/// Prompt for a task's start time with custom label. Blank input falls back to the default:
 /// `Some(default)` (recurring creation — the placeholder shows the formatted
 /// `default`) or `now` for scheduled creation. Validated against the fixed
 /// `crate::date::DATE_DIALECT` so a bad time fails before the task is created.
-pub fn prompt_start_time(default: Option<&str>) -> Result<i64> {
+pub fn prompt_start_time(label: &str, default: Option<&str>) -> Result<i64> {
     use cliclack::input;
 
     let (default_time, placeholder) = match default {
@@ -60,7 +60,7 @@ pub fn prompt_start_time(default: Option<&str>) -> Result<i64> {
         }
     };
 
-    let raw: String = input("Start time:")
+    let raw: String = input(label)
         .placeholder(&placeholder)
         .default_input("")
         .validate(move |input: &String| {
@@ -109,32 +109,90 @@ pub fn prompt_target_count() -> Result<i32> {
     Ok(raw.trim().parse::<i32>().unwrap_or(0))
 }
 
-/// Prompt for an optional parent task short id (`! -<parent_id>`). Blank
-/// input means no parent. The short id is not validated against the
-/// database here (that needs the pool — the caller resolves it and errors
-/// on an unknown id).
-pub fn prompt_parent_id() -> Result<Option<i64>> {
+/// Prompt for an optional parent task reference (`+<id>` / `+<words>` / `+` / blank-none).
+pub fn prompt_parent_id() -> Result<Option<crate::types::TaskRef>> {
     use cliclack::input;
 
-    let raw: String = input("(Optional) Parent id:")
+    let raw: String = input("(Optional) Parent:")
         .placeholder("none")
         .default_input("")
-        .validate(|value: &String| {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                Ok(())
-            } else {
-                match trimmed.parse::<i64>() {
-                    Ok(n) if n > 0 => Ok(()),
-                    Ok(_) => Err(String::from("Must be positive")),
-                    Err(_) => Err(String::from("Must be a number")),
-                }
-            }
-        })
         .interact()
         .map_err(|e| anyhow::anyhow!("Prompt cancelled: {}", e))?;
 
-    Ok(raw.trim().parse::<i64>().ok())
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed == "+" {
+        return Ok(Some(crate::types::TaskRef::Pick));
+    }
+    let without_plus = trimmed.strip_prefix('+').unwrap_or(trimmed).trim();
+    if without_plus.is_empty() {
+        return Ok(Some(crate::types::TaskRef::Pick));
+    }
+    // All-digits input is always an id reference — never a word query —
+    // even when no task holds that id (e.g. `+0`).
+    if without_plus.chars().all(|c| c.is_ascii_digit()) {
+        let n = without_plus
+            .parse::<i64>()
+            .map_err(|_| anyhow::anyhow!("Invalid task id: '{without_plus}'"))?;
+        return Ok(Some(crate::types::TaskRef::Id(n)));
+    }
+    let words = without_plus
+        .split_whitespace()
+        .map(String::from)
+        .collect::<Vec<_>>();
+    Ok(Some(crate::types::TaskRef::Words(words)))
+}
+
+/// Prompt for a task's user-facing short id in the editor.
+pub async fn prompt_short_id(
+    pool: &sqlx::SqlitePool,
+    current_id: i64,
+    current_short: Option<i64>,
+) -> Result<Option<i64>> {
+    use cliclack::input;
+
+    let placeholder = current_short
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "none".to_string());
+
+    loop {
+        let raw: String = input("Short ID:")
+            .placeholder(&placeholder)
+            .default_input("")
+            .validate(|value: &String| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    Ok(())
+                } else {
+                    match trimmed.parse::<i64>() {
+                        Ok(n) if n > 0 => Ok(()),
+                        Ok(_) => Err(String::from("Must be positive")),
+                        Err(_) => Err(String::from("Must be a number")),
+                    }
+                }
+            })
+            .interact()
+            .map_err(|e| anyhow::anyhow!("Prompt cancelled: {}", e))?;
+
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Ok(current_short);
+        }
+        let new_short = trimmed.parse::<i64>()?;
+        if Some(new_short) == current_short {
+            return Ok(current_short);
+        }
+        if let Some((existing_id, _)) =
+            crate::db::fetch_task_id_by_short_id(pool, new_short).await?
+            && existing_id != current_id
+        {
+            cliclack::log::error(format!("Short ID {} is already in use", new_short))?;
+            continue;
+        }
+        return Ok(Some(new_short));
+    }
 }
 
 /// Confirm attaching the new task under `name` as its parent. The parent id
@@ -236,8 +294,9 @@ pub fn prompt_available_duration(
 }
 
 /// Prompt for a recurring-task end time. The label is "Duration or end time":
-/// input is validated as a duration first (e.g. "1 year", relative to now)
-/// and then as an absolute date/time via the fixed `crate::date::DATE_DIALECT`.
+/// input resolves in three passes — a calendar-aware span first (`"1 year"`,
+/// `"3 months"`, relative to now), then a fixed duration (`"90d"`), then an
+/// absolute date/time via the fixed `crate::date::DATE_DIALECT`.
 /// Blank = never ends.
 /// Returns the resolved Unix-epoch end time, or `None` for never. `default`
 /// is the remaining time in seconds (pre-filled as a formatted duration).
@@ -259,27 +318,42 @@ pub fn prompt_end(default: Option<&str>) -> Result<Option<i64>> {
         .placeholder(&placeholder)
         .default_input("")
         .validate(move |input: &String| {
-            if input.is_empty()
-                || input == "never"
-                || crate::date::parse_duration_secs(input).is_ok()
-            {
-                Ok(())
-            } else {
-                crate::date::parse_datetime(input, crate::date::DATE_DIALECT)
-                    .map(|_| ())
-                    .map_err(|e| format!("Invalid duration or time: {}", e))
+            if input.is_empty() || input == "never" {
+                return Ok(());
             }
+            resolve_end_input(input, default_time)
+                .map(|_| ())
+                .map_err(|e| format!("Invalid duration or time: {}", e))
         })
         .interact()
         .map_err(|e| anyhow::anyhow!("Prompt cancelled: {}", e))?;
 
     if raw.is_empty() || raw == "never" {
         Ok(default_time)
-    } else if let Ok(dur) = crate::date::parse_duration_secs(&raw) {
-        Ok(Some(crate::date::now() + dur))
     } else {
-        crate::date::parse_datetime(&raw, crate::date::DATE_DIALECT).map(Some)
+        resolve_end_input(&raw, default_time)
     }
+}
+
+/// Resolve an end-time input: calendar-aware span relative to now first
+/// (`"1 year"`), then a fixed duration (`"90d"`), then an absolute
+/// date/time. Blank input is the caller's concern; `default_time` is
+/// returned for `"never"`.
+fn resolve_end_input(raw: &str, default_time: Option<i64>) -> Result<Option<i64>> {
+    if raw == "never" {
+        return Ok(default_time);
+    }
+    // Calendar spans need a reference date to resolve to seconds.
+    if let Ok(span) = crate::date::parse_span(raw) {
+        let end = crate::date::zoned_from_unix_secs(crate::date::now())
+            .and_then(|z| z.checked_add(span))
+            .map_err(anyhow::Error::msg)?;
+        return Ok(Some(end.timestamp().as_second()));
+    }
+    if let Ok(dur) = crate::date::parse_duration_secs(raw) {
+        return Ok(Some(crate::date::now() + dur));
+    }
+    crate::date::parse_datetime(raw, crate::date::DATE_DIALECT).map(Some)
 }
 
 /// Prompt whether a recurring task is optional.
@@ -327,4 +401,41 @@ pub fn prompt_delete_invalid_db(_path: &Path) -> Result<bool> {
         .initial_value(false)
         .interact()
         .map_err(|e| anyhow::anyhow!("Prompt cancelled: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_end_input;
+
+    /// End-time input resolves in three passes: calendar-aware span first
+    /// (`"1 year"`), then fixed duration, then absolute date/time. Blank
+    /// and "never" are handled by the caller/prompt, not here.
+    #[test]
+    fn end_input_span_duration_datetime_precedence() {
+        // Calendar span (rejected by the plain duration parser) resolves
+        // relative to now.
+        let end = resolve_end_input("1 year", None).unwrap().unwrap();
+        assert!(end > crate::date::now() + 86_400 * 364);
+        assert!(end < crate::date::now() + 86_400 * 367);
+
+        // Fixed duration still works ("90d"; a span of 90 calendar days
+        // matches the same input first — allow for a DST shift).
+        let end = resolve_end_input("90d", None).unwrap().unwrap();
+        assert!(
+            (end - (crate::date::now() + 90 * 86_400)).abs() <= 3600,
+            "got {end}"
+        );
+
+        // Absolute date/time wins last.
+        let ts = crate::date::parse_datetime("2030-03-15", crate::date::DATE_DIALECT).unwrap();
+        let end = resolve_end_input("2030-03-15", None).unwrap().unwrap();
+        assert_eq!(end, ts);
+
+        // "never" falls back to the caller's default (None here).
+        assert_eq!(resolve_end_input("never", None).unwrap(), None);
+        assert_eq!(resolve_end_input("never", Some(123)).unwrap(), Some(123));
+
+        // Garbage fails all three passes.
+        assert!(resolve_end_input("nonsense", None).is_err());
+    }
 }

@@ -108,9 +108,10 @@ impl TasksApp {
         if self.fullscreen {
             tui_cfg.layout = None;
         }
-        // The date column (visible index 1) is fixed at 8 wide — "Tu 08:00"
-        // — so rows do not reflow as the cell text length varies.
-        render_cfg.results.width_overrides = vec![0, 8, 0];
+        // The priority column (visible index 0) is fixed at 3 wide, and
+        // the date column (visible index 1) is fixed at 8 wide — "Tu 08:00"
+        // — so rows do not reflow as cell text length varies.
+        render_cfg.results.width_overrides = vec![3, 8, 0];
 
         // Shared view state: async tasks update the data, the render thread
         // (Repopulate) pushes it into the worker.
@@ -210,8 +211,8 @@ impl TasksApp {
         mm.register_event_handler(Event::CursorChange, {
             let view = view.clone();
             move |state, _| {
-                if let Some(idx) = state.current_index() {
-                    view.lock().unwrap().cursor = idx;
+                if !state.picker_ui.results.cursor_disabled() {
+                    view.lock().unwrap().cursor = state.picker_ui.results.index();
                 }
             }
         });
@@ -298,7 +299,10 @@ pub(crate) fn task_columns(view: &Arc<Mutex<TasksApp>>) -> [Column<TaskRow, ()>;
         // Same column set as the today view: priority (visible here),
         // datetime, label.
         Column::new("pri", |item: &TaskRow, _: &()| {
-            Text::from(item.priority.to_string())
+            crate::ui::common::format_text(
+                &item.priority.to_string(),
+                &config().tasks_view.tui_priority_style,
+            )
         }),
         Column::new("datetime", move |item: &TaskRow, _: &()| {
             // The today view's time-cell formatting: "HH:MM" today,
@@ -306,11 +310,8 @@ pub(crate) fn task_columns(view: &Arc<Mutex<TasksApp>>) -> [Column<TaskRow, ()>;
             // for undated oneshots.
             let now = crate::date::now();
             let time = crate::task::pending_sort_time(item, now);
-            Text::from(crate::today::task_time_label(
-                item,
-                time,
-                crate::date::today_start(),
-            ))
+            let s = crate::today::task_time_label(item, time, crate::date::today_start());
+            crate::ui::common::format_text(&s, &config().tasks_view.tui_time_style)
         }),
         label_column,
     ]

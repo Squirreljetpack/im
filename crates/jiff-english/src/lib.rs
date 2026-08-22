@@ -310,7 +310,6 @@ mod tests {
         expect("June 30, 2018", utc(2018, 6, 30, 0, 0, 0, NOON));
         expect("June   30,    2018", utc(2018, 6, 30, 0, 0, 0, NOON));
         expect("1 April 2018", utc(2018, 4, 1, 0, 0, 0, NOON));
-        expect("2018", utc(2018, 1, 1, 0, 0, 0, NOON));
     }
 
     #[test]
@@ -349,6 +348,16 @@ mod tests {
             assert!(
                 parse_date_string(bad, &base(), Dialect::Uk).is_err(),
                 "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_positive_numbers_rejected() {
+        for num in ["202", "2024", "3", "0", "1000"] {
+            assert!(
+                parse_date_string(num, &base(), Dialect::Uk).is_err(),
+                "expected bare number {num:?} to be rejected"
             );
         }
     }

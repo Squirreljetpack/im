@@ -1,23 +1,19 @@
 use anyhow::Context;
 
 use super::super::{is_body_delimiter, Command};
-use crate::types::{Task, TaskKind};
+use crate::types::{Task, TaskKind, TaskRef};
 
 pub(crate) fn parse_task_command(mut args: &[String]) -> anyhow::Result<Command> {
     // The leading "!" has already been stripped by the caller — `args` holds
     // everything after it.
 
-    let (parent, pick_parent) = if !args.is_empty() {
-        match parse_parent_flag(&args[0])? {
-            ParentFlag::None => (None, false),
-            ParentFlag::Pick => (None, true),
-            ParentFlag::Id(short_id) => (Some(short_id), false),
-        }
+    let parent = if !args.is_empty() {
+        parse_parent_task_ref(&args[0])?
     } else {
-        (None, false)
+        None
     };
 
-    if parent.is_some() || pick_parent {
+    if parent.is_some() {
         args = &args[1..];
     }
 
@@ -51,13 +47,47 @@ pub(crate) fn parse_task_command(mut args: &[String]) -> anyhow::Result<Command>
             prefill: None,
             available_duration: None,
             parent,
-            pick_parent,
+            pick_duration: false,
         }));
     }
 
-    // `! @ [name]` → interactive recurring task creation.
+    // `! %<duration> [name]` → recurring creation
+    if args[0].starts_with('%') {
+        let (pick_duration, available_duration) = if args[0] == "%" {
+            (true, None)
+        } else {
+            let rest = &args[0][1..];
+            let dur = crate::date::parse_duration_secs(rest)
+                .with_context(|| format!("Invalid recurring task duration: '{}'", rest))?;
+            (false, Some(dur))
+        };
+        let prefill = if args.len() > 1 {
+            let joined = args[1..].join(" ");
+            let trimmed = joined.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        } else {
+            None
+        };
+        return Ok(Command::Task(Task {
+            task_type: TaskKind::Recurring,
+            name: None,
+            priority: None,
+            date: None,
+            body,
+            prefill,
+            available_duration,
+            parent: None,
+            pick_duration,
+        }));
+    }
+
+    // `! @ ...` (bare `@`) → scheduled task creation (e.g. `! @`, `! @ :name %1h`)
     if args[0] == "@" {
-        return parse_recurring_task(&args[1..], body);
+        return parse_scheduled_task(&args[1..], body);
     }
 
     // `! @<time> [:name] [%<duration>]` → scheduled task
@@ -120,70 +150,52 @@ pub(crate) fn parse_task_command(mut args: &[String]) -> anyhow::Result<Command>
         prefill: None,
         available_duration: None,
         parent,
-        pick_parent,
+        pick_duration: false,
     }))
 }
 
-/// The parent flag from the first argument (`! -<parent_id>`): `None` for
-/// any argument that is not of that shape (e.g. a name starting with a
-/// dash), `Pick` for a bare `-` (pick the parent interactively), and
-/// `Id` for a numeric short id.
-enum ParentFlag {
-    None,
-    Pick,
-    Id(i64),
-}
-
-fn parse_parent_flag(arg: &str) -> anyhow::Result<ParentFlag> {
-    let Some(rest) = arg.strip_prefix('-') else {
-        return Ok(ParentFlag::None);
+fn parse_parent_task_ref(arg: &str) -> anyhow::Result<Option<TaskRef>> {
+    let Some(rest) = arg.strip_prefix('+') else {
+        return Ok(None);
     };
-    // A bare `-` picks the parent interactively.
     if rest.is_empty() {
-        return Ok(ParentFlag::Pick);
+        return Ok(Some(TaskRef::Pick));
     }
-    if !rest.bytes().all(|b| b.is_ascii_digit()) {
-        return Ok(ParentFlag::None);
+    if rest.chars().all(|c| c.is_ascii_digit()) {
+        let id = rest.parse::<i64>().context("Parent id must be a number")?;
+        return Ok(Some(TaskRef::Id(id)));
     }
-    let Ok(short_id) = rest.parse::<i64>() else {
-        anyhow::bail!("Invalid -<parent_id> '{}': must be a number", arg);
-    };
-    Ok(ParentFlag::Id(short_id))
+    let words = rest
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+    Ok(Some(TaskRef::Words(words)))
 }
 
-/// Parse `! @ [name] [. body]` — interactive recurring task
-/// creation. `args` holds everything after the bare `@` (the body split
-/// already happened in `parse_task_command`); the name (everything before
-/// the delimiter) pre-fills the name prompt, and `body` carries the text
-/// after the delimiter (the handler decides editor-vs-text from the
-/// interactive flow).
-fn parse_recurring_task(args: &[String], body: Result<String, usize>) -> anyhow::Result<Command> {
-    // `! @ <name>` — the name is free text that pre-fills the
-    // name prompt. @-words inside it (e.g. `! @ buy milk @x`) stay literal:
-    // they are part of the name, never parsed as a time (unlike the
-    // oneshot/scheduled @-word handling). To keep a literal `@` at the start
-    // of a word, use the body delimiter as the escape.
-    let prefill = {
-        let joined = args.join(" ");
-        let trimmed = joined.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    };
-
-    Ok(Command::Task(Task {
-        task_type: TaskKind::Recurring,
-        name: None,
-        priority: None,
-        date: None,
-        body,
-        prefill,
-        available_duration: None,
-        parent: None,
-        pick_parent: false,
-    }))
+/// Parse the single-argument task editor command: `im +` (pick), `im +<id>`
+/// or `im +<words>` — the whole argument list is one '+' token. Multi-word
+/// queries come from a single attached token (`+buy milk` is an *entry*
+/// carrying a word-query ref, not an editor invocation).
+pub(crate) fn parse_task_edit_command(args: &[String]) -> anyhow::Result<Command> {
+    debug_assert_eq!(args.len(), 1, "editor routing passes exactly one argument");
+    let first = &args[0];
+    let rest = first.strip_prefix('+').expect("routing guarantees a leading '+'");
+    if rest.is_empty() {
+        return Ok(Command::TaskEdit { task: None });
+    }
+    if rest.chars().all(|c| c.is_ascii_digit()) {
+        let id = rest
+            .parse::<i64>()
+            .context("Task ID must be a number")?;
+        return Ok(Command::TaskEdit {
+            task: Some(TaskRef::Id(id)),
+        });
+    }
+    Ok(Command::TaskEdit {
+        task: Some(TaskRef::Words(
+            rest.split_whitespace().map(String::from).collect(),
+        )),
+    })
 }
 /// `! @<time> [:name] [%<duration>] [. [body]]` → scheduled task
 /// creation. `args` holds the command words (the body split already
@@ -303,6 +315,6 @@ fn parse_scheduled_task(args: &[String], body: Result<String, usize>) -> anyhow:
         prefill: None,
         available_duration,
         parent: None,
-        pick_parent: false,
+        pick_duration: false,
     }))
 }

@@ -2,6 +2,8 @@ use cba::define_collection_wrapper;
 use crossterm::style::Color;
 use serde::{Deserialize, Serialize};
 
+pub type ColorSetting = Color;
+
 /// A configurable badge: a glyph and/or color, e.g. the today view's
 /// `[today_view] journal_badge`. Deserializes from any of:
 ///

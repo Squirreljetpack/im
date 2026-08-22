@@ -8,7 +8,7 @@ use crate::date;
 use crate::db::{EntryObject, TrackerObject, TrackerValue};
 use crate::editor::open_editor_for_body;
 use crate::tracker::parse_tracker_value;
-use crate::types::Entry;
+use crate::types::{Entry, TaskRef};
 
 pub(super) async fn record_entry(
     pool: &SqlitePool,
@@ -16,9 +16,128 @@ pub(super) async fn record_entry(
     opts: &CliOpts,
     entry: Entry,
 ) -> Result<()> {
-    let mood = entry.mood;
+    let is_session = entry.duration.is_some();
+    if is_session && !atty::is(atty::Stream::Stdin) {
+        anyhow::bail!("Mood sessions require an interactive terminal");
+    }
+
+    let (mood, duration) = if let Some(secs) = entry.duration {
+        let elapsed_secs = {
+            use std::io::Write;
+
+            /// Re-enables raw mode on drop so any exit path (bail, `?`,
+            /// early return) leaves the terminal cooked.
+            struct RawGuard;
+            impl RawGuard {
+                fn new() -> std::io::Result<Self> {
+                    crossterm::terminal::enable_raw_mode()?;
+                    Ok(Self)
+                }
+            }
+            impl Drop for RawGuard {
+                fn drop(&mut self) {
+                    let _ = crossterm::terminal::disable_raw_mode();
+                }
+            }
+
+            // `-q`: the timer still runs (and stays interruptible); only
+            // the rendering and the completion logs are suppressed.
+            let render = !opts.quiet();
+
+            let _raw = RawGuard::new()?;
+            let total_dur = std::time::Duration::from_secs(secs as u64);
+            let mut elapsed_active = std::time::Duration::ZERO;
+            let mut last_tick = std::time::Instant::now();
+            let mut ended_early = false;
+
+            if render {
+                print!("\r{}", crate::date::format_countdown(secs));
+                let _ = std::io::stdout().flush();
+            }
+
+            while elapsed_active < total_dur {
+                if crossterm::event::poll(std::time::Duration::from_millis(200))?
+                    && let crossterm::event::Event::Key(key) = crossterm::event::read()?
+                {
+                    if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                        && key.code == crossterm::event::KeyCode::Char('c')
+                    {
+                        println!();
+                        anyhow::bail!("Session aborted!");
+                    }
+                    if key.code == crossterm::event::KeyCode::Enter {
+                        // Pause the timer while the confirm prompt runs:
+                        // leave raw mode for cliclack, re-enter after.
+                        let _ = crossterm::terminal::disable_raw_mode();
+                        if render {
+                            print!("\r\x1b[2K");
+                            let _ = std::io::stdout().flush();
+                        }
+                        let confirm_res = cliclack::confirm("End the session? [y/N]")
+                            .initial_value(false)
+                            .interact();
+                        match confirm_res {
+                            Ok(true) => {
+                                ended_early = true;
+                                break;
+                            }
+                            Ok(false) => {
+                                crossterm::terminal::enable_raw_mode()?;
+                                last_tick = std::time::Instant::now();
+                            }
+                            Err(_) => {
+                                anyhow::bail!("Session aborted!");
+                            }
+                        }
+                    }
+                }
+                let now = std::time::Instant::now();
+                elapsed_active += now.duration_since(last_tick);
+                last_tick = now;
+                if elapsed_active >= total_dur {
+                    break;
+                }
+                if render {
+                    let remaining = total_dur.saturating_sub(elapsed_active);
+                    print!("\r{}", crate::date::format_countdown(remaining.as_secs() as i64));
+                    let _ = std::io::stdout().flush();
+                }
+            }
+
+            drop(_raw);
+            if render {                print!("\r\x1b[2K");
+                let _ = std::io::stdout().flush();
+                if ended_early {
+                    cliclack::log::info("Session ended")?;
+                } else {
+                    crate::notify::notify("Session Complete", "Mood session finished!");
+                    cliclack::log::success("Session complete!")?;
+                }
+            }
+
+            elapsed_active.as_secs() as i64
+        };
+
+        let thoughts_res = cliclack::input(&config.editor.pomo_prompt)
+            .default_input("")
+            .interact();
+
+        let thoughts: String = match thoughts_res {
+            Ok(t) => t,
+            Err(_) => {
+                // Ctrl-C aborts and skips recording the session (return Ok).
+                return Ok(());
+            }
+        };
+
+        (thoughts.trim().to_string(), Some(elapsed_secs))
+    } else {
+        (entry.mood, None)
+    };
+
     let trackers = entry.trackers;
-    let task_links = entry.task_links;
+    let task_ref = entry.task_ref;
+    let entry_count = entry.count;
     let body = entry.body;
 
     // Body resolution: `Ok(text)` is post-delimiter text used as-is;
@@ -31,7 +150,14 @@ pub(super) async fn record_entry(
         Err(dots) => open_editor_for_body(&config.editor.mood_template, dots)?,
     };
 
-    if mood.is_empty() && trackers.is_empty() && body.is_empty() {
+    // A ref with a count payload alone is still work to do (`im +7 2`):
+    // the completion applies without a mood row.
+    if mood.is_empty()
+        && trackers.is_empty()
+        && body.is_empty()
+        && duration.is_none()
+        && entry_count.is_none()
+    {
         anyhow::bail!("Nothing to log");
     }
 
@@ -165,28 +291,78 @@ pub(super) async fn record_entry(
         embedding: embedding_blob,
         score,
         trackers: tracker_objects,
+        duration,
+        todo_id: None,
     };
 
     let mood_id = crate::db::create_entry(pool, &entry_obj).await?;
     log::debug!("Inserted mood with id={:?}", mood_id);
 
-    // Task links: `-<short id>` tokens resolved to row ids and recorded in
-    // the link table — a plain link, not a completion. They need a mood
-    // row to attach to, so a tracker-only entry cannot carry links.
-    if !task_links.is_empty() {
-        let Some(mood_id) = mood_id else {
-            anyhow::bail!("Task links (-<id>) require a mood or journal entry to attach to");
+    // Task reference: a single `+<ref>` (`+<id>` / `+<words>` / bare `+`
+    // to pick interactively). A count payload (`+7 2`) applies completions
+    // to the resolved oneshot task; the ref is otherwise — or additionally
+    // — linked to the mood entry via `mood.todo_id`. A link needs a mood row
+    // to attach to, so a tracker-only line can only carry a payload.
+    if let Some(task_ref) = task_ref {
+        let task_id = match task_ref {
+            TaskRef::Id(short_id) => {
+                let Some((id, _name)) =
+                    crate::db::fetch_task_id_by_short_id(pool, short_id).await?
+                else {
+                    anyhow::bail!("No task with short id {short_id} exists");
+                };
+                id
+            }
+            TaskRef::Words(words) => {
+                let matches = crate::db::fetch_task_matching_words(pool, &words).await?;
+                match matches.len() {
+                    0 => anyhow::bail!(
+                        "No task found matching query '{}'",
+                        words.join(" ")
+                    ),
+                    1 => matches[0].id,
+                    n => anyhow::bail!(
+                        "Multiple tasks match query '{}' (found {})",
+                        words.join(" "),
+                        n
+                    ),
+                }
+            }
+            TaskRef::Pick => {
+                if !atty::is(atty::Stream::Stdin) {
+                    anyhow::bail!("Picking a task to link requires an interactive terminal");
+                }
+                crate::ui::oneshots::OneshotPickerApp::new(config.clone(), opts.fullscreen)
+                    .await?
+                    .run()
+                    .await?
+                    .map(|(id, _)| id)
+                    .ok_or_else(|| anyhow::anyhow!("Cancelled"))?
+            }
         };
-        let mut resolved = Vec::with_capacity(task_links.len());
-        for short_id in task_links {
-            let Some((task_id, _name)) =
-                crate::db::fetch_task_id_by_short_id(pool, short_id).await?
-            else {
-                anyhow::bail!("No task with short id {} exists", short_id);
-            };
-            resolved.push(task_id);
+
+        if let Some(delta) = entry_count {
+            // Completions only apply to incomplete oneshot tasks.
+            let info = crate::db::fetch_oneshot_task_by_id_for_update(pool, task_id)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Task with id {task_id} is not an addressable oneshot (completed \
+                         tasks and other kinds take no completions)"
+                    )
+                })?;
+            super::update::update_oneshot(pool, opts, &info, Some(delta)).await?;
         }
-        crate::db::link_mood_to_tasks(pool, mood_id, &resolved).await?;
+
+        match mood_id {
+            Some(mood_id) => crate::db::link_mood_to_tasks(pool, mood_id, &[task_id]).await?,
+            None if entry_count.is_none() => {
+                anyhow::bail!(
+                    "Task links (+<ref>) require a mood or journal entry to attach to"
+                );
+            }
+            None => {}
+        }
     }
 
     crate::output::display_entry(config, &entry_obj, opts)?;
