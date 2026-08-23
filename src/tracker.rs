@@ -601,7 +601,7 @@ async fn display_tracker<W: Write>(
     // interval slot (anchored at the tracker's configured anchor); otherwise
     // one dot per entry (newer entry wins the slot). Null trackers without
     // an interval are unsupported and skipped with an error.
-    let colors = tracker.colors.as_ref().unwrap_or(&config.tasks.colors);
+    let colors = tracker.colors();
     if let Some(interval) = tracker.interval {
         let (Ok(anchor_z), Ok(start_z), Ok(end_z)) = (
             crate::date::zoned_from_unix_secs(interval.anchor),

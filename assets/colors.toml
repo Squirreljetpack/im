@@ -1,0 +1,63 @@
+# colors.toml — named color palettes (themes) for tracker binning.
+#
+# Trackers in config.toml reference a theme here by name
+# (`colors = "rating"`), or specify an inline list (`colors = ["red", "blue"]`).
+# When a tracker sets no `colors`, or names a missing theme, it uses the
+# fallback palette defined in code (`DEFAULT_PALETTE`).
+#
+# The bundled file is the source of truth: `im` falls back to it whenever the
+# user's colors.toml is missing or unparsable.
+
+# --- themes named by the bundled config.toml ---
+
+# sleep/awake circadian blues and ambers
+sleep = [
+  "#3f6b93",
+  "#355B8F",
+  "#2C4B8B",
+  "#233B87",
+  "#1a2b83",
+  "#393075",
+  "#573462",
+  "#75384F",
+  "#933c3c",
+]
+awake = [
+  "#1E3E72",
+  "#786FA6",
+  "#C88EA7",
+  "#F5E1A4",
+  "#F5B752",
+  "#E08955",
+]
+
+
+forest = [
+  "#580000",
+  "#800000",
+  "#a63b00",
+  "#c66e00",
+  "#dfa000",
+  "#a0b000",
+  "#4da622",
+  "#008c48",
+  "#007766"
+]
+
+# rating — full red→violet spectrum
+rainbow = [
+  "#d32f2f",
+  "#f57c00",
+  "#fbc02d",
+  "#c0ca33",
+  "#7cb342",
+  "#43a047",
+  "#00acc1",
+  "#1e88e5",
+  "#5e35b1",
+  "#8e24aa",
+]
+
+# text-trackers: a single entry-badge color
+win = ["#b5b224"]
+grateful = ["#a7347e"]

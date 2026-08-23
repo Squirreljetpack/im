@@ -4,11 +4,13 @@ use sqlx::SqlitePool;
 use std::collections::{BTreeMap, HashMap};
 
 use crate::global;
-use crate::config::{Config, TrackerKind, TrackerSetting, DEFAULT_CONFIG, DEFAULT_MOODS};
+use crate::config::{
+    Config, TrackerKind, TrackerSetting, DEFAULT_CONFIG, DEFAULT_MOODS, DEFAULT_TRACKER_COLORS,
+};
 use crate::date;
 use crate::db::{TrackerPruneRule, TrackerScoreKindRow};
 use crate::editor::open_editor_at;
-use crate::paths::default_config_path;
+use crate::paths::{colors_path, default_config_path};
 
 /// `im :clear [@date]` — clear/delete all mood entries from that day.
 /// If interactive, confirm first, showing the computed date.
@@ -361,17 +363,17 @@ pub(super) async fn edit_config() -> Result<()> {
     open_editor_at(path)
 }
 
-/// `im :moods` — open the moods file (`[moods] source`, relative to
+/// `im :config moods` — open the moods file (`[moods] source`, relative to
 /// the config directory) in $VISUAL/$EDITOR.
 ///
-/// Like [`handle_config`], a missing file is created from the bundled moods
+/// Like [`edit_config`], a missing file is created from the bundled moods
 /// defaults first, announced with `ibog!`. When `[moods] source` is empty
 /// (the default) there is no moods file to open: warn that `source` must be
 /// set in the config, and do nothing else.
 pub(super) async fn edit_moods(config: &Config) -> Result<()> {
     if config.moods.source.as_os_str().is_empty() {
         cba::wbog!(
-            "im :moods needs a moods file, but [moods] source is unset: add \
+            "im :config moods needs a moods file, but [moods] source is unset: add \
              source = \"moods.toml\" to the [moods] section of your config"
         );
         return Ok(());
@@ -395,6 +397,33 @@ pub(super) async fn edit_moods(config: &Config) -> Result<()> {
         );
     }
     open_editor_at(&path)
+}
+
+/// `im :config colors` — open the colors file (`colors.toml`) in
+/// $VISUAL/$EDITOR.
+///
+/// Like [`edit_config`], a missing file is created from the bundled colors
+/// defaults first, announced with `ibog!`.
+pub(super) async fn edit_colors() -> Result<()> {
+    let path = colors_path();
+    let mut created = false;
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create config dir {:?}", parent))?;
+        }
+        std::fs::write(path, DEFAULT_TRACKER_COLORS.as_bytes())
+            .with_context(|| format!("Failed to write default colors file to {:?}", path))?;
+        created = true;
+    }
+    if created {
+        cba::ibog!(
+            "colors";
+            "Created file at {}",
+            path.display()
+        );
+    }
+    open_editor_at(path)
 }
 
 #[cfg(test)]

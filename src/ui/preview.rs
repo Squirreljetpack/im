@@ -439,6 +439,17 @@ pub(crate) fn build_today_preview(
         ));
     }
 
+    // Cumulative trackers show the interval's total sum/count.
+    if let EntryKind::Tracker(kind) = entry.kind
+        && let Some(total) = entry.tracker_total
+    {
+        let value_str = match kind {
+            crate::config::TrackerKind::Duration => crate::date::format_tracker_duration(total),
+            _ => total.to_string(),
+        };
+        lines.push(field_line("total", value_str));
+    }
+
     // Tracker entries attached to a mood (`tracker.mood`): a `mood:`
     // field with the badge in the mood's own color. The color is a pure
     // lookup in the process-wide mood-color cache — the mood's raw row
@@ -624,6 +635,7 @@ mod tests {
             recurring_window: None,
             tracker_interval: None,
             tracker_prev,
+            tracker_total: None,
             linked_trackers: Vec::new(),
             linked_tasks: Vec::new(),
             duration: None,
@@ -654,6 +666,48 @@ mod tests {
         );
     }
 
+    /// Cumulative trackers show `total:` (the interval's total sum/count).
+    #[test]
+    fn test_build_today_preview_total() {
+        let mk = |tracker_total: Option<f64>| TodayEntry {
+            id: Some(1),
+            time: 1_700_000_000,
+            time_label: "18:00".to_string(),
+            kind: EntryKind::Tracker(crate::config::TrackerKind::Integer),
+            label: "pushups: 15".to_string(),
+            body: String::new(),
+            task_id: None,
+            priority: 0,
+            task: None,
+            score: Some(15.0),
+            linked_mood: None,
+            recurring_window: None,
+            tracker_interval: None,
+            tracker_prev: None,
+            tracker_total,
+            linked_trackers: Vec::new(),
+            linked_tasks: Vec::new(),
+            duration: None,
+        };
+        let rendered: Vec<String> = build_today_preview(&mk(Some(40.0)), &config())
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+            .collect();
+        assert!(
+            rendered.iter().any(|l| l == "  total: 40"),
+            "expected '  total: 40', got {rendered:?}"
+        );
+
+        let rendered: Vec<String> = build_today_preview(&mk(None), &config())
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+            .collect();
+        assert!(
+            !rendered.iter().any(|l| l.trim_start().starts_with("total:")),
+            "unexpected total: field, got {rendered:?}"
+        );
+    }
+
     /// A mood entry with attached trackers and linked tasks shows a
     /// `linked:` field with one `  - {tracker} {payload}` line per tracker
     /// (name in the tracker's color) and one `  - {badge} {task name}` line
@@ -676,6 +730,7 @@ mod tests {
             recurring_window: None,
             tracker_interval: None,
             tracker_prev: None,
+            tracker_total: None,
             linked_trackers: vec![
                 LinkedTracker {
                     name: "sleep".to_string(),
@@ -743,6 +798,7 @@ mod tests {
             recurring_window: None,
             tracker_interval: None,
             tracker_prev: None,
+            tracker_total: None,
             linked_trackers: Vec::new(),
             linked_tasks: Vec::new(),
             duration: None,
@@ -798,6 +854,7 @@ mod tests {
             recurring_window: None,
             tracker_interval: None,
             tracker_prev: None,
+            tracker_total: None,
             linked_trackers: Vec::new(),
             linked_tasks: Vec::new(),
             duration: None,

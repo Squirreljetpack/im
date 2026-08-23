@@ -4,6 +4,25 @@ use super::types::{ColorBins, TrackerKind};
 use crate::date::Epoch;
 use cba::wbog;
 
+/// The `colors` field as written in the config: a TOML color list
+/// (`colors = ["dark_red", "dark_green"]`) or a theme-name string
+/// (`colors = "rating"`, resolved against `colors.toml` in
+/// `Config::init`). Defaults to the `"default"` theme when the key is
+/// absent. The paired [`TrackerSetting::colors`] is `Result<ColorBins,
+/// String>`: `Ok` holds an explicit palette, `Err` holds the theme name.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum RawColors {
+    List(ColorBins),
+    Name(String),
+}
+
+impl Default for RawColors {
+    fn default() -> Self {
+        RawColors::Name("default".to_string())
+    }
+}
+
 /// `interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }`.
 #[derive(Debug, Clone, Copy)]
 pub struct TrackerInterval {
@@ -93,7 +112,7 @@ impl Serialize for TrackerInterval {
 /// strings for `null` in replace mode (seconds-from-interval-start offsets).
 /// An invalid bound form is dropped with a warning; the old `min`/`max` keys
 /// and the two-element interval array form are hard errors.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TrackerSetting {
     /// How often the tracker is expected to be logged, e.g.
     /// `{ anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }`. With an
@@ -128,10 +147,16 @@ pub struct TrackerSetting {
     /// or `null` + replace without both bounds).
     #[serde(default)]
     pub strict: bool,
-    /// Override color palette for this tracker's binning in grid/today views.
-    /// When `Some`, takes precedence over `config.tasks.colors`.
-    /// Must have more than 2 entries; otherwise cleared to `None` at init.
-    pub colors: Option<ColorBins>,
+    /// Override color palette for this tracker's binning in grid/today views,
+    /// or a theme name resolved against `colors.toml` at `Config::init`.
+    /// `Ok` holds an explicit palette; `Err` holds the theme name (missing
+    /// keys fall back to the `default` theme). After `Config::init` every
+    /// value is `Ok` — read it via [`Self::colors`]. When unset the field
+    /// defaults to the `default` theme. This field is `#[serde(skip)]`: it is
+    /// resolved at `Config::init` and not round-tripped through the config
+    /// file.
+    #[serde(skip)]
+    pub colors: Result<ColorBins, String>,
 }
 
 /// A `low`/`high` bound as written in the config: a TOML number or a string.
@@ -168,7 +193,7 @@ struct RawTrackerSetting {
     #[serde(default)]
     strict: bool,
     #[serde(default)]
-    colors: Option<ColorBins>,
+    colors: RawColors,
 }
 
 /// The `low`/`high` form a given kind/mode accepts.
@@ -241,6 +266,13 @@ impl<'de> Deserialize<'de> for TrackerSetting {
     {
         let raw = RawTrackerSetting::deserialize(deserializer)?;
 
+        // A list becomes an explicit palette; a string names a theme
+        // resolved against `colors.toml` in `Config::init`.
+        let colors = match raw.colors {
+            RawColors::List(c) => Ok(c),
+            RawColors::Name(s) => Err(s),
+        };
+
         let form = BoundForm::of(raw.kind, raw.interval);
         let low = raw.low.and_then(|b| parse_bound("low", raw.kind, form, b));
         let high = raw
@@ -261,7 +293,7 @@ impl<'de> Deserialize<'de> for TrackerSetting {
                 low: None,
                 high: None,
                 strict,
-                colors: raw.colors,
+                colors,
             });
         }
         // Null strict gates *when* the tracker may be logged — a circular
@@ -284,22 +316,33 @@ impl<'de> Deserialize<'de> for TrackerSetting {
             low,
             high,
             strict,
-            colors: raw.colors,
+            colors,
         })
+    }
+}
+
+impl Default for TrackerSetting {
+    fn default() -> Self {
+        Self {
+            interval: None,
+            kind: TrackerKind::default(),
+            high: None,
+            low: None,
+            strict: false,
+            colors: Err("default".to_string()),
+        }
     }
 }
 
 impl TrackerSetting {
     /// Create a tracker setting for the given value kind; all optional
-    /// fields (`interval`, `low`/`high`, `strict`, `colors`) default.
+    /// fields (`interval`, `low`/`high`, `strict`, `colors`) default. The
+    /// `colors` field defaults to the `default` theme (resolved in
+    /// `Config::init`).
     pub fn new(kind: TrackerKind) -> Self {
         Self {
-            interval: None,
             kind,
-            high: None,
-            low: None,
-            strict: false,
-            colors: None,
+            ..Default::default()
         }
     }
 
@@ -329,9 +372,20 @@ impl TrackerSetting {
         self
     }
 
-    /// Override the color palette for grid/today binning.
+    /// Override the color palette for grid/today binning. The palette is
+    /// stored directly; `Config::init` never rewrites an explicit `Ok`.
     pub fn with_colors(mut self, colors: ColorBins) -> Self {
-        self.colors = Some(colors);
+        self.colors = Ok(colors);
         self
+    }
+
+    /// The resolved color palette for this tracker. `Config::init` resolves
+    /// every `colors` field to `Ok` (theme names are looked up in
+    /// `colors.toml` and missing themes fall back to the `default` theme),
+    /// so this always returns the palette.
+    pub fn colors(&self) -> &ColorBins {
+        self.colors
+            .as_ref()
+            .expect("tracker colors are resolved by Config::init")
     }
 }

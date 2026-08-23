@@ -1,8 +1,8 @@
 use std::env::args;
 
 use super::parse::{
-    parse_entry_command, parse_special_command, parse_task_command,
-    parse_task_edit_command, parse_view_command,
+    parse_entry_command, parse_special_command, parse_task_command, parse_task_edit_command,
+    parse_view_command,
 };
 use super::{Cli, CliOpts, Command, FLAG_CHARACTERS};
 use crate::types::{TodayHorizon, ViewVariant};
@@ -80,6 +80,13 @@ pub fn parse_from(args: Vec<String>) -> anyhow::Result<Command> {
 
     let first = &args[0];
 
+    // `im -` (exactly a bare dash) opens the tracker viewer — a
+    // matchmaker-backed list of trackers. A dash carrying any other text
+    // stays entry text (e.g. `im - ok` logs a mood entry).
+    if first == "-" && args.len() == 1 {
+        return Ok(Command::Matchmaker);
+    }
+
     // Special commands starting with ':'
     if first.starts_with(':') {
         return parse_special_command(&args);
@@ -115,7 +122,7 @@ pub fn parse_from(args: Vec<String>) -> anyhow::Result<Command> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{DbSubcommand, TrackerItem, TrackerPeriod, BODY_DELIMITER};
+    use super::super::{ConfigTarget, DbSubcommand, TrackerItem, TrackerPeriod, BODY_DELIMITER};
     use super::*;
     use crate::types::{Entry, Task, TaskKind, TaskRef, ViewMode};
 
@@ -980,24 +987,14 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_dash_falls_through_to_entry() {
-        // Every leading-dash argument list is an entry command; a bare
-        // `im -` logs a mood entry whose mood is `-`.
+    fn test_parse_dash() {
+        // A bare `im -` opens the tracker viewer (the matchmaker app).
         let cmd = parse_from(args(&["-"])).unwrap();
-        assert_eq!(
-            cmd,
-            Command::Entry(crate::types::Entry {
-                mood: "-".to_string(),
-                trackers: vec![],
-                task_ref: None,
-                count: None,
-                body: Err(0),
-                duration: None,
-            })
-        );
+        assert_eq!(cmd, Command::Matchmaker);
 
         // `im -7 ran` is entry text (a tracker pair), never a task update
-        // or a link — links use the '+' task_ref syntax now.
+        // or a link — links use the '+' task_ref syntax now. A dash with
+        // other text stays an entry; only the lone dash is the viewer.
         let cmd = parse_from(args(&["-7", "ran"])).unwrap();
         match cmd {
             Command::Entry(entry) => {
@@ -1068,10 +1065,7 @@ mod tests {
 
         // im +buy milk — word-query ref linking mood "milk".
         let e = entry_of(parse_from(args(&["+buy", "milk"])).unwrap());
-        assert_eq!(
-            e.task_ref,
-            Some(TaskRef::Words(vec!["buy".to_string()]))
-        );
+        assert_eq!(e.task_ref, Some(TaskRef::Words(vec!["buy".to_string()])));
         assert_eq!(e.count, None);
         assert_eq!(e.mood, "milk");
 
@@ -1284,10 +1278,7 @@ mod tests {
         match cmd {
             Command::Entry(entry) => {
                 assert_eq!(entry.mood, "good");
-                assert_eq!(
-                    entry.trackers,
-                    vec![("tracker".to_string(), String::new())]
-                );
+                assert_eq!(entry.trackers, vec![("tracker".to_string(), String::new())]);
                 assert_eq!(entry.task_ref, Some(TaskRef::Id(7)));
             }
             _ => panic!("Expected Entry command"),
@@ -1303,10 +1294,7 @@ mod tests {
         match cmd {
             Command::Entry(entry) => {
                 assert_eq!(entry.mood, "mood");
-                assert_eq!(
-                    entry.trackers,
-                    vec![("tracker".to_string(), String::new())]
-                );
+                assert_eq!(entry.trackers, vec![("tracker".to_string(), String::new())]);
                 assert_eq!(entry.task_ref, Some(TaskRef::Id(7)));
             }
             _ => panic!("Expected Entry command"),
@@ -1481,14 +1469,12 @@ mod tests {
         // it is a valueless tracker, not a flag either.
         let cli = parse_cli(args(&["-", "-q"])).unwrap();
         assert_eq!(cli.opts.qv, [0, 0]);
-        assert!(
-            matches!(
-                cli.cmd,
-                Command::Entry(e)
-                    if e.mood == "-"
-                        && e.trackers == vec![("q".to_string(), String::new())]
-            )
-        );
+        assert!(matches!(
+            cli.cmd,
+            Command::Entry(e)
+                if e.mood == "-"
+                    && e.trackers == vec![("q".to_string(), String::new())]
+        ));
 
         // Tokens with non-flag characters stop the flag run (-q5 is entry
         // text: a valueless tracker reference, like any trailing -<name>).
@@ -1632,25 +1618,89 @@ mod tests {
     #[test]
     fn test_parse_config() {
         let cmd = parse_from(args(&[":config"])).unwrap();
-        assert_eq!(cmd, Command::Config);
+        assert_eq!(
+            cmd,
+            Command::Config {
+                target: ConfigTarget::Main
+            }
+        );
     }
 
     #[test]
-    fn test_parse_config_rejects_extra_args() {
+    fn test_parse_config_c_alias() {
+        let cmd = parse_from(args(&[":c"])).unwrap();
+        assert_eq!(
+            cmd,
+            Command::Config {
+                target: ConfigTarget::Main
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_config_rejects_unknown_subcommand() {
         let result = parse_from(args(&[":config", "extra"]));
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_parse_moods() {
-        let cmd = parse_from(args(&[":moods"])).unwrap();
-        assert_eq!(cmd, Command::Moods);
+    fn test_parse_config_rejects_extra_args() {
+        let result = parse_from(args(&[":config", "colors", "extra"]));
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_parse_moods_rejects_extra_args() {
-        let result = parse_from(args(&[":moods", "extra"]));
+    fn test_parse_config_moods() {
+        let cmd = parse_from(args(&[":config", "moods"])).unwrap();
+        assert_eq!(
+            cmd,
+            Command::Config {
+                target: ConfigTarget::Moods
+            }
+        );
+        let cmd = parse_from(args(&[":c", "moods"])).unwrap();
+        assert_eq!(
+            cmd,
+            Command::Config {
+                target: ConfigTarget::Moods
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_config_colors() {
+        let cmd = parse_from(args(&[":config", "colors"])).unwrap();
+        assert_eq!(
+            cmd,
+            Command::Config {
+                target: ConfigTarget::Colors
+            }
+        );
+        let cmd = parse_from(args(&[":c", "colors"])).unwrap();
+        assert_eq!(
+            cmd,
+            Command::Config {
+                target: ConfigTarget::Colors
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_moods_retired() {
+        // `:moods` is retired in favor of `:config moods`.
+        let result = parse_from(args(&[":moods"]));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_matchmaker() {
+        let cmd = parse_from(args(&["-"])).unwrap();
+        assert_eq!(cmd, Command::Matchmaker);
+        // A dash with extra text stays entry text, not the viewer.
+        assert!(matches!(
+            parse_from(args(&["-", "extra"])).unwrap(),
+            Command::Entry(_)
+        ));
     }
 
     #[test]

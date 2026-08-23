@@ -95,8 +95,8 @@ pub fn get_mm_cfg() -> (
     mm_cfg.binds = default_binds().modify(|b| b.extend(mm_cfg.binds));
     // Force the selection prefixes off after the file loads: the views
     // render no row prefixes, and the config file must not re-enable them.
-    mm_cfg.render.results.multi_prefix = String::new();
-    mm_cfg.render.results.default_prefix = String::new();
+    mm_cfg.render.results.multi_prefix = " ".into();
+    mm_cfg.render.results.default_prefix = " ".into();
     mm_cfg.render.results.autoscroll.initial_preserved = 3;
     (mm_cfg.render, mm_cfg.binds, mm_cfg.tui, mm_cfg.overlay)
 }

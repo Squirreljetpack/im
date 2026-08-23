@@ -1,6 +1,6 @@
 [moods]
 
-# Mood-to-color anchors live in this file. Generate it by calling `im :moods`.
+# Mood-to-color anchors live in this file. Generate it by calling `im :config moods`.
 # source = "moods.toml"
 
 # Instruction prefix for embedding model
@@ -126,7 +126,7 @@ persist_pending_seconds = 300
 #    "6m 30s". `-mile 390` is an error — write `-mile 6m 30s`.
 # text:
 #  - Plain text entry; the value is stored verbatim.
-#  - colors override is limited to length 1.
+#  - colors override is a palette (text trackers use its first color).
 # strict:
 #  - With low/high: numeric kinds reject values outside the inclusive span;
 #    text rejects messages whose length in characters is outside it; null
@@ -141,24 +141,14 @@ interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }
 # (wrapping past midnight).
 low = "20h"
 high = "4h"
-colors = [
-  "#3f6b93",
-  "#355B8F",
-  "#2C4B8B",
-  "#233B87",
-  "#1a2b83",
-  "#393075",
-  "#573462",
-  "#75384F",
-  "#933c3c",
-]
+colors = "sleep"
 
 [tracker.awake]
 kind = "null"
 interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }
 low = "4h"
 high = "12h"
-colors = ["#1E3E72", "#786FA6", "#C88EA7", "#F5E1A4", "#F5B752", "#E08955"]
+colors = "awake"
 
 [tracker.rating]
 kind = "float"
@@ -167,52 +157,29 @@ low = 0
 high = 9
 # strict rejects values outside the inclusive [0, 9] span at log time.
 strict = true
-# colors = [
-#   "#580000",
-#   "#800000",
-#   "#a63b00",
-#   "#c66e00",
-#   "#dfa000",
-#   "#a0b000",
-#   "#4da622",
-#   "#008c48",
-#   "#007766"
-# ]
-colors = [
-  "#d32f2f",
-  "#f57c00",
-  "#fbc02d",
-  "#c0ca33",
-  "#7cb342",
-  "#43a047",
-  "#00acc1",
-  "#1e88e5",
-  "#5e35b1",
-  "#8e24aa",
-]
+colors = "forest"
 
 [tracker.pushups]
 kind = "integer"
 interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day", cumulative = true }
 low = 10
+high = 100
 # cumulative: every log in the period is kept; the period's grid dot shows
 # the sum of its values.
 
-# mile run time, e.g. -mile 6m 30s
+# mile run time, e.g. -mile "6m 30s"
 [tracker.mile]
 kind = "duration"
-interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }
 low = "4m"
 high = "10m"
-# Values are duration strings, stored as seconds and displayed as "6m 30s".
 
 [tracker.win]
 kind = "text"
-colors = ["#b5b224"]
+colors = "win"
 
 [tracker.thought]
 kind = "text"
 
 [tracker.grateful]
 kind = "text"
-colors = ["#a7347e"]
+colors = "grateful"

@@ -612,10 +612,10 @@ mod tests {
                 cumulative: false,
             }),
             kind: crate::config::TrackerKind::Null,
-            low: Some(23.0 * 3600.0),  // 23:00, seconds from interval start
-            high: Some(2.0 * 3600.0),  // 02:00, seconds from interval start
+            low: Some(23.0 * 3600.0), // 23:00, seconds from interval start
+            high: Some(2.0 * 3600.0), // 02:00, seconds from interval start
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         }
     }
 

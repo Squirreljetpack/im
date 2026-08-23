@@ -7,6 +7,7 @@ pub mod preview;
 pub mod previewer;
 pub mod tasks;
 pub mod today;
+pub mod tracker_picker;
 
 pub use common::*;
 pub use preview::*;

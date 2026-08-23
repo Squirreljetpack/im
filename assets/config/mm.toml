@@ -3,6 +3,10 @@ percentage = 80
 min = 10
 max = 25
 
+[query]
+prompt_style.fg = "Gray"
+prompt_style.modifier = "ITALIC"
+
 [ui]
 mouse_events = true
 border = { type = "Plain" }

@@ -67,30 +67,36 @@ interval = { anchor = "2020-01-01T00:00:00-04:00", span = "1 day" }
 kind = "float"
 low = 0
 high = 10
+colors = "sleep"
 
 [tracker.run_times]
 interval = { anchor = "2020-01-01T00:00:00-04:00", span = "1 week" }
 kind = "float"
 low = 100
 high = 0
+colors = "rating"
 
 # Interval trackers without low/high — binning falls back to the middle color
 [tracker.water]
 interval = { anchor = "2020-01-01T00:00:00-04:00", span = "1 day" }
 kind = "float"
+colors = "awake"
 
 # Interval text tracker — entries stored as strings, no numeric binning
 [tracker.notes]
 interval = { anchor = "2020-01-01T00:00:00-04:00", span = "1 week" }
 kind = "text"
+colors = "grateful"
 
 # Non-interval integer tracker with only low (no high — bins from low upward).
 [tracker.steps]
 kind = "integer"
 low = 0
+colors = "rating"
 
 [tracker.mood_notes]
 kind = "text"
+colors = "grateful"
 
 # Tracker with values spanning below low, in range, and above high
 # to exercise the full color binning palette.
@@ -99,6 +105,7 @@ interval = { anchor = "2020-01-01T00:00:00-04:00", span = "1 day" }
 kind = "integer"
 low = 10
 high = 30
+colors = "rating"
 [editor]
 # Body-editor templates per entry kind (arrays): a bare `.` opens the
 # editor seeded with the first template, `..` with the second, and so on;

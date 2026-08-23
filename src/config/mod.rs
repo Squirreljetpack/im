@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::cli::FLAG_CHARACTERS;
+use crate::paths;
 
 #[cfg(debug_assertions)]
 pub const DEFAULT_CONFIG: &str = include_str!("../../assets/dev.toml");
@@ -16,8 +17,13 @@ pub const DEFAULT_MOODS: &str = include_str!("../../assets/moods.dev.toml");
 #[cfg(not(debug_assertions))]
 pub const DEFAULT_MOODS: &str = include_str!("../../assets/moods.toml");
 
+pub const DEFAULT_TRACKER_COLORS: &str = include_str!("../../assets/colors.toml");
+
 mod types;
 pub use types::*;
+
+mod colors;
+pub use colors::*;
 
 mod moods;
 pub use moods::*;
@@ -110,33 +116,6 @@ impl Config {
                 );
                 return false;
             }
-            // Validate tracker-level color overrides: only an empty palette
-            // is unusable — single- and two-color palettes are fine, every
-            // badge path degrades to the first/last (or sole) color — so
-            // clear it and warn.
-            if let Some(ref colors) = setting.colors
-                && colors.is_empty() {
-                    wbog!(
-                        "config";
-                        "Ignoring empty colors override on Tracker '{}'",
-                        name
-                    );
-                    setting.colors = None;
-                }
-            // Text trackers have no score: their override palette, when
-            // present, must be exactly one color (the entry-badge color);
-            // anything else is meaningless, so clear it and warn.
-            if setting.kind == TrackerKind::Text
-                && let Some(ref colors) = setting.colors
-                    && colors.len() != 1 {
-                        wbog!(
-                            "config";
-                            "Ignoring colors override on text Tracker '{}' with {} entries (text trackers take exactly 1 color)",
-                            name,
-                            colors.len()
-                        );
-                        setting.colors = None;
-                    }
             // A zero interval span would break the calendar slot math, so
             // clear it and warn (parse_span already rejects non-positive
             // input, so this only guards hand-constructed values).
@@ -152,14 +131,60 @@ impl Config {
             }
             true
         });
-        // tasks.colors drives the completion badge and numeric binning; it
-        // needs at least 3 entries to be meaningful, so fall back to the
-        // default palette when fewer than three are configured.
+        // Resolve every tracker's `colors` field against `colors.toml`.
+        self.resolve_tracker_colors();
+        // tasks.colors drives the completion badge; when fewer than 3
+        // colors are configured it falls back to the default palette.
         if self.tasks.colors.len() < 3 {
             wbog!(
                 "Less than 3 colors defined for config.tasks.colors, overriding with the default."
             );
             self.tasks.colors = Default::default();
+        }
+    }
+
+    /// Resolve the tracker color palettes against `colors.toml`.
+    ///
+    /// Each tracker's `colors` field is either an explicit `Ok(ColorBins)`
+    /// or an `Err(theme_name)` naming a palette in the colors file. The
+    /// file is loaded with `load_type_or_default`, so a missing or
+    /// unparsable file falls back to the bundled `colors.toml` (`ColorsFile`
+    /// `Default`). The effective default palette is the file's `default` key
+    /// when present and non-empty, otherwise the code-defined
+    /// `DEFAULT_TRACKER_PALETTE`. An `Err` theme missing or empty in the
+    /// file resolves to that default palette (with a warning unless the
+    /// theme was the implicit `default`); an explicit `Ok` palette that is
+    /// empty resolves to `DEFAULT_TRACKER_PALETTE`. After this runs every
+    /// `colors` field is `Ok`.
+    fn resolve_tracker_colors(&mut self) {
+        let colors_file: ColorsFile =
+            cba::bo::load_type_or_default(paths::colors_path(), |s| toml::from_str(s));
+        // The default palette is the colors file's `default` key when present
+        // and non-empty; otherwise the code-defined `DEFAULT_TRACKER_PALETTE`.
+        let default_palette = colors_file.default_palette();
+
+        for setting in self.tracker.values_mut() {
+            let resolved: ColorBins = match &setting.colors {
+                // An explicit but empty list uses the code palette.
+                Ok(palette) if palette.is_empty() => {
+                    ColorBins::from(DEFAULT_TRACKER_PALETTE.to_vec())
+                }
+                Ok(palette) => palette.clone(),
+                Err(theme) => match colors_file.theme(theme) {
+                    Some(palette) => ColorBins::from(palette.clone()),
+                    None => {
+                        if theme != "default" {
+                            wbog!(
+                                "config";
+                                "colors theme '{}' not found (or empty): using default palette",
+                                theme
+                            );
+                        }
+                        default_palette.clone()
+                    }
+                },
+            };
+            setting.colors = Ok(resolved);
         }
     }
 }
@@ -201,7 +226,7 @@ mod tests {
         assert!(is_valid_tracker_name("query")); // 'q' inside a longer name is fine
         assert!(is_valid_tracker_name("vibe"));
         assert!(is_valid_tracker_name("flag")); // 'F' inside a longer name is fine
-        // ':' prefix collides with grid view specifiers
+                                                // ':' prefix collides with grid view specifiers
         assert!(!is_valid_tracker_name(":foo"));
         // forbid '-' or whitespace
         assert!(!is_valid_tracker_name("sleep-time"));
@@ -298,24 +323,24 @@ mod tests {
     }
 
     #[test]
-    fn test_init_clears_empty_tracker_colors() {
+    fn test_init_resolves_tracker_colors() {
         let mut config = Config::default();
 
-        // An empty colors override should be cleared and a warning emitted
+        // An empty explicit palette is unusable, so init resolves it to the
+        // default theme palette.
         config.tracker.insert(
             "bad_colors".to_string(),
             TrackerSetting {
-                colors: Some(ColorBins::from(vec![])),
+                colors: Ok(ColorBins::from(vec![])),
                 ..Default::default()
             },
         );
-        // Single- and two-color palettes are valid now — they should be kept
-        // (explicit non-text kinds: text trackers are restricted to 1 color).
+        // Single- and two-color palettes are kept verbatim.
         config.tracker.insert(
             "one_color".to_string(),
             TrackerSetting {
                 kind: TrackerKind::Integer,
-                colors: Some(ColorBins::from(vec![crossterm::style::Color::DarkRed])),
+                colors: Ok(ColorBins::from(vec![crossterm::style::Color::DarkRed])),
                 ..Default::default()
             },
         );
@@ -323,19 +348,19 @@ mod tests {
             "two_colors".to_string(),
             TrackerSetting {
                 kind: TrackerKind::Integer,
-                colors: Some(ColorBins::from(vec![
+                colors: Ok(ColorBins::from(vec![
                     crossterm::style::Color::DarkRed,
                     crossterm::style::Color::DarkGreen,
                 ])),
                 ..Default::default()
             },
         );
-        // colors with 3+ entries should be kept
+        // A 3-color palette is kept verbatim.
         config.tracker.insert(
             "good_colors".to_string(),
             TrackerSetting {
                 kind: TrackerKind::Integer,
-                colors: Some(ColorBins::from(vec![
+                colors: Ok(ColorBins::from(vec![
                     crossterm::style::Color::DarkRed,
                     crossterm::style::Color::DarkYellow,
                     crossterm::style::Color::DarkGreen,
@@ -343,62 +368,63 @@ mod tests {
                 ..Default::default()
             },
         );
-        // None colors should be left as None
+        // A tracker with no colors defaults to the `default` theme.
         config
             .tracker
             .insert("no_colors".to_string(), TrackerSetting::default());
+        // A theme name missing from colors.toml resolves to the default
+        // theme palette.
+        config.tracker.insert(
+            "missing_theme".to_string(),
+            TrackerSetting {
+                colors: Err("nonexistent".to_string()),
+                ..Default::default()
+            },
+        );
 
         config.init();
 
-        assert!(config.tracker["bad_colors"].colors.is_none());
-        assert_eq!(
-            config.tracker["one_color"].colors.as_ref().unwrap().len(),
-            1
-        );
-        assert_eq!(
-            config.tracker["two_colors"].colors.as_ref().unwrap().len(),
-            2
-        );
-        assert!(config.tracker["good_colors"].colors.is_some());
-        assert_eq!(
-            config.tracker["good_colors"].colors.as_ref().unwrap().len(),
-            3
-        );
-        assert!(config.tracker["no_colors"].colors.is_none());
+        // The default theme in the bundled colors.toml has 10 colors.
+        assert_eq!(config.tracker["bad_colors"].colors().len(), 10);
+        assert_eq!(config.tracker["one_color"].colors().len(), 1);
+        assert_eq!(config.tracker["two_colors"].colors().len(), 2);
+        assert_eq!(config.tracker["good_colors"].colors().len(), 3);
+        assert_eq!(config.tracker["no_colors"].colors().len(), 10);
+        assert_eq!(config.tracker["missing_theme"].colors().len(), 10);
     }
 
     #[test]
-    fn test_init_clears_non_single_text_tracker_colors() {
+    fn test_init_resolves_text_tracker_colors() {
         let mut config = Config::default();
 
-        // A text tracker override must be exactly 1 color (entry-badge
-        // color); 2+ entries are cleared with a warning.
+        // A text tracker with a 2-color palette keeps it; the first color is
+        // the entry-badge color.
         config.tracker.insert(
-            "bad_text".to_string(),
+            "multi_text".to_string(),
             TrackerSetting {
                 kind: TrackerKind::Text,
-                colors: Some(ColorBins::from(vec![
+                colors: Ok(ColorBins::from(vec![
                     crossterm::style::Color::DarkRed,
                     crossterm::style::Color::DarkGreen,
                 ])),
                 ..Default::default()
             },
         );
-        // A single-color text override is valid and survives.
+        // A single-color text override is kept verbatim.
         config.tracker.insert(
             "good_text".to_string(),
             TrackerSetting {
                 kind: TrackerKind::Text,
-                colors: Some(ColorBins::from(vec![crossterm::style::Color::DarkRed])),
+                colors: Ok(ColorBins::from(vec![crossterm::style::Color::DarkRed])),
                 ..Default::default()
             },
         );
-        // Non-text trackers are unaffected by the single-color rule.
+        // Non-text trackers are unaffected by the text rule.
         config.tracker.insert(
             "integer_multi".to_string(),
             TrackerSetting {
                 kind: TrackerKind::Integer,
-                colors: Some(ColorBins::from(vec![
+                colors: Ok(ColorBins::from(vec![
                     crossterm::style::Color::DarkRed,
                     crossterm::style::Color::DarkGreen,
                 ])),
@@ -408,15 +434,9 @@ mod tests {
 
         config.init();
 
-        assert!(config.tracker["bad_text"].colors.is_none());
-        assert_eq!(
-            config.tracker["good_text"].colors.as_ref().unwrap().len(),
-            1
-        );
-        assert_eq!(
-            config.tracker["integer_multi"].colors.as_ref().unwrap().len(),
-            2
-        );
+        assert_eq!(config.tracker["multi_text"].colors().len(), 2);
+        assert_eq!(config.tracker["good_text"].colors().len(), 1);
+        assert_eq!(config.tracker["integer_multi"].colors().len(), 2);
     }
 
     #[test]
@@ -431,6 +451,29 @@ mod tests {
             config.tasks.colors = ColorBins::from(small);
             config.init();
             assert_eq!(config.tasks.colors.len(), 3);
+        }
+    }
+
+    #[test]
+    fn test_bundled_config_tracker_themes_resolve() {
+        // Every tracker in the bundled config (dev.toml under debug,
+        // config.toml under release) names a theme; init must resolve each
+        // to a non-empty palette from the bundled colors.toml.
+        let mut config = Config::default();
+        config.init();
+        for (name, setting) in &config.tracker {
+            assert!(
+                !setting.colors().is_empty(),
+                "tracker '{name}' resolved to an empty color palette"
+            );
+        }
+        #[cfg(debug_assertions)]
+        {
+            // dev.toml references these themes by name.
+            assert_eq!(config.tracker["sleep"].colors().len(), 9);
+            assert_eq!(config.tracker["temperature"].colors().len(), 10);
+            assert_eq!(config.tracker["notes"].colors().len(), 1);
+            assert_eq!(config.tracker["water"].colors().len(), 6);
         }
     }
 
@@ -529,10 +572,9 @@ mod tests {
 
         // Non-table, non-array forms (e.g. a plain string) are rejected,
         // and unknown table keys error.
-        let err = toml::from_str::<Config>(
-            "[tracker.sleep]\ninterval = \"1 day\"\nkind = \"float\"\n",
-        )
-        .unwrap_err();
+        let err =
+            toml::from_str::<Config>("[tracker.sleep]\ninterval = \"1 day\"\nkind = \"float\"\n")
+                .unwrap_err();
         assert!(
             err.to_string().contains("invalid type"),
             "unexpected error: {err}"
@@ -662,15 +704,15 @@ mod tests {
             "#,
         )
         .expect("trackers parse");
-        assert_eq!(cfg.tracker["floaty"].low, None);      // "4h" dropped
+        assert_eq!(cfg.tracker["floaty"].low, None); // "4h" dropped
         assert_eq!(cfg.tracker["floaty"].high, Some(9.0)); // plain number kept
-        assert_eq!(cfg.tracker["wholey"].low, None);      // 4.5 not whole
-        assert_eq!(cfg.tracker["wholey"].high, None);     // "4h" dropped
-        assert_eq!(cfg.tracker["timed"].low, None);       // bare 390 dropped
+        assert_eq!(cfg.tracker["wholey"].low, None); // 4.5 not whole
+        assert_eq!(cfg.tracker["wholey"].high, None); // "4h" dropped
+        assert_eq!(cfg.tracker["timed"].low, None); // bare 390 dropped
         assert_eq!(cfg.tracker["timed"].high, Some(600.0));
-        assert_eq!(cfg.tracker["mark"].low, None);        // bare number dropped for null replace
+        assert_eq!(cfg.tracker["mark"].low, None); // bare number dropped for null replace
         assert_eq!(cfg.tracker["mark"].high, Some(14400.0));
-        assert_eq!(cfg.tracker["counted"].low, None);     // "4h" dropped for null cumulative
+        assert_eq!(cfg.tracker["counted"].low, None); // "4h" dropped for null cumulative
         assert_eq!(cfg.tracker["counted"].high, Some(5.0));
 
         // Text bounds without strict are dropped (message-length thresholds

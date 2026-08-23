@@ -98,9 +98,13 @@ pub async fn execute_command<W: Write>(
             Ok(())
         }
 
-        Command::Config => maintenance::edit_config().await,
+        Command::Config { target } => match target {
+            crate::cli::ConfigTarget::Main => maintenance::edit_config().await,
+            crate::cli::ConfigTarget::Moods => maintenance::edit_moods(config).await,
+            crate::cli::ConfigTarget::Colors => maintenance::edit_colors().await,
+        },
 
-        Command::Moods => maintenance::edit_moods(config).await,
+        Command::Matchmaker => crate::ui::tracker_picker::run_trackers_app(config).await,
 
         Command::Db { sub } => match sub {
             crate::cli::DbSubcommand::Prune => maintenance::db_prune(pool, config).await,

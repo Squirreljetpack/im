@@ -63,4 +63,18 @@ expr_as_path_fn!(
     config_dir_impl().unwrap_or_default().join("mm.toml")
 );
 
+#[cfg(debug_assertions)]
+expr_as_path_fn!(
+    colors_path,
+    config_dir_impl()
+        .unwrap_or_default()
+        .join("colors.dev.toml")
+);
+
+#[cfg(not(debug_assertions))]
+expr_as_path_fn!(
+    colors_path,
+    config_dir_impl().unwrap_or_default().join("colors.toml")
+);
+
 expr_as_path_fn!(log_path, state_dir().join(format!("{BINARY_SHORT}.log")));

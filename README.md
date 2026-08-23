@@ -107,12 +107,13 @@ Views:
 
 Trackers and grids:
   im :[week|month|year] [ids]                    dot-sequence tracker grid
-                                                        ids: <tracker> or @<recurring-name>
+                                                        ids: <tracker> or @<recurring name>
                                                         period defaults to "week"
 
 Other:
-  im :config | :c                                open the config in $VISUAL / $EDITOR
-  im :moods                                      open the moods config file
+  im :config | :c [file]                         open the config in $VISUAL / $EDITOR
+                                                        file: moods | colors
+  im -                                           browse trackers
   im :embed                                      embed stdin lines (one vector/line)
   im :color <mood>                               projected mood color diagnostic
   im :clear [@<date>]                            clear all mood entries from a day

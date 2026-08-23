@@ -108,6 +108,10 @@ pub struct TodayEntry {
     /// (strictly earlier; the preview's `prev:` field). `None` when no
     /// earlier entry exists.
     pub tracker_prev: Option<Epoch>,
+    /// Cumulative tracker entries with an interval: the total sum (or count
+    /// for null trackers) across the entire interval slot. `None` for
+    /// non-cumulative trackers or other entry kinds.
+    pub tracker_total: Option<f64>,
     /// Mood entries only: trackers attached to the mood row
     /// (`tracker.mood`) and tasks linked via `mood.todo_id`, rendered as
     /// the preview's `linked:` section. Empty for every other entry kind.
@@ -157,7 +161,7 @@ impl TodayEntry {
                 };
                 (
                     Some(glyph),
-                    tracker_entry_color(tracker, &config.tasks.colors, self.time, self.score),
+                    tracker_entry_color(tracker, self.time, self.score),
                 )
             }
             EntryKind::Task(_) => {
@@ -242,17 +246,16 @@ pub(crate) fn today_sort(a: &TodayEntry, b: &TodayEntry) -> std::cmp::Ordering {
 
 /// The color of a tracker entry's badge for the given decoded score: Null
 /// trackers with an interval use the time-of-day coloring; numeric trackers
-/// bin the score over the configured palette; text trackers use the
-/// single-color palette override (validated to exactly 1 entry in
-/// Config::init) or neutral gray. Shared by the main tracker rows and the
-/// linked-tracker lines in mood previews.
+/// bin the score over the tracker's resolved palette (the `default` theme
+/// from `colors.toml` when the tracker sets no `colors`); text trackers use
+/// the first palette color or neutral gray. Shared by the main tracker rows
+/// and the linked-tracker lines in mood previews.
 fn tracker_entry_color(
     tracker: &crate::config::TrackerSetting,
-    task_colors: &crate::config::ColorBins,
     time: i64,
     score: Option<f64>,
 ) -> RatColor {
-    let colors = tracker.colors.as_ref().unwrap_or(task_colors);
+    let colors = tracker.colors();
     match tracker.kind {
         TrackerKind::Null => RatColor::from_crossterm(crate::badge::null_tracker_color(
             colors,
@@ -260,13 +263,10 @@ fn tracker_entry_color(
             time,
             score.unwrap_or(0.0),
         )),
-        // Text entries have no score; a single-color palette
-        // override (validated to exactly 1 entry in Config::init)
-        // colors their badge, otherwise neutral gray.
-        TrackerKind::Text => tracker
-            .colors
-            .as_ref()
-            .and_then(|c| c.first())
+        // Text entries have no score; the first palette color colors their
+        // badge, otherwise neutral gray.
+        TrackerKind::Text => colors
+            .first()
             .map(|c| RatColor::from_crossterm(*c))
             .unwrap_or(RatColor::DarkGray),
         _ => match score {
@@ -374,7 +374,7 @@ pub async fn fetch_today_entries(
                     l_trackers.push(LinkedTracker {
                         name: row.tracker_type.clone(),
                         payload,
-                        color: tracker_entry_color(tracker, &config.tasks.colors, row.time, score),
+                        color: tracker_entry_color(tracker, row.time, score),
                     });
                 }
             }
@@ -410,6 +410,7 @@ pub async fn fetch_today_entries(
                 recurring_window: None,
                 tracker_interval: None,
                 tracker_prev: None,
+                tracker_total: None,
                 linked_trackers: l_trackers,
                 linked_tasks: l_tasks,
                 duration: mood_duration,
@@ -431,6 +432,52 @@ pub async fn fetch_today_entries(
         )
         .await?;
 
+        // Cumulative trackers: pre-fetch rows for the relevant interval slots so that
+        // cumulative totals/counts up to and including each entry can be calculated.
+        let mut cumulative_rows_by_type: std::collections::HashMap<
+            String,
+            Vec<crate::db::TrackerEntryRow>,
+        > = std::collections::HashMap::new();
+
+        for row in &trackers {
+            if let Some(tracker) = config.tracker.get(&row.tracker_type) {
+                if tracker.interval.is_some_and(|iv| iv.cumulative) {
+                    cumulative_rows_by_type
+                        .entry(row.tracker_type.clone())
+                        .or_default();
+                }
+            }
+        }
+
+        for (ttype, rows) in cumulative_rows_by_type.iter_mut() {
+            if let Some(tracker) = config.tracker.get(ttype) {
+                if let Some(iv) = tracker.interval {
+                    let min_slot_start = trackers
+                        .iter()
+                        .filter(|t| &t.tracker_type == ttype)
+                        .filter_map(|t| crate::date::interval_start_unix_secs(iv.anchor, iv.span, t.time))
+                        .min()
+                        .unwrap_or(day_start_epoch);
+
+                    if min_slot_start < day_start_epoch {
+                        *rows = crate::db::fetch_tracker_entries(
+                            pool,
+                            ttype,
+                            min_slot_start,
+                            horizon_end,
+                        )
+                        .await?;
+                    } else {
+                        *rows = trackers
+                            .iter()
+                            .filter(|t| &t.tracker_type == ttype)
+                            .cloned()
+                            .collect();
+                    }
+                }
+            }
+        }
+
         for row in trackers {
             let tracker_id = row.id;
             let tracker_type = row.tracker_type;
@@ -438,26 +485,84 @@ pub async fn fetch_today_entries(
             let tracker = config.tracker.get(&tracker_type).ok_or_else(|| {
                 anyhow::anyhow!("Unknown tracker '{}' not found in config", tracker_type)
             })?;
+            let is_cumulative = tracker.interval.is_some_and(|iv| iv.cumulative);
+            let (cumulative_score, tracker_total) = if is_cumulative {
+                let iv = tracker.interval.unwrap();
+                let (slot_start, slot_end) = crate::date::interval_slot_unix_secs(iv.anchor, iv.span, time)
+                    .unwrap_or((time, time));
+                let all_rows = cumulative_rows_by_type
+                    .get(&tracker_type)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let slot_entries_up_to_cur = all_rows.iter().filter(|e| {
+                    e.time >= slot_start
+                        && (e.time < time || (e.time == time && e.id <= tracker_id))
+                });
+                let all_slot_entries = all_rows.iter().filter(|e| {
+                    e.time >= slot_start && e.time < slot_end
+                });
+                match tracker.kind {
+                    TrackerKind::Null => (
+                        Some(slot_entries_up_to_cur.count() as f64),
+                        Some(all_slot_entries.count() as f64),
+                    ),
+                    TrackerKind::Text => (None, None),
+                    _ => (
+                        Some(
+                            slot_entries_up_to_cur
+                                .map(|e| crate::tracker::score_f64(&e.score))
+                                .sum(),
+                        ),
+                        Some(
+                            all_slot_entries
+                                .map(|e| crate::tracker::score_f64(&e.score))
+                                .sum(),
+                        ),
+                    ),
+                }
+            } else {
+                (None, None)
+            };
+
             let (label, score) = match tracker.kind {
                 TrackerKind::Text => (format!("{}: {}", tracker_type, row.score), None),
                 TrackerKind::Integer | TrackerKind::Float => {
-                    let score = crate::tracker::score_f64(&row.score);
-                    (format!("{}: {}", tracker_type, score), Some(score))
+                    let raw = crate::tracker::score_f64(&row.score);
+                    let score = if is_cumulative {
+                        cumulative_score
+                    } else {
+                        Some(raw)
+                    };
+                    (format!("{}: {}", tracker_type, raw), score)
                 }
                 TrackerKind::Duration => {
-                    let score = crate::tracker::score_f64(&row.score);
+                    let raw = crate::tracker::score_f64(&row.score);
+                    let score = if is_cumulative {
+                        cumulative_score
+                    } else {
+                        Some(raw)
+                    };
                     (
                         format!(
                             "{}: {}",
                             tracker_type,
-                            crate::date::format_tracker_duration(score)
+                            crate::date::format_tracker_duration(raw)
                         ),
-                        Some(score),
+                        score,
                     )
                 }
                 // Null rows carry no payload: the name alone (the count
                 // lives in the grid, the moment in the entry's own time).
-                TrackerKind::Null => (tracker_type.clone(), None),
+                // Cumulative null rows carry the cumulative count in `score`
+                // for badge binning.
+                TrackerKind::Null => {
+                    let score = if is_cumulative {
+                        cumulative_score
+                    } else {
+                        None
+                    };
+                    (tracker_type.clone(), score)
+                }
             };
             entries.push(TodayEntry {
                 id: Some(tracker_id),
@@ -476,6 +581,7 @@ pub async fn fetch_today_entries(
                 recurring_window: None,
                 tracker_interval: tracker.interval.map(|iv| (iv.anchor, iv.span)),
                 tracker_prev: tracker_prevs.get(&tracker_id).copied().flatten(),
+                tracker_total,
                 linked_trackers: Vec::new(),
                 linked_tasks: Vec::new(),
                 duration: None,
@@ -507,6 +613,7 @@ pub async fn fetch_today_entries(
                 recurring_window: None,
                 tracker_interval: None,
                 tracker_prev: None,
+                tracker_total: None,
                 linked_trackers: Vec::new(),
                 linked_tasks: Vec::new(),
                 duration: None,
@@ -546,6 +653,7 @@ pub async fn fetch_today_entries(
                     recurring_window: None,
                     tracker_interval: None,
                     tracker_prev: None,
+                    tracker_total: None,
                     linked_trackers: Vec::new(),
                     linked_tasks: Vec::new(),
                     duration: None,
@@ -577,6 +685,7 @@ pub async fn fetch_today_entries(
                     recurring_window: None,
                     tracker_interval: None,
                     tracker_prev: None,
+                    tracker_total: None,
                     linked_trackers: Vec::new(),
                     linked_tasks: Vec::new(),
                     duration: None,
@@ -614,6 +723,7 @@ pub async fn fetch_today_entries(
                     recurring_window: Some(w.clone()),
                     tracker_interval: None,
                     tracker_prev: None,
+                    tracker_total: None,
                     linked_trackers: Vec::new(),
                     linked_tasks: Vec::new(),
                     duration: None,
@@ -648,6 +758,7 @@ pub async fn fetch_today_entries(
                         recurring_window: None,
                         tracker_interval: None,
                         tracker_prev: None,
+                        tracker_total: None,
                         linked_trackers: Vec::new(),
                         linked_tasks: Vec::new(),
                         duration: None,
@@ -1026,6 +1137,7 @@ mod tests {
             recurring_window: None,
             tracker_interval: None,
             tracker_prev: None,
+            tracker_total: None,
             linked_trackers: Vec::new(),
             linked_tasks: Vec::new(),
             duration: None,
@@ -1054,5 +1166,121 @@ mod tests {
                 (300, 2, String::new()),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_today_entries_cumulative_trackers() {
+        use crate::config::{TrackerInterval, TrackerSetting};
+        use crate::db::{create_entry, test_pool, EntryObject, TrackerObject, TrackerValue};
+
+        let pool = test_pool().await.unwrap();
+        let day_start = 1_700_000_000;
+        let mut config = Config::default();
+
+        let mut pushups_tracker = TrackerSetting::default();
+        pushups_tracker.kind = TrackerKind::Integer;
+        pushups_tracker.interval = Some(TrackerInterval {
+            anchor: day_start,
+            span: jiff::Span::new().days(1),
+            cumulative: true,
+        });
+        config
+            .tracker
+            .insert("pushups".to_string(), pushups_tracker);
+
+        let mut water_tracker = TrackerSetting::default();
+        water_tracker.kind = TrackerKind::Null;
+        water_tracker.interval = Some(TrackerInterval {
+            anchor: day_start,
+            span: jiff::Span::new().days(1),
+            cumulative: true,
+        });
+        config.tracker.insert("water".to_string(), water_tracker);
+
+        // Insert two pushups entries and two water entries on day_start
+        create_entry(
+            &pool,
+            &EntryObject {
+                mood: String::new(),
+                body: String::new(),
+                time: day_start + 1000,
+                duration: None,
+                score: None,
+                todo_id: None,
+                embedding: None,
+                trackers: vec![
+                    TrackerObject {
+                        tracker_type: "pushups".to_string(),
+                        value: TrackerValue::Integer(15),
+                        replace_slot: None,
+                    },
+                    TrackerObject {
+                        tracker_type: "water".to_string(),
+                        value: TrackerValue::Integer(0),
+                        replace_slot: None,
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+
+        create_entry(
+            &pool,
+            &EntryObject {
+                mood: String::new(),
+                body: String::new(),
+                time: day_start + 2000,
+                duration: None,
+                score: None,
+                todo_id: None,
+                embedding: None,
+                trackers: vec![
+                    TrackerObject {
+                        tracker_type: "pushups".to_string(),
+                        value: TrackerValue::Integer(25),
+                        replace_slot: None,
+                    },
+                    TrackerObject {
+                        tracker_type: "water".to_string(),
+                        value: TrackerValue::Integer(0),
+                        replace_slot: None,
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+
+        let TodayFetch { entries, .. } = fetch_today_entries(
+            &pool,
+            &config,
+            TodayHorizon::Today,
+            day_start,
+            ViewVariant::All,
+        )
+        .await
+        .unwrap();
+
+        let pushups: Vec<_> = entries
+            .iter()
+            .filter(|e| e.label.starts_with("pushups"))
+            .collect();
+        assert_eq!(pushups.len(), 2);
+        assert_eq!(pushups[0].label, "pushups: 15");
+        assert_eq!(pushups[0].score, Some(15.0));
+        assert_eq!(pushups[0].tracker_total, Some(40.0));
+        assert_eq!(pushups[1].label, "pushups: 25");
+        assert_eq!(pushups[1].score, Some(40.0));
+        assert_eq!(pushups[1].tracker_total, Some(40.0));
+
+        let water: Vec<_> = entries.iter().filter(|e| e.label == "water").collect();
+        assert_eq!(water.len(), 2);
+        assert_eq!(water[0].label, "water");
+        assert_eq!(water[0].score, Some(1.0));
+        assert_eq!(water[0].tracker_total, Some(2.0));
+        assert_eq!(water[1].label, "water");
+        assert_eq!(water[1].score, Some(2.0));
+        assert_eq!(water[1].tracker_total, Some(2.0));
     }
 }

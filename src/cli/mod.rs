@@ -52,6 +52,21 @@ pub struct Cli {
     pub cmd: Command,
 }
 
+/// Which file `im :config [<target>]` opens in $VISUAL/$EDITOR.
+/// `Main` is the active config; `Moods` the moods file named by
+/// `[moods] source`; `Colors` the colors file (`colors.toml`). `:c` is an
+/// alias for `:config`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConfigTarget {
+    /// `im :config` — the active config file.
+    #[default]
+    Main,
+    /// `im :config moods` — the moods file named by `[moods] source`.
+    Moods,
+    /// `im :config colors` — the colors file (`colors.toml`).
+    Colors,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Entry(Entry),
@@ -85,16 +100,18 @@ pub enum Command {
     /// `parse_cli`, before the command dispatchers — `parse_from` never sees
     /// a help token). Handlers print the contents of `assets/help.txt`.
     Help,
-    /// `im :config` — handlers open the active config file in
-    /// $VISUAL/$EDITOR via [`crate::editor::open_editor_at`]. The bundled
-    /// `assets/config.toml` is copied to the path first when missing.
-    Config,
-    /// `im :moods` — like `:config`, but opens the moods file named by
-    /// `[moods] source` (relative to the config directory) in
-    /// $VISUAL/$EDITOR. A missing file is created from the bundled moods
-    /// defaults first; when `source` is unset the handler warns that it
-    /// must be configured.
-    Moods,
+    /// `im :config [moods|colors]` — handlers open a config-style file in
+    /// $VISUAL/$EDITOR via [`crate::editor::open_editor_at`]. With no
+    /// subcommand the active config is opened (the bundled `assets/config.toml`
+    /// is copied to the path first when missing); `moods` opens the moods
+    /// file named by `[moods] source`; `colors` opens the colors file
+    /// (`colors.toml`). `:c` is an alias for `:config`.
+    Config { target: ConfigTarget },
+    /// `im -` — a matchmaker-backed viewer listing every configured tracker
+    /// (a single name column) with a live preview of each tracker's settings
+    /// and a row of colored cells (one per entry of its resolved color
+    /// palette).
+    Matchmaker,
     /// `im :db prune` — delete completed oneshot tasks and recurring
     /// tasks whose `end_time` has passed.
     Db {

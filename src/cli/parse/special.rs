@@ -1,4 +1,4 @@
-use super::super::Command;
+use super::super::{Command, ConfigTarget};
 use super::tracker::parse_tracker_command;
 
 pub(crate) fn parse_special_command(args: &[String]) -> anyhow::Result<Command> {
@@ -19,17 +19,19 @@ pub(crate) fn parse_special_command(args: &[String]) -> anyhow::Result<Command> 
     }
 
     if first == ":config" || first == ":c" {
-        if args.len() != 1 {
-            anyhow::bail!("Usage: im :config");
+        let target = match args.get(1).map(String::as_str) {
+            None => ConfigTarget::Main,
+            Some("moods") => ConfigTarget::Moods,
+            Some("colors") => ConfigTarget::Colors,
+            Some(other) => anyhow::bail!(
+                "Unknown :config subcommand '{}' (expected moods or colors)",
+                other
+            ),
+        };
+        if args.len() > 2 {
+            anyhow::bail!("Usage: im :config [moods|colors]");
         }
-        return Ok(Command::Config);
-    }
-
-    if first == ":moods" {
-        if args.len() != 1 {
-            anyhow::bail!("Usage: im :moods");
-        }
-        return Ok(Command::Moods);
+        return Ok(Command::Config { target });
     }
 
     if first == ":db" {
