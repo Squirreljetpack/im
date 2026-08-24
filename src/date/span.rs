@@ -7,7 +7,7 @@
 //! ([`current_interval_start_zoned`]), so "1 day" / "1 month" intervals
 //! respect DST and variable month lengths.
 
-use jiff::{tz::TimeZone, Span, Timestamp, Unit, Zoned};
+use jiff::{Span, Timestamp, Unit, Zoned, tz::TimeZone};
 
 /// A `jiff::Span` packed into an `i64` for database storage.
 pub type DbSpan = i64;

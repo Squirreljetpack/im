@@ -14,7 +14,10 @@ use super::views::attach_full_completions;
 pub async fn create_entry(pool: &SqlitePool, entry: &EntryObject) -> Result<Option<i64>> {
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
 
-    let insert_mood = !entry.mood.is_empty() || !entry.body.is_empty() || entry.duration.is_some() || entry.todo_id.is_some();
+    let insert_mood = !entry.mood.is_empty()
+        || !entry.body.is_empty()
+        || entry.duration.is_some()
+        || entry.todo_id.is_some();
     let mood_id: Option<i64> = if insert_mood {
         let id: i64 = if let Some(blob) = &entry.embedding {
             sqlx::query(
@@ -95,13 +98,12 @@ pub async fn clear_moods(
     end_time: i64,
     delete: bool,
 ) -> Result<usize> {
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM mood WHERE time >= ? AND time <= ?")
-            .bind(start_time)
-            .bind(end_time)
-            .fetch_one(pool)
-            .await
-            .context("Failed to count mood entries")?;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mood WHERE time >= ? AND time <= ?")
+        .bind(start_time)
+        .bind(end_time)
+        .fetch_one(pool)
+        .await
+        .context("Failed to count mood entries")?;
 
     if !delete {
         return Ok(count as usize);
@@ -134,11 +136,7 @@ pub async fn clear_moods(
 // ---------------------------------------------------------------------------
 
 /// Moods in `[start, end]`, oldest first.
-pub async fn fetch_moods_between(
-    pool: &SqlitePool,
-    start: i64,
-    end: i64,
-) -> Result<Vec<MoodRow>> {
+pub async fn fetch_moods_between(pool: &SqlitePool, start: i64, end: i64) -> Result<Vec<MoodRow>> {
     let rows = sqlx::query(
         "SELECT id, mood, body, time, embedding, score, duration, todo_id FROM mood WHERE time >= ? AND time <= ? ORDER BY time ASC",
     )
@@ -307,11 +305,7 @@ pub async fn fetch_completions_between(
 
 /// Link a mood entry to a task (by stable row id). Since each mood can only
 /// link to 1 task, any existing task link for this mood is replaced.
-pub async fn link_mood_to_tasks(
-    pool: &SqlitePool,
-    mood_id: i64,
-    task_ids: &[i64],
-) -> Result<()> {
+pub async fn link_mood_to_tasks(pool: &SqlitePool, mood_id: i64, task_ids: &[i64]) -> Result<()> {
     let task_id = task_ids.last().copied();
     sqlx::query("UPDATE mood SET todo_id = ? WHERE id = ?")
         .bind(task_id)
@@ -338,11 +332,7 @@ pub async fn link_mood_to_task(pool: &SqlitePool, mood_id: i64, task_id: i64) ->
 /// Attach a tracker entry to a mood row (the today-view Link prompt):
 /// replaces the tracker's existing mood link (`tracker.mood`) or inserts
 /// one when it had none. A nonexistent mood id fails the FK constraint.
-pub async fn link_tracker_to_mood(
-    pool: &SqlitePool,
-    tracker_id: i64,
-    mood_id: i64,
-) -> Result<u64> {
+pub async fn link_tracker_to_mood(pool: &SqlitePool, tracker_id: i64, mood_id: i64) -> Result<u64> {
     let result = sqlx::query("UPDATE tracker SET mood = ? WHERE id = ?")
         .bind(mood_id)
         .bind(tracker_id)
@@ -518,7 +508,9 @@ pub async fn fetch_mood_tasks(
             .collect();
     for (mood_id, task_id) in links {
         if let Some(task) = by_id.get(&task_id) {
-            map.entry(mood_id).or_insert_with(Vec::new).push(task.clone());
+            map.entry(mood_id)
+                .or_insert_with(Vec::new)
+                .push(task.clone());
         }
     }
     Ok(map)
@@ -640,11 +632,7 @@ pub async fn update_mood_body(pool: &SqlitePool, id: i64, body: &str) -> Result<
 /// [`crate::tracker::parse_tracker_value`] then
 /// [`crate::tracker::enforce_strict`]), so the value variant alone decides
 /// the bound storage class. Returns affected rows.
-pub async fn update_tracker_score(
-    pool: &SqlitePool,
-    id: i64,
-    value: &TrackerValue,
-) -> Result<u64> {
+pub async fn update_tracker_score(pool: &SqlitePool, id: i64, value: &TrackerValue) -> Result<u64> {
     let mut q = sqlx::query("UPDATE tracker SET score = ? WHERE id = ?");
     q = match value {
         TrackerValue::Text(s) => q.bind(s.as_str()),
@@ -673,11 +661,7 @@ pub async fn fetch_tracker_time(pool: &SqlitePool, id: i64) -> Result<Option<i64
 /// action on null tracker rows: timestamp only — no score change, no
 /// deletes. The caller checks that the move stays within the row's current
 /// interval slot. Returns affected rows.
-pub async fn update_tracker_time(
-    pool: &SqlitePool,
-    id: i64,
-    time: i64,
-) -> Result<u64> {
+pub async fn update_tracker_time(pool: &SqlitePool, id: i64, time: i64) -> Result<u64> {
     let res = sqlx::query("UPDATE tracker SET time = ? WHERE id = ?")
         .bind(time)
         .bind(id)
@@ -713,7 +697,7 @@ mod tests {
     use super::*;
     use crate::db::test_pool;
     use crate::db::{
-        create_entry, create_task, EntryObject, TaskObject, TrackerObject, TrackerValue,
+        EntryObject, TaskObject, TrackerObject, TrackerValue, create_entry, create_task,
     };
 
     /// Seed a mood row; returns its id.
@@ -809,17 +793,18 @@ mod tests {
             .unwrap()
             .is_none()
         );
-        let tracker_id: i64 =
-            sqlx::query_scalar("SELECT id FROM tracker ORDER BY id DESC LIMIT 1")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let tracker_id: i64 = sqlx::query_scalar("SELECT id FROM tracker ORDER BY id DESC LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
 
         let mood_a = seed_mood(&pool, "good").await;
         let mood_b = seed_mood(&pool, "bad").await;
 
         // Insert the link (the tracker had none).
-        let affected = link_tracker_to_mood(&pool, tracker_id, mood_a).await.unwrap();
+        let affected = link_tracker_to_mood(&pool, tracker_id, mood_a)
+            .await
+            .unwrap();
         assert_eq!(affected, 1);
         let mood: Option<i64> = sqlx::query_scalar("SELECT mood FROM tracker WHERE id = ?")
             .bind(tracker_id)
@@ -829,7 +814,9 @@ mod tests {
         assert_eq!(mood, Some(mood_a));
 
         // Re-link: replaces the existing attachment.
-        let affected = link_tracker_to_mood(&pool, tracker_id, mood_b).await.unwrap();
+        let affected = link_tracker_to_mood(&pool, tracker_id, mood_b)
+            .await
+            .unwrap();
         assert_eq!(affected, 1);
         let mood: Option<i64> = sqlx::query_scalar("SELECT mood FROM tracker WHERE id = ?")
             .bind(tracker_id)

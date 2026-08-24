@@ -106,7 +106,9 @@ pub enum Command {
     /// is copied to the path first when missing); `moods` opens the moods
     /// file named by `[moods] source`; `colors` opens the colors file
     /// (`colors.toml`). `:c` is an alias for `:config`.
-    Config { target: ConfigTarget },
+    Config {
+        target: ConfigTarget,
+    },
     /// `im -` — a matchmaker-backed viewer listing every configured tracker
     /// (a single name column) with a live preview of each tracker's settings
     /// and a row of colored cells (one per entry of its resolved color

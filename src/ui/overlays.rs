@@ -122,11 +122,8 @@ impl<T: matchmaker::SSS> Overlay<AppAction, T, ()> for ConfirmOverlay<T> {
 
     fn area(&mut self, ui_area: &Rect, layout: &OverlayLayoutSettings) {
         let width = (ui_area.width / 2).clamp(40, ui_area.width.saturating_sub(2));
-        self.area = utils::default_area(
-            [SizeHint::from(width), SizeHint::from(7)],
-            layout,
-            ui_area,
-        );
+        self.area =
+            utils::default_area([SizeHint::from(width), SizeHint::from(7)], layout, ui_area);
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>) {
@@ -142,7 +139,10 @@ impl<T: matchmaker::SSS> Overlay<AppAction, T, ()> for ConfirmOverlay<T> {
 
         let lines = self.prompt.prompt.len() as u16;
         let prompt_area = Rect::new(inner_area.x, inner_area.y, inner_area.width, lines);
-        frame.render_widget(Paragraph::new(Text::from(self.prompt.prompt.clone())), prompt_area);
+        frame.render_widget(
+            Paragraph::new(Text::from(self.prompt.prompt.clone())),
+            prompt_area,
+        );
 
         let mut spans = Vec::new();
         for (i, (label, _)) in self.prompt.options.iter().enumerate() {
@@ -168,12 +168,7 @@ impl<T: matchmaker::SSS> Overlay<AppAction, T, ()> for ConfirmOverlay<T> {
             }
         }
 
-        let buttons_area = Rect::new(
-            inner_area.x,
-            inner_area.y + lines + 1,
-            inner_area.width,
-            1,
-        );
+        let buttons_area = Rect::new(inner_area.x, inner_area.y + lines + 1, inner_area.width, 1);
         frame.render_widget(
             Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
             buttons_area,
@@ -363,7 +358,10 @@ impl<T: matchmaker::SSS> Overlay<AppAction, T, ()> for InputOverlay<T> {
             .map(|s| s.as_str())
             .unwrap_or(&self.prompt.input);
         let input_line = Line::from(vec![
-            Span::styled(self.prompt.label.clone(), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                self.prompt.label.clone(),
+                Style::default().fg(Color::Yellow),
+            ),
             Span::styled(shown.to_string(), Style::default().fg(Color::White)),
         ]);
         frame.render_widget(

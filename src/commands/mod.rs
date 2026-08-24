@@ -6,7 +6,6 @@ use std::io::Write;
 use crate::cli::{CliOpts, Command};
 use crate::config::Config;
 
-
 mod diagnostics;
 mod edit_task;
 mod entry;

@@ -56,11 +56,7 @@ impl<'a> DateParser<'a> {
             let y = self.scanner.get_int::<u32>()?;
             let y = if y < 100 {
                 // pivot (1940, 2040)
-                if y > 40 {
-                    1900 + y
-                } else {
-                    2000 + y
-                }
+                if y > 40 { 1900 + y } else { 2000 + y }
             } else {
                 y
             };
@@ -143,17 +139,20 @@ impl<'a> DateParser<'a> {
                     // sign: `-3` is 3 days ago. Bare positive numbers (e.g. `2024`,
                     // `202`) are not supported.
                     return if sign {
-                        Ok(Some(DateSpec::skip(TimeUnit::Day.to_interval(), -(n as i32))))
+                        Ok(Some(DateSpec::skip(
+                            TimeUnit::Day.to_interval(),
+                            -(n as i32),
+                        )))
                     } else {
-                        date_result("expected a date, duration, or time (bare numbers are not supported)")
+                        date_result(
+                            "expected a date, duration, or time (bare numbers are not supported)",
+                        )
                     };
                 }
                 // The sign is only consumed by a number+unit skip
                 // (`-3 days`); any other continuation would drop it
                 // silently, so it is rejected.
-                if sign
-                    && !matches!(&t, Token::Iden(name) if TimeUnit::from_name(name).is_some())
-                {
+                if sign && !matches!(&t, Token::Iden(name) if TimeUnit::from_name(name).is_some()) {
                     return date_result(
                         "expected a time unit after a negative number (e.g. '-3 days')",
                     );
@@ -170,7 +169,9 @@ impl<'a> DateParser<'a> {
                                 // 4 July
                                 Some(DateSpec::from_day_month(day, month, self.direct))
                             }
-                        } else if let Some(u) = TimeUnit::from_name(&name).map(TimeUnit::to_interval) {
+                        } else if let Some(u) =
+                            TimeUnit::from_name(&name).map(TimeUnit::to_interval)
+                        {
                             // '2 days'
                             let mut n = n as i32;
                             if sign {
@@ -200,16 +201,15 @@ impl<'a> DateParser<'a> {
                                         _ => {
                                             return date_result(
                                                 "only expected 'ago', 'hence' or 'later'",
-                                            )
+                                            );
                                         }
                                     }
                                 } else {
                                     false
                                 };
-                                if !got_marker
-                                    && let Some(h) = t.to_integer() {
-                                        self.maybe_time = Some((h as u32, TimeKind::Unknown));
-                                    }
+                                if !got_marker && let Some(h) = t.to_integer() {
+                                    self.maybe_time = Some((h as u32, TimeKind::Unknown));
+                                }
                             }
                             Some(DateSpec::skip(u, n))
                         } else if name == "am" || name == "pm" {
@@ -299,11 +299,7 @@ impl<'a> DateParser<'a> {
                     let res: i64 = (60 * (minute + 60 * hour)).into();
 
                     // Apply sign.
-                    if ch == '-' {
-                        -res
-                    } else {
-                        res
-                    }
+                    if ch == '-' { -res } else { res }
                 } else {
                     0
                 };
@@ -390,9 +386,10 @@ impl<'a> DateParser<'a> {
             }
             // `eod`/`end`/`start` as the time part after a date
             if let Some(name) = t.as_iden()
-                && let Some(align) = DayAlign::from_name(name) {
-                    return Ok(Some(TimeSpec::aligned(align)));
-                }
+                && let Some(align) = DayAlign::from_name(name)
+            {
+                return Ok(Some(TimeSpec::aligned(align)));
+            }
             let hour = t.to_int_result::<u32>()?;
             Ok(Some(match self.scanner.get() {
                 Token::Char(ch) => match ch {

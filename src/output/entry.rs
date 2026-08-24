@@ -29,12 +29,10 @@ pub fn display_entry(
         // seconds; other kinds show the logged value.
         let value = match config.tracker.get(&tracker.tracker_type) {
             Some(s) if s.kind == TrackerKind::Null => String::new(),
-            Some(s) if s.kind == TrackerKind::Duration => {
-                match tracker.value {
-                    TrackerValue::Float(f) => crate::date::format_tracker_duration(f),
-                    _ => tracker.value.to_string(),
-                }
-            }
+            Some(s) if s.kind == TrackerKind::Duration => match tracker.value {
+                TrackerValue::Float(f) => crate::date::format_tracker_duration(f),
+                _ => tracker.value.to_string(),
+            },
             _ => tracker.value.to_string(),
         };
         rows.push((tracker.tracker_type.clone(), value));

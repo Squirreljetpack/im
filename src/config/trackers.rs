@@ -1,4 +1,4 @@
-use serde::{de, ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser::SerializeMap};
 
 use super::types::{ColorBins, TrackerKind};
 use crate::date::Epoch;

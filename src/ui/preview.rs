@@ -317,9 +317,11 @@ pub fn build_preview(
     {
         lines.push(Line::default());
         lines.extend(
-            tree.draw(2, 2, |child| format!("- {}", task_row_text(config, child, true)))
-                .into_iter()
-                .map(Line::raw),
+            tree.draw(2, 2, |child| {
+                format!("- {}", task_row_text(config, child, true))
+            })
+            .into_iter()
+            .map(Line::raw),
         );
     }
 
@@ -566,10 +568,9 @@ mod tests {
         // `last` reads the unscoped completion carried in `end_time`, and
         // the `ends` field is skipped (end_time is not the expiry here).
         assert!(
-            fields.iter().any(|f| f == &format!(
-                "last: {}",
-                date::format_human_datetime(1_700_500_000, true)
-            )),
+            fields.iter().any(
+                |f| f == &format!("last: {}", date::format_human_datetime(1_700_500_000, true))
+            ),
             "expected last: from end_time, got {fields:?}"
         );
         assert!(!fields.iter().any(|f| f.starts_with("ends:")), "{fields:?}");
@@ -581,16 +582,16 @@ mod tests {
         let lines = build_preview(&task, false, &config(), &[], None, None, None);
         let fields = fields(&lines);
         assert!(
-            fields.iter().any(|f| f == &format!(
-                "last: {}",
-                date::format_human_datetime(1_700_400_000, true)
-            )),
+            fields.iter().any(
+                |f| f == &format!("last: {}", date::format_human_datetime(1_700_400_000, true))
+            ),
             "expected last: from last_time, got {fields:?}"
         );
-        assert!(fields.iter().any(|f| f == &format!(
-            "ends: {}",
-            date::format_human_datetime(1_700_500_000, true)
-        )));
+        assert!(
+            fields.iter().any(
+                |f| f == &format!("ends: {}", date::format_human_datetime(1_700_500_000, true))
+            )
+        );
     }
 
     #[test]
@@ -607,10 +608,9 @@ mod tests {
             None,
         ));
         assert!(
-            fields.iter().any(|f| f == &format!(
-                "last: {}",
-                date::format_human_datetime(1_700_500_000, true)
-            )),
+            fields.iter().any(
+                |f| f == &format!("last: {}", date::format_human_datetime(1_700_500_000, true))
+            ),
             "expected last: on a done row, got {fields:?}"
         );
     }
@@ -645,10 +645,11 @@ mod tests {
             .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
             .collect();
         assert!(
-            rendered.iter().any(|l| l == &format!(
-                "  prev: {}",
-                date::format_human_datetime(1_699_000_000, true)
-            )),
+            rendered.iter().any(|l| l
+                == &format!(
+                    "  prev: {}",
+                    date::format_human_datetime(1_699_000_000, true)
+                )),
             "expected a prev: field, got {rendered:?}"
         );
         assert!(
@@ -703,7 +704,9 @@ mod tests {
             .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
             .collect();
         assert!(
-            !rendered.iter().any(|l| l.trim_start().starts_with("total:")),
+            !rendered
+                .iter()
+                .any(|l| l.trim_start().starts_with("total:")),
             "unexpected total: field, got {rendered:?}"
         );
     }

@@ -36,7 +36,7 @@ pub use parse::*;
 pub use parse_duration::*;
 pub use span::*;
 
-use jiff::{civil::Weekday, Span, Unit, Zoned};
+use jiff::{Span, Unit, Zoned, civil::Weekday};
 
 /// The current local zoned datetime.
 fn local_now() -> Zoned {

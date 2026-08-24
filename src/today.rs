@@ -455,7 +455,9 @@ pub async fn fetch_today_entries(
                     let min_slot_start = trackers
                         .iter()
                         .filter(|t| &t.tracker_type == ttype)
-                        .filter_map(|t| crate::date::interval_start_unix_secs(iv.anchor, iv.span, t.time))
+                        .filter_map(|t| {
+                            crate::date::interval_start_unix_secs(iv.anchor, iv.span, t.time)
+                        })
                         .min()
                         .unwrap_or(day_start_epoch);
 
@@ -488,8 +490,9 @@ pub async fn fetch_today_entries(
             let is_cumulative = tracker.interval.is_some_and(|iv| iv.cumulative);
             let (cumulative_score, tracker_total) = if is_cumulative {
                 let iv = tracker.interval.unwrap();
-                let (slot_start, slot_end) = crate::date::interval_slot_unix_secs(iv.anchor, iv.span, time)
-                    .unwrap_or((time, time));
+                let (slot_start, slot_end) =
+                    crate::date::interval_slot_unix_secs(iv.anchor, iv.span, time)
+                        .unwrap_or((time, time));
                 let all_rows = cumulative_rows_by_type
                     .get(&tracker_type)
                     .map(|v| v.as_slice())
@@ -498,9 +501,9 @@ pub async fn fetch_today_entries(
                     e.time >= slot_start
                         && (e.time < time || (e.time == time && e.id <= tracker_id))
                 });
-                let all_slot_entries = all_rows.iter().filter(|e| {
-                    e.time >= slot_start && e.time < slot_end
-                });
+                let all_slot_entries = all_rows
+                    .iter()
+                    .filter(|e| e.time >= slot_start && e.time < slot_end);
                 match tracker.kind {
                     TrackerKind::Null => (
                         Some(slot_entries_up_to_cur.count() as f64),
@@ -698,7 +701,8 @@ pub async fn fetch_today_entries(
             // to its own interval, so time, done state, and badge are per window.
             // `B` keeps only the next (earliest) window per task.
             let recurring_windows =
-                crate::db::fetch_recurring_windows_for_period(pool, day_start_epoch, horizon_end).await?;
+                crate::db::fetch_recurring_windows_for_period(pool, day_start_epoch, horizon_end)
+                    .await?;
 
             let mut seen_recurring = std::collections::HashSet::new();
             for w in &recurring_windows {
@@ -737,7 +741,8 @@ pub async fn fetch_today_entries(
             // (step 4) are skipped.
             if show == ViewVariant::All {
                 let completed_today =
-                    crate::db::fetch_tasks_completed_on(pool, day_start_epoch, day_end_epoch).await?;
+                    crate::db::fetch_tasks_completed_on(pool, day_start_epoch, day_end_epoch)
+                        .await?;
                 for task in &completed_today {
                     if task.is_recurring() && entries.iter().any(|e| e.task_id == Some(task.id)) {
                         continue;
@@ -800,7 +805,11 @@ pub async fn write_today_view<W: Write>(
         fetch_today_entries(pool, config, horizon, day_epoch, show).await?;
     // The CLI prints colors, so it computes them before formatting (and
     // backfills unpersisted embeddings/scores to the DB when moods.backfill is true).
-    let pool_opt = if config.moods.backfill { Some(pool) } else { None };
+    let pool_opt = if config.moods.backfill {
+        Some(pool)
+    } else {
+        None
+    };
     crate::color::compute_mood_colors_and_backfill(pool_opt, &mood_rows, axes).await;
 
     if entries.is_empty() {
@@ -1171,7 +1180,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_today_entries_cumulative_trackers() {
         use crate::config::{TrackerInterval, TrackerSetting};
-        use crate::db::{create_entry, test_pool, EntryObject, TrackerObject, TrackerValue};
+        use crate::db::{EntryObject, TrackerObject, TrackerValue, create_entry, test_pool};
 
         let pool = test_pool().await.unwrap();
         let day_start = 1_700_000_000;

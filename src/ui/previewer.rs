@@ -107,14 +107,22 @@ impl Previewer {
                 if let Some(task) = task_opt {
                     let axes = if !linked_moods.is_empty() {
                         axes_cell
-                            .get_or_try_init(|| crate::color::ColorAxes::build(&pool, &config.moods))
+                            .get_or_try_init(|| {
+                                crate::color::ColorAxes::build(&pool, &config.moods)
+                            })
                             .await
                             .ok()
                     } else {
                         None
                     };
-                    if !linked_moods.is_empty() && let Some(axes) = axes {
-                        let pool_opt = if config.moods.backfill { Some(&pool) } else { None };
+                    if !linked_moods.is_empty()
+                        && let Some(axes) = axes
+                    {
+                        let pool_opt = if config.moods.backfill {
+                            Some(&pool)
+                        } else {
+                            None
+                        };
                         crate::color::compute_mood_colors_and_backfill(
                             pool_opt,
                             &linked_moods,
@@ -176,14 +184,15 @@ impl Previewer {
             } else {
                 None
             };
-            if !linked_moods.is_empty() && let Some(axes) = axes {
-                let pool_opt = if config.moods.backfill { Some(&pool) } else { None };
-                crate::color::compute_mood_colors_and_backfill(
-                    pool_opt,
-                    &linked_moods,
-                    axes,
-                )
-                .await;
+            if !linked_moods.is_empty()
+                && let Some(axes) = axes
+            {
+                let pool_opt = if config.moods.backfill {
+                    Some(&pool)
+                } else {
+                    None
+                };
+                crate::color::compute_mood_colors_and_backfill(pool_opt, &linked_moods, axes).await;
             }
             let lines = build_preview(
                 &task,

@@ -459,7 +459,7 @@ mod tests {
         let config = Config::default();
         let mut t = task_row(None);
         t.end_time = Some(0); // far in the past
-                              // Zero entries overdue → colors[0].
+        // Zero entries overdue → colors[0].
         assert_eq!(
             task_badge(&t, &config, false),
             ('○', config.tasks.colors[0])
@@ -636,8 +636,8 @@ mod tests {
         assert_eq!(color_at(23 * 3600 + 30 * 60), CtColor::DarkRed);
         assert_eq!(color_at(3600), CtColor::DarkYellow); // 01:00
         assert_eq!(color_at(2 * 3600), CtColor::DarkGreen); // 02:00
-                                                            // Outside, closer to min (23:00) → first color ("before 23:00 is
-                                                            // first"): 22:45, 22:15, and 13:00 are all closer to 23:00 than 02:00.
+        // Outside, closer to min (23:00) → first color ("before 23:00 is
+        // first"): 22:45, 22:15, and 13:00 are all closer to 23:00 than 02:00.
         assert_eq!(color_at(22 * 3600 + 45 * 60), CtColor::DarkRed);
         assert_eq!(color_at(22 * 3600 + 15 * 60), CtColor::DarkRed);
         assert_eq!(color_at(13 * 3600), CtColor::DarkRed);

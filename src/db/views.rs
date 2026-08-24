@@ -243,7 +243,10 @@ pub async fn fetch_completion_events_in_range(
     let mut results = Vec::with_capacity(events.len());
     for (comp, task_id) in events {
         if let Some(base_task) = task_map.get(&task_id) {
-            let task_rows = all_completions.get(&task_id).map(|v| v.as_slice()).unwrap_or(&[]);
+            let task_rows = all_completions
+                .get(&task_id)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
             let cumulative = if base_task.is_recurring() {
                 match crate::task::interval_start(base_task, comp.time) {
                     Some(floor) => task_rows

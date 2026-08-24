@@ -61,7 +61,11 @@ fn kind_label(kind: TrackerKind) -> &'static str {
 /// `min`/`max`; `interval` expands into its subfields (anchor / span /
 /// cumulative) when set; and the resolved palette ends the pane as a row of
 /// colored cells (no hex codes).
-fn build_tracker_preview(name: &str, setting: &TrackerSetting, named_months: bool) -> Text<'static> {
+fn build_tracker_preview(
+    name: &str,
+    setting: &TrackerSetting,
+    named_months: bool,
+) -> Text<'static> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // Blank line so the header reads as a header.
@@ -84,8 +88,14 @@ fn build_tracker_preview(name: &str, setting: &TrackerSetting, named_months: boo
 
     // Bounds become `min` / `max` (a missing side shows `-`).
     if setting.low.is_some() || setting.high.is_some() {
-        let low = setting.low.map(|v| v.to_string()).unwrap_or_else(|| "-".into());
-        let high = setting.high.map(|v| v.to_string()).unwrap_or_else(|| "-".into());
+        let low = setting
+            .low
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".into());
+        let high = setting
+            .high
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".into());
         lines.push(field_line("min", low));
         lines.push(field_line("max", high));
     }
@@ -97,7 +107,10 @@ fn build_tracker_preview(name: &str, setting: &TrackerSetting, named_months: boo
     // Interval: subfields when set, otherwise a plain `none`.
     // Interval subfields, flattened to top-level fields (no `interval:` label).
     if let Some(iv) = &setting.interval {
-        lines.push(field_line("anchor", date::format_human_datetime(iv.anchor, named_months)));
+        lines.push(field_line(
+            "anchor",
+            date::format_human_datetime(iv.anchor, named_months),
+        ));
         lines.push(field_line("span", date::format_span(&iv.span)));
         lines.push(field_line("cumulative", iv.cumulative.to_string()));
     }
@@ -144,9 +157,12 @@ pub async fn run_trackers_app(config: &Config) -> Result<()> {
     // Enter is the builtin Accept (the default binds map it to `Action::Accept`).
     // The accept hook reports the selected tracker's name; we print it after
     // the picker exits.
-    let mut mm = Matchmaker::new(worker, |state: &mut MMState<'_, TrackerRow, ()>| -> Vec<String> {
-        state.map_selected_to_vec(|_, item| item.name.clone())
-    });
+    let mut mm = Matchmaker::new(
+        worker,
+        |state: &mut MMState<'_, TrackerRow, ()>| -> Vec<String> {
+            state.map_selected_to_vec(|_, item| item.name.clone())
+        },
+    );
 
     let event_loop = EventLoop::with_binds(binds)
         .with_tick_rate(render_cfg.ui.tick_rate)
@@ -179,9 +195,11 @@ pub async fn run_trackers_app(config: &Config) -> Result<()> {
                     return;
                 }
                 match state.current_raw().cloned() {
-                    Some(row) => {
-                        previewer.set_text(build_tracker_preview(&row.name, &row.setting, named_months))
-                    }
+                    Some(row) => previewer.set_text(build_tracker_preview(
+                        &row.name,
+                        &row.setting,
+                        named_months,
+                    )),
                     None => previewer.stop(),
                 }
             }
@@ -208,9 +226,11 @@ pub async fn run_trackers_app(config: &Config) -> Result<()> {
                     previewer.set_text(text);
                 }
                 None => match state.current_raw().cloned() {
-                    Some(row) => {
-                        previewer.set_text(build_tracker_preview(&row.name, &row.setting, named_months))
-                    }
+                    Some(row) => previewer.set_text(build_tracker_preview(
+                        &row.name,
+                        &row.setting,
+                        named_months,
+                    )),
                     None => previewer.stop(),
                 },
                 Some(Ok(_)) => previewer.stop(),

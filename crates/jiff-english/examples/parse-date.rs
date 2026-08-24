@@ -9,9 +9,9 @@
 //! Optional `--utc` evaluates in UTC instead of the local time zone; a second
 //! positional argument sets the base datetime (default: now).
 
-use jiff::tz::TimeZone;
 use jiff::Zoned;
-use jiff_english::{parse_date_string, Dialect};
+use jiff::tz::TimeZone;
+use jiff_english::{Dialect, parse_date_string};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

@@ -164,15 +164,12 @@ The default locations are in order:
 ##### Trackers
 
 Trackers are defined in your configuration (`im :config`); each `[tracker.<name>]`
-section is logged as `-<name> <value>` (no value for `null` trackers):
+section is logged through `im -<name> <value>` (no value for `null` trackers):
 
-- Kinds: `text` (value stored verbatim), `integer` (whole numbers), `float`
-  (plain numbers), `duration` (duration strings like `6m 30s`, stored and
-  displayed as time), `null` (valueless timestamp/count markers — requires an
-  interval).
+- Kinds: `text`, `integer`, `float`, `duration` (strings like `6m 30s`), `null` (timestamp/count markers — requires an interval).
 - `interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }` bins
-  entries into calendar slots. By default (replace) a new log in a slot
-  replaces the slot's previous entry; `cumulative = true` keeps every log and
+  entries into calendar slots. By default, a new log in a slot
+  replaces the slot's previous entry; `interval.cumulative = true` keeps every log and
   the slot's grid dot shows the aggregate.
 
 ## FAQ

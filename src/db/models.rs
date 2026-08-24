@@ -90,7 +90,6 @@ pub struct TrackerObject {
     pub replace_slot: Option<(i64, i64)>,
 }
 
-
 /// Typed payload of a tracker entry, determined by its configured kind.
 /// `Duration` values are stored as `Float` seconds — display sites key on
 /// `TrackerKind`, not on the value variant.
@@ -189,7 +188,8 @@ impl TaskRow {
     }
 
     pub fn end_datetime(&self, named_months: bool) -> Option<String> {
-        self.end_time.map(|ts| crate::date::format_human_datetime(ts, named_months))
+        self.end_time
+            .map(|ts| crate::date::format_human_datetime(ts, named_months))
     }
 }
 

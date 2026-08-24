@@ -3,12 +3,12 @@ use crossterm::style::{Color as CtColor, Stylize};
 use sqlx::SqlitePool;
 use std::io::Write;
 
-use crate::global;
 use crate::badge::completion_badge;
 use crate::cli::{CliOpts, TrackerItem, TrackerPeriod};
 use crate::config::{Config, TrackerKind, TrackerSetting};
 use crate::date;
 use crate::db::TrackerValue;
+use crate::global;
 
 /// Read a tracker score as f64. The `score` column is stored as
 /// BLOB but SQLite's dynamic typing means values can be INTEGER, REAL, or
@@ -331,7 +331,11 @@ async fn display_mood_tracker<W: Write>(
     }
 
     // Unified helper: backfill missing embeddings/scores when moods.backfill is enabled
-    let pool_opt = if config.moods.backfill { Some(pool) } else { None };
+    let pool_opt = if config.moods.backfill {
+        Some(pool)
+    } else {
+        None
+    };
     crate::color::compute_mood_colors_and_backfill(pool_opt, &moods, axes).await;
 
     let embedder = global::embedder();
@@ -371,11 +375,7 @@ async fn display_mood_tracker<W: Write>(
         let mut count: usize = 0;
 
         for f in moods_in_day {
-            let emb = match f
-                .embedding
-                .as_deref()
-                .and_then(global::blob_to_embedding)
-            {
+            let emb = match f.embedding.as_deref().and_then(global::blob_to_embedding) {
                 Some(e) => Some(e),
                 None => embedder.embed(&f.mood, &axes.prefix_string).ok(),
             };
@@ -882,31 +882,58 @@ mod tests {
 
     #[test]
     fn test_enforce_strict() {
-        let tracker =
-            TrackerSetting::new(TrackerKind::Float).with_low(0.0).with_high(9.0).with_strict(true);
-        assert!(enforce_strict("rating", &tracker, 0.0).is_ok(), "lower boundary accepted");
-        assert!(enforce_strict("rating", &tracker, 9.0).is_ok(), "upper boundary accepted");
+        let tracker = TrackerSetting::new(TrackerKind::Float)
+            .with_low(0.0)
+            .with_high(9.0)
+            .with_strict(true);
+        assert!(
+            enforce_strict("rating", &tracker, 0.0).is_ok(),
+            "lower boundary accepted"
+        );
+        assert!(
+            enforce_strict("rating", &tracker, 9.0).is_ok(),
+            "upper boundary accepted"
+        );
         assert!(enforce_strict("rating", &tracker, 4.5).is_ok());
         let err = enforce_strict("rating", &tracker, 12.0).unwrap_err();
         assert_eq!(err, "tracker 'rating': value 12 outside [0, 9]");
         let err = enforce_strict("rating", &tracker, -1.0).unwrap_err();
         assert_eq!(err, "tracker 'rating': value -1 outside [0, 9]");
         // Inverted bounds (high < low) still gate the inclusive span.
-        let inv = TrackerSetting::new(TrackerKind::Float).with_low(10.0).with_high(0.0).with_strict(true);
+        let inv = TrackerSetting::new(TrackerKind::Float)
+            .with_low(10.0)
+            .with_high(0.0)
+            .with_strict(true);
         assert!(enforce_strict("inv", &inv, 5.0).is_ok());
-        assert_eq!(enforce_strict("inv", &inv, 10.5).unwrap_err(), "tracker 'inv': value 10.5 outside [0, 10]");
+        assert_eq!(
+            enforce_strict("inv", &inv, 10.5).unwrap_err(),
+            "tracker 'inv': value 10.5 outside [0, 10]"
+        );
         // Single bound gates on that bound only.
-        let floor = TrackerSetting::new(TrackerKind::Integer).with_low(10.0).with_strict(true);
+        let floor = TrackerSetting::new(TrackerKind::Integer)
+            .with_low(10.0)
+            .with_strict(true);
         assert!(enforce_strict("pushups", &floor, 10.0).is_ok());
-        assert_eq!(enforce_strict("pushups", &floor, 9.0).unwrap_err(), "tracker 'pushups': value 9 outside [10]");
+        assert_eq!(
+            enforce_strict("pushups", &floor, 9.0).unwrap_err(),
+            "tracker 'pushups': value 9 outside [10]"
+        );
         // No bounds → nothing to check.
         let open = TrackerSetting::new(TrackerKind::Float).with_strict(true);
         assert!(enforce_strict("free", &open, 1e9).is_ok());
         // Text gates the message length in characters.
-        let text = TrackerSetting::new(TrackerKind::Text).with_low(1.0).with_high(80.0).with_strict(true);
+        let text = TrackerSetting::new(TrackerKind::Text)
+            .with_low(1.0)
+            .with_high(80.0)
+            .with_strict(true);
         assert!(enforce_strict("thought", &text, text_len_chars("a short win") as f64).is_ok());
         assert_eq!(
-            enforce_strict("thought", &text, text_len_chars("x".repeat(81).as_str()) as f64).unwrap_err(),
+            enforce_strict(
+                "thought",
+                &text,
+                text_len_chars("x".repeat(81).as_str()) as f64
+            )
+            .unwrap_err(),
             "tracker 'thought': value 81 outside [1, 80]"
         );
     }
@@ -927,7 +954,10 @@ mod tests {
             .with_strict(true);
         let slot_start = 1_600_000_000; // slot [start, start + 1 day)
         // In-zone: 23:30 and 01:00 (wrapping zone 23:00 → 02:00).
-        assert!(null_zone_contains(&tracker, slot_start + 23 * 3600 + 30 * 60));
+        assert!(null_zone_contains(
+            &tracker,
+            slot_start + 23 * 3600 + 30 * 60
+        ));
         assert!(null_zone_contains(&tracker, slot_start + 3600));
         // Boundaries are contained (exact dist <= zone_len).
         assert!(null_zone_contains(&tracker, slot_start + 23 * 3600));
@@ -938,8 +968,9 @@ mod tests {
         // Without both bounds (or an interval) the gate never contains.
         let loose = TrackerSetting::new(TrackerKind::Null).with_interval(tracker.interval.unwrap());
         assert!(!null_zone_contains(&loose, slot_start + 3600));
-        let no_iv = TrackerSetting::new(TrackerKind::Null).with_low(0.0).with_high(3600.0);
+        let no_iv = TrackerSetting::new(TrackerKind::Null)
+            .with_low(0.0)
+            .with_high(3600.0);
         assert!(!null_zone_contains(&no_iv, slot_start + 300));
     }
-
 }

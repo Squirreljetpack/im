@@ -16,7 +16,7 @@ use anyhow::Result;
 use matchmaker::{
     MatchError, Matchmaker, PickOptions,
     action::{Action as MMAction, Actions},
-    binds::{key, BindMapExt},
+    binds::{BindMapExt, key},
     message::Interrupt,
     nucleo::Worker,
 };
@@ -29,7 +29,9 @@ use crate::types::{ViewMode, ViewVariant};
 use crate::ui::action::ImAction;
 use crate::ui::mm_config::get_mm_cfg;
 use crate::ui::overlays::{ConfirmOverlay, InputOverlay, SharedOverlay};
-use crate::ui::tasks::{TaskCtx, TasksApp, handler, repopulate, run_edit, task_columns, tasks_accept_hook};
+use crate::ui::tasks::{
+    TaskCtx, TasksApp, handler, repopulate, run_edit, task_columns, tasks_accept_hook,
+};
 
 /// A picker over pending tasks (the oneshot parent picker).
 pub struct OneshotPickerApp {
@@ -56,7 +58,12 @@ impl OneshotPickerApp {
         let (mut render_cfg, mut binds, mut tui_cfg, overlay_cfg) = get_mm_cfg();
         // The date-shift actions are today-view only; prune them so they
         // neither fire nor appear in the picker's help.
-        binds.filter_action(|a| !matches!(a, MMAction::Custom(ImAction::Yesterday | ImAction::Tomorrow)));
+        binds.filter_action(|a| {
+            !matches!(
+                a,
+                MMAction::Custom(ImAction::Yesterday | ImAction::Tomorrow)
+            )
+        });
         // The picker is full-width: no preview pane.
         render_cfg.preview.show = false.into();
         if self.inner.fullscreen {

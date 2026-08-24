@@ -25,8 +25,8 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 use im::date;
 use im::db::{
-    create_entry, create_task, set_scheduled_completion, update_task, EntryObject, TaskObject,
-    TrackerObject, TrackerValue,
+    EntryObject, TaskObject, TrackerObject, TrackerValue, create_entry, create_task,
+    set_scheduled_completion, update_task,
 };
 
 fn main() -> Result<()> {
@@ -108,7 +108,7 @@ async fn seed_mood_entries(
     seed_entry(pool, config, "reflective", "Journal entry body", h(10), &[]).await?; // + body
     seed_entry(pool, config, "great", "", h(11), &[("sleep", "8")]).await?; // float, in range
     seed_entry(pool, config, "chilly", "", h(12), &[("temperature", "5")]).await?; // below min
-                                                                                   // run_times is inverted (min 100, max 0): smaller is better → last color.
+    // run_times is inverted (min 100, max 0): smaller is better → last color.
     seed_entry(pool, config, "energized", "", h(14), &[("run_times", "10")]).await?;
     seed_entry(pool, config, "hydrated", "", h(15), &[("water", "3")]).await?; // no min/max
     seed_entry(pool, config, "productive", "", h(16), &[("steps", "8000")]).await?; // number
@@ -125,8 +125,8 @@ async fn seed_mood_entries(
     seed_entry(pool, config, "content", "", h(18), &[("mood_notes", "3")]).await?;
     seed_entry(pool, config, "happy", "", h(21), &[]).await?; // same mood twice in one day
     seed_entry(pool, config, "", "End of day journal entry", h(22), &[]).await?; // journal-only
-                                                                                 // Interval-`notes` replace demo (both in the current week slot): the
-                                                                                 // later entry replaces the earlier one inside `create_entry`.
+    // Interval-`notes` replace demo (both in the current week slot): the
+    // later entry replaces the earlier one inside `create_entry`.
     seed_entry(
         pool,
         config,
@@ -158,11 +158,11 @@ async fn seed_mood_entries(
     )
     .await?; // in range
     seed_entry(pool, config, "", "", yh(16), &[("steps", "5000")]).await?; // tracker-only, no mood
-                                                                           // Multi-tracker entry. Timed at noon: replacement slots are a uniform
-                                                                           // epoch-aligned grid (see `handlers::interval_slot`), so on UTC-offset
-                                                                           // machines a late-evening entry can share a UTC-day slot with the next
-                                                                           // morning's sample and silently replace it. Noon keeps every sample a
-                                                                           // UTC-day apart.
+    // Multi-tracker entry. Timed at noon: replacement slots are a uniform
+    // epoch-aligned grid (see `handlers::interval_slot`), so on UTC-offset
+    // machines a late-evening entry can share a UTC-day slot with the next
+    // morning's sample and silently replace it. Noon keeps every sample a
+    // UTC-day apart.
     seed_entry(
         pool,
         config,

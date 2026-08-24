@@ -122,7 +122,7 @@ pub fn parse_from(args: Vec<String>) -> anyhow::Result<Command> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{ConfigTarget, DbSubcommand, TrackerItem, TrackerPeriod, BODY_DELIMITER};
+    use super::super::{BODY_DELIMITER, ConfigTarget, DbSubcommand, TrackerItem, TrackerPeriod};
     use super::*;
     use crate::types::{Entry, Task, TaskKind, TaskRef, ViewMode};
 
@@ -1244,10 +1244,12 @@ mod tests {
         // im pretty ok -sleep 8 but not great: after the tracker pair
         // the word "but" is not another valid tracker pattern, the body
         // delimiter, or the end of the line → the line is rejected.
-        assert!(parse_from(args(&[
-            "pretty", "ok", "-sleep", "8", "but", "not", "great"
-        ]))
-        .is_err());
+        assert!(
+            parse_from(args(&[
+                "pretty", "ok", "-sleep", "8", "but", "not", "great"
+            ]))
+            .is_err()
+        );
 
         // Same rejection after a single mood word.
         assert!(parse_from(args(&["good", "-sleep", "8", "later"])).is_err());

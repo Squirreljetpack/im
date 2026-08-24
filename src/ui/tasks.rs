@@ -1,4 +1,5 @@
 use anyhow::Result;
+use matchmaker::binds::BindMapExt;
 use matchmaker::{
     MatchError, Matchmaker, PickOptions,
     action::Action as MMAction,
@@ -12,7 +13,6 @@ use matchmaker::{
     },
     render::MMState,
 };
-use matchmaker::binds::BindMapExt;
 
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -23,14 +23,14 @@ use std::sync::{Arc, Mutex};
 
 use crate::config::Config;
 use crate::db::TaskRow;
-use crate::global::{config, pool, GLOBAL_CONFIG};
+use crate::global::{GLOBAL_CONFIG, config, pool};
 use crate::task::{
     AcceptAction, accept_action, apply_accept_action, apply_completion_delta, availability_passed,
     reset_task_progress,
 };
 use crate::types::{ViewMode, ViewVariant};
 use crate::ui::action::ImAction;
-use crate::ui::common::{ct_to_ratatui_color, mode_label, BADGE_GAP};
+use crate::ui::common::{BADGE_GAP, ct_to_ratatui_color, mode_label};
 use crate::ui::mm_config::get_mm_cfg;
 use crate::ui::overlays::{
     ConfirmOverlay, ConfirmPrompt, InputOverlay, InputPrompt, SharedOverlay,
@@ -52,16 +52,16 @@ pub struct TasksApp {
 }
 
 impl TasksApp {
-    pub async fn new(
-        mode: ViewMode,
-        config: Config,
-        show: ViewVariant,
-        fullscreen: bool,
-    ) -> Self {
+    pub async fn new(mode: ViewMode, config: Config, show: ViewVariant, fullscreen: bool) -> Self {
         let _ = GLOBAL_CONFIG.set(config.clone());
-        let tasks = fetch_tasks(&pool(), mode, show, config.tasks_view.persist_pending_seconds)
-            .await
-            .unwrap_or_default();
+        let tasks = fetch_tasks(
+            &pool(),
+            mode,
+            show,
+            config.tasks_view.persist_pending_seconds,
+        )
+        .await
+        .unwrap_or_default();
         let mut app = Self {
             tasks,
             mode,
@@ -104,7 +104,12 @@ impl TasksApp {
         let (mut render_cfg, mut binds, mut tui_cfg, overlay_cfg) = get_mm_cfg();
         // The date-shift actions are today-view only; prune them so they
         // neither fire nor appear in the tasks view's help.
-        binds.filter_action(|a| !matches!(a, MMAction::Custom(ImAction::Yesterday | ImAction::Tomorrow)));
+        binds.filter_action(|a| {
+            !matches!(
+                a,
+                MMAction::Custom(ImAction::Yesterday | ImAction::Tomorrow)
+            )
+        });
         if self.fullscreen {
             tui_cfg.layout = None;
         }
@@ -319,9 +324,7 @@ pub(crate) fn task_columns(view: &Arc<Mutex<TasksApp>>) -> [Column<TaskRow, ()>;
 
 /// The accept hook for the tasks view and the oneshot parent picker:
 /// reports the selected task's (stable id, short id).
-pub(crate) fn tasks_accept_hook(
-    state: &mut MMState<'_, TaskRow, ()>,
-) -> Vec<(i64, Option<i64>)> {
+pub(crate) fn tasks_accept_hook(state: &mut MMState<'_, TaskRow, ()>) -> Vec<(i64, Option<i64>)> {
     state
         .current_raw()
         .map(|task| (task.id, task.short_id))
@@ -463,11 +466,7 @@ fn open_input(ctx: TaskCtx, prompt: InputPrompt) {
 async fn refresh_tasks(ctx: &TaskCtx) {
     let (mode, show, persist) = {
         let v = ctx.view.lock().unwrap();
-        (
-            v.mode,
-            v.show,
-            config().tasks_view.persist_pending_seconds,
-        )
+        (v.mode, v.show, config().tasks_view.persist_pending_seconds)
     };
     if let Ok(tasks) = fetch_tasks(&pool(), mode, show, persist).await {
         let mut v = ctx.view.lock().unwrap();

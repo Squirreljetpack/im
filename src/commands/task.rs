@@ -33,7 +33,11 @@ pub(crate) async fn resolve_task_ref_named(
             match matches.len() {
                 0 => anyhow::bail!("No task found matching query '{}'", words.join(" ")),
                 1 => Ok((matches[0].id, matches[0].name.clone())),
-                n => anyhow::bail!("Multiple tasks match query '{}' (found {})", words.join(" "), n),
+                n => anyhow::bail!(
+                    "Multiple tasks match query '{}' (found {})",
+                    words.join(" "),
+                    n
+                ),
             }
         }
         TaskRef::Pick => {
@@ -56,15 +60,20 @@ pub(crate) async fn resolve_parent(
             match matches.len() {
                 0 => anyhow::bail!("No task found matching query '{}'", words.join(" ")),
                 1 => Ok(Some(matches[0].id)),
-                n => anyhow::bail!("Multiple tasks match query '{}' (found {})", words.join(" "), n),
+                n => anyhow::bail!(
+                    "Multiple tasks match query '{}' (found {})",
+                    words.join(" "),
+                    n
+                ),
             }
         }
         TaskRef::Pick => {
             // Cancelling the picker cancels the whole operation.
-            let picked = crate::ui::oneshots::OneshotPickerApp::new(config.clone(), opts.fullscreen)
-                .await?
-                .run()
-                .await?;
+            let picked =
+                crate::ui::oneshots::OneshotPickerApp::new(config.clone(), opts.fullscreen)
+                    .await?
+                    .run()
+                    .await?;
             match picked {
                 Some((id, _)) => Ok(Some(id)),
                 None => anyhow::bail!("Cancelled"),
@@ -116,7 +125,15 @@ pub(super) async fn create_task_command(
             // no body.
             let interactive = name.is_none();
 
-            let (name_str, body_str, priority_val, target_count, optional_val, parent_id, end_epoch) = if interactive {
+            let (
+                name_str,
+                body_str,
+                priority_val,
+                target_count,
+                optional_val,
+                parent_id,
+                end_epoch,
+            ) = if interactive {
                 if !atty::is(atty::Stream::Stdin) {
                     anyhow::bail!("Oneshot task creation requires an interactive terminal");
                 }
@@ -139,7 +156,9 @@ pub(super) async fn create_task_command(
 
                 loop {
                     let parent_label = if let Some(pid) = parent_id {
-                        if let Ok(Some(pt)) = crate::db::fetch_task_by_id(pool, pid, crate::date::now()).await {
+                        if let Ok(Some(pt)) =
+                            crate::db::fetch_task_by_id(pool, pid, crate::date::now()).await
+                        {
                             pt.name
                         } else {
                             "unknown".to_string()
@@ -181,7 +200,8 @@ pub(super) async fn create_task_command(
                             target_count.to_string()
                         },
                     );
-                    select = select.item("optional", "Optional", if optional { "Yes" } else { "No" });
+                    select =
+                        select.item("optional", "Optional", if optional { "Yes" } else { "No" });
                     select = select.item("cancel", "Cancel", "");
 
                     let action = select.interact()?;
@@ -211,7 +231,9 @@ pub(super) async fn create_task_command(
                         }
                         "due" => {
                             let cur = end_time.map(crate::date::format_datetime);
-                            if let Ok(t) = crate::prompts::prompt_start_time("Due time:", cur.as_deref()) {
+                            if let Ok(t) =
+                                crate::prompts::prompt_start_time("Due time:", cur.as_deref())
+                            {
                                 end_time = Some(t);
                             }
                         }
@@ -234,7 +256,15 @@ pub(super) async fn create_task_command(
                     }
                 }
 
-                (name_val, body_val, priority_val, target_count, optional, parent_id, end_time)
+                (
+                    name_val,
+                    body_val,
+                    priority_val,
+                    target_count,
+                    optional,
+                    parent_id,
+                    end_time,
+                )
             } else {
                 // Command-line name: no prompts, default priority, single
                 // completion (target_count = 0).
@@ -251,7 +281,15 @@ pub(super) async fn create_task_command(
                     None => None,
                 };
                 let body_str = resolve_body(body, &config.editor.task_template)?;
-                (name_str, body_str, config.tasks.default_priority, 0, false, parent_id, date)
+                (
+                    name_str,
+                    body_str,
+                    config.tasks.default_priority,
+                    0,
+                    false,
+                    parent_id,
+                    date,
+                )
             };
 
             // Name validity (non-empty, no tabs) before the task is
@@ -262,7 +300,8 @@ pub(super) async fn create_task_command(
             // Uniqueness for command-line names: the interactive flow
             // re-prompts on duplicates, so only this path bails.
             if !interactive
-                && crate::db::task_name_exists(pool, &name_str, Some(TaskKind::Oneshot), None).await?
+                && crate::db::task_name_exists(pool, &name_str, Some(TaskKind::Oneshot), None)
+                    .await?
             {
                 anyhow::bail!("A task with name '{name_str}' already exists");
             }
@@ -714,9 +753,10 @@ async fn prompt_unique_name(
 ) -> Result<String> {
     let given = given.map(str::trim).filter(|s| !s.is_empty());
     if let Some(name) = given
-        && !crate::db::task_name_exists(pool, name, task_type, None).await? {
-            return Ok(name.to_string());
-        }
+        && !crate::db::task_name_exists(pool, name, task_type, None).await?
+    {
+        return Ok(name.to_string());
+    }
     loop {
         let candidate = crate::prompts::prompt_name(given)?;
         if crate::db::task_name_exists(pool, &candidate, task_type, None).await? {

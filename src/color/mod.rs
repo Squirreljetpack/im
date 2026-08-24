@@ -24,10 +24,10 @@ use anyhow::Result;
 use dashmap::DashMap;
 use oklab::Oklab;
 
-use crate::global;
 use crate::color::conversion::rgb_to_oklab;
 use crate::config::{ColorAxesSettings, MoodEndpoint};
 use crate::db::MoodRow;
+use crate::global;
 use crate::global::Embedder;
 use crate::utils::Percentage;
 
@@ -113,19 +113,13 @@ impl ColorAxes {
     ) -> Result<Self> {
         assert!(!pairs.is_empty());
 
-        let v_base =
-            global::get_or_embed_cached(pool, embedder, &settings.base_string, "")
-                .await?;
+        let v_base = global::get_or_embed_cached(pool, embedder, &settings.base_string, "").await?;
 
         let mut basis_moods = Vec::with_capacity(pairs.len());
         for pair in pairs {
-            let s = global::get_or_embed_cached(
-                pool,
-                embedder,
-                &pair.mood,
-                &settings.prefix_string,
-            )
-            .await?;
+            let s =
+                global::get_or_embed_cached(pool, embedder, &pair.mood, &settings.prefix_string)
+                    .await?;
             let diff: Vec<f32> = s.iter().zip(&v_base).map(|(x, y)| x - y).collect();
             let norm_vector = global::normalize(&diff);
             let oklab = rgb_to_oklab(pair.color);
@@ -140,8 +134,7 @@ impl ColorAxes {
         let mut gram_matrix = vec![vec![0.0_f32; n]; n];
         for i in 0..n {
             for j in 0..n {
-                gram_matrix[i][j] =
-                    global::dot(&basis_moods[i].vector, &basis_moods[j].vector);
+                gram_matrix[i][j] = global::dot(&basis_moods[i].vector, &basis_moods[j].vector);
             }
         }
 
@@ -337,11 +330,7 @@ impl ColorAxes {
         if mood.is_empty() {
             return None;
         }
-        let embedding = match row
-            .embedding
-            .as_deref()
-            .and_then(global::blob_to_embedding)
-        {
+        let embedding = match row.embedding.as_deref().and_then(global::blob_to_embedding) {
             Some(emb) => emb,
             None => match embedder.embed(mood, &self.prefix_string) {
                 Ok(emb) => emb,
@@ -358,8 +347,7 @@ impl ColorAxes {
 /// today-view render path, the background color fill, and the preview
 /// builders. Read-only lookups are pure `get`s; only background tasks (and
 /// the one-shot CLI) run the color pipeline and insert results.
-pub static GLOBAL_MOOD_COLOR_CACHE: LazyLock<DashMap<String, Oklab>> =
-    LazyLock::new(DashMap::new);
+pub static GLOBAL_MOOD_COLOR_CACHE: LazyLock<DashMap<String, Oklab>> = LazyLock::new(DashMap::new);
 
 /// The process-wide [`GLOBAL_MOOD_COLOR_CACHE`].
 pub fn global_mood_color_cache() -> &'static DashMap<String, Oklab> {
@@ -408,14 +396,11 @@ pub async fn compute_mood_colors_and_backfill(
         }
 
         // 1. Resolve embedding (from row blob, or ONNX inference)
-        let (embedding, needs_emb_backfill) = match row
-            .embedding
-            .as_deref()
-            .and_then(global::blob_to_embedding)
-        {
-            Some(emb) => (Some(emb), false),
-            None => (embedder.embed(&row.mood, &axes.prefix_string).ok(), true),
-        };
+        let (embedding, needs_emb_backfill) =
+            match row.embedding.as_deref().and_then(global::blob_to_embedding) {
+                Some(emb) => (Some(emb), false),
+                None => (embedder.embed(&row.mood, &axes.prefix_string).ok(), true),
+            };
 
         let Some(embedding) = embedding else {
             continue;
@@ -429,17 +414,18 @@ pub async fn compute_mood_colors_and_backfill(
 
         // 3. Persist missing fields to DB if pool is provided and row has valid id
         if let Some(pool) = pool
-            && row.id > 0 {
-                let _ = crate::db::update_mood_embedding_and_score(
-                    pool,
-                    row.id,
-                    needs_emb_backfill
-                        .then(|| global::embedding_to_blob(&embedding))
-                        .as_deref(),
-                    needs_score_backfill.then_some(score),
-                )
-                .await;
-            }
+            && row.id > 0
+        {
+            let _ = crate::db::update_mood_embedding_and_score(
+                pool,
+                row.id,
+                needs_emb_backfill
+                    .then(|| global::embedding_to_blob(&embedding))
+                    .as_deref(),
+                needs_score_backfill.then_some(score),
+            )
+            .await;
+        }
 
         // 4. Compute color and update in-memory cache directly
         if !cached {

@@ -36,7 +36,6 @@ pub enum ImAction {
     Tomorrow,
 }
 
-
 impl FromStr for ImAction {
     type Err = String;
 

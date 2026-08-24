@@ -1,6 +1,6 @@
 use anyhow::Context;
 
-use super::super::{is_body_delimiter, Command};
+use super::super::{Command, is_body_delimiter};
 use crate::types::{Task, TaskKind, TaskRef};
 
 pub(crate) fn parse_task_command(mut args: &[String]) -> anyhow::Result<Command> {
@@ -179,14 +179,14 @@ fn parse_parent_task_ref(arg: &str) -> anyhow::Result<Option<TaskRef>> {
 pub(crate) fn parse_task_edit_command(args: &[String]) -> anyhow::Result<Command> {
     debug_assert_eq!(args.len(), 1, "editor routing passes exactly one argument");
     let first = &args[0];
-    let rest = first.strip_prefix('+').expect("routing guarantees a leading '+'");
+    let rest = first
+        .strip_prefix('+')
+        .expect("routing guarantees a leading '+'");
     if rest.is_empty() {
         return Ok(Command::TaskEdit { task: None });
     }
     if rest.chars().all(|c| c.is_ascii_digit()) {
-        let id = rest
-            .parse::<i64>()
-            .context("Task ID must be a number")?;
+        let id = rest.parse::<i64>().context("Task ID must be a number")?;
         return Ok(Command::TaskEdit {
             task: Some(TaskRef::Id(id)),
         });

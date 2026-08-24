@@ -226,7 +226,7 @@ mod tests {
         assert!(is_valid_tracker_name("query")); // 'q' inside a longer name is fine
         assert!(is_valid_tracker_name("vibe"));
         assert!(is_valid_tracker_name("flag")); // 'F' inside a longer name is fine
-                                                // ':' prefix collides with grid view specifiers
+        // ':' prefix collides with grid view specifiers
         assert!(!is_valid_tracker_name(":foo"));
         // forbid '-' or whitespace
         assert!(!is_valid_tracker_name("sleep-time"));

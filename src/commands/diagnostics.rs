@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 use crossterm::style::Stylize;
 use std::io::{BufRead, Write};
 
-use crate::global;
 use crate::cli::CliOpts;
 use crate::config::Config;
+use crate::global;
 
 /// `:embed` — read one text line at a time from stdin, print the embedding
 /// vector for each line as space-separated floats.

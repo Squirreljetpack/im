@@ -1,4 +1,4 @@
-use super::super::{is_body_delimiter, Command};
+use super::super::{Command, is_body_delimiter};
 use crate::types::{Entry, TaskRef};
 
 pub(crate) fn parse_entry_command(args: &[String]) -> anyhow::Result<Command> {
@@ -56,9 +56,7 @@ pub(crate) fn parse_entry_command(args: &[String]) -> anyhow::Result<Command> {
                         s,
                         task_ref_summary(existing)
                     );
-                    anyhow::bail!(
-                        "At most one task reference ('+') is allowed per entry"
-                    );
+                    anyhow::bail!("At most one task reference ('+') is allowed per entry");
                 }
                 // Like a tracker pair, a ref after the mood starts the
                 // end-of-line run: only trackers/delimiter/end may follow.
@@ -73,8 +71,7 @@ pub(crate) fn parse_entry_command(args: &[String]) -> anyhow::Result<Command> {
                     let negative = head[i + 1].starts_with('-')
                         && head[i + 1].len() > 1
                         && head[i + 1][1..].chars().all(|c| c.is_ascii_digit());
-                    let plain =
-                        !head[i + 1].starts_with('-') && !head[i + 1].starts_with('+');
+                    let plain = !head[i + 1].starts_with('-') && !head[i + 1].starts_with('+');
                     if (negative || plain)
                         && let Ok(n) = head[i + 1].parse::<i32>()
                     {

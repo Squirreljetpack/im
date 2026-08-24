@@ -10,11 +10,7 @@ define_restricted_wrapper!(
 );
 impl Percentage {
     pub fn new(value: u16) -> Self {
-        if value <= 100 {
-            Self(value)
-        } else {
-            Self(100)
-        }
+        if value <= 100 { Self(value) } else { Self(100) }
     }
 
     /// Rounds up

@@ -103,7 +103,7 @@ pub mod serde;
 use errors::*;
 use types::*;
 
-pub use errors::{date_error, date_result, DateError, DateResult};
+pub use errors::{DateError, DateResult, date_error, date_result};
 pub use types::{Interval, Month, TimeUnit, Weekday};
 
 #[derive(Debug, Hash, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
@@ -188,9 +188,9 @@ pub fn parse_duration(s: &str) -> DateResult<Interval> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jiff::Timestamp;
     use jiff::civil;
     use jiff::tz::TimeZone;
-    use jiff::Timestamp;
 
     /// The fixed probe base: 2024-03-14 12:34:56 UTC — a Thursday.
     fn base() -> Zoned {
@@ -337,12 +337,12 @@ mod tests {
         // The sign must be consumed: a leading '-' before anything that
         // is not a bare number or a number+unit skip is an error.
         for bad in [
-            "-3pm",   // time, not a unit skip
-            "-3:30",  // formal time
-            "-march", // month name
-            "-fri",   // weekday name
-            "-yesterday", // shortcut
-            "-eod",   // day align
+            "-3pm",         // time, not a unit skip
+            "-3:30",        // formal time
+            "-march",       // month name
+            "-fri",         // weekday name
+            "-yesterday",   // shortcut
+            "-eod",         // day align
             "-next friday", // direction
         ] {
             assert!(
@@ -524,7 +524,10 @@ mod tests {
         assert_eq!(Month::from_name("junior"), None);
         assert_eq!(Month::from_name("sext"), None); // sep-... but not september
         // Number round-trips.
-        assert_eq!(Month::from_number(Month::September.number()), Some(Month::September));
+        assert_eq!(
+            Month::from_number(Month::September.number()),
+            Some(Month::September)
+        );
         assert_eq!(Month::from_number(0), None);
         assert_eq!(Month::from_number(13), None);
     }

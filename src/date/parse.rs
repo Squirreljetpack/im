@@ -4,7 +4,7 @@
 //! need to touch chrono or jiff types.
 
 use anyhow::{Context, Result};
-use jiff_english::{parse_strict, Dialect};
+use jiff_english::{Dialect, parse_strict};
 
 use crate::date::Epoch;
 

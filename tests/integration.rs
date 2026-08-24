@@ -50,7 +50,7 @@ fn day_interval() -> im::config::TrackerInterval {
     im::config::TrackerInterval {
         anchor: im::date::parse_datetime("2020-01-01 00:00", im::date::DATE_DIALECT).unwrap(),
         span: jiff::Span::new().days(1),
-    cumulative: false,
+        cumulative: false,
     }
 }
 
@@ -304,7 +304,7 @@ async fn test_tracker_interval_insert_strategies() {
             interval: Some(im::config::TrackerInterval {
                 anchor: im::date::now(),
                 span: jiff::Span::new().seconds(1),
-            cumulative: false,
+                cumulative: false,
             }),
             low: None,
             high: None,
@@ -544,7 +544,6 @@ async fn test_create_oneshot_task_with_date() {
     assert!(start_time > 0);
 }
 
-
 /// Cumulative interval trackers keep every log: the today view shows each
 /// row with its raw value (summing happens only in the grid).
 #[tokio::test]
@@ -592,10 +591,15 @@ async fn test_cumulative_interval_today_rows() {
     im::color::ColorAxes::build(&pool, &config.moods)
         .await
         .unwrap();
-    let im::today::TodayFetch { entries, .. } =
-        im::today::fetch_today_entries(&pool, &config, TodayHorizon::Today, im::date::today_start(), ViewVariant::All)
-            .await
-            .unwrap();
+    let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
+        &pool,
+        &config,
+        TodayHorizon::Today,
+        im::date::today_start(),
+        ViewVariant::All,
+    )
+    .await
+    .unwrap();
     let rows: Vec<_> = entries
         .iter()
         .filter(|e| e.label.starts_with("pushups:"))
@@ -688,7 +692,10 @@ async fn test_tracker_strict_gate_enforced() {
         insert(&pool, &config, "sleep", ok).await.unwrap();
     }
     for bad in ["3.5", "11"] {
-        let err = insert(&pool, &config, "sleep", bad).await.unwrap_err().to_string();
+        let err = insert(&pool, &config, "sleep", bad)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("tracker 'sleep': value") && err.contains("outside [4, 10]"),
             "strict must reject {bad}, got: {err}"
@@ -708,7 +715,10 @@ async fn test_tracker_strict_gate_enforced() {
         },
     );
     insert(&pool, &config, "pushups", "10").await.unwrap();
-    let err = insert(&pool, &config, "pushups", "9").await.unwrap_err().to_string();
+    let err = insert(&pool, &config, "pushups", "9")
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(
         err.contains("outside [10]"),
         "single-bound strict must reject below-floor values, got: {err}"
@@ -727,7 +737,10 @@ async fn test_tracker_strict_gate_enforced() {
         },
     );
     insert(&pool, &config, "water", "5").await.unwrap();
-    let err = insert(&pool, &config, "water", "9").await.unwrap_err().to_string();
+    let err = insert(&pool, &config, "water", "9")
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(
         err.contains("outside [2, 8]"),
         "inverted bounds must gate the span between them, got: {err}"
@@ -738,7 +751,10 @@ async fn test_tracker_strict_gate_enforced() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(count, 5, "3 sleep + 1 pushups + 1 water accepted rows; 4 rejected");
+    assert_eq!(
+        count, 5,
+        "3 sleep + 1 pushups + 1 water accepted rows; 4 rejected"
+    );
 }
 
 #[tokio::test]
@@ -1003,7 +1019,12 @@ async fn test_update_at_name_fails_as_query() {
     )
     .await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("No task found matching"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("No task found matching")
+    );
 }
 
 #[tokio::test]
@@ -1057,11 +1078,7 @@ async fn test_update_by_query_words_multiword_in_order() {
 
     // A '+' word-query ref is a single attached token now ("+and"): it
     // matches only the first task ("and" appears in order in its name).
-    let cmd = parse_from(vec![
-        "+and".to_string(),
-        "1".to_string(),
-    ])
-    .unwrap();
+    let cmd = parse_from(vec!["+and".to_string(), "1".to_string()]).unwrap();
     execute_command(
         cmd,
         &pool,
@@ -1139,7 +1156,12 @@ async fn test_update_by_query_words_no_match_fails() {
     )
     .await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("No task found matching"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("No task found matching")
+    );
 }
 
 #[tokio::test]
@@ -1513,10 +1535,15 @@ async fn test_today_view_linked_trackers_and_tasks() {
         .await
         .unwrap();
 
-    let im::today::TodayFetch { entries, .. } =
-        im::today::fetch_today_entries(&pool, &config, TodayHorizon::Today, im::date::today_start(), ViewVariant::All)
-            .await
-            .unwrap();
+    let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
+        &pool,
+        &config,
+        TodayHorizon::Today,
+        im::date::today_start(),
+        ViewVariant::All,
+    )
+    .await
+    .unwrap();
     let mood = entries
         .iter()
         .find(|e| e.kind == EntryKind::Mood)
@@ -1628,10 +1655,15 @@ async fn test_today_view_null_labels_relog_and_prev() {
         .await
         .unwrap();
 
-    let im::today::TodayFetch { entries, .. } =
-        im::today::fetch_today_entries(&pool, &config, TodayHorizon::Today, im::date::today_start(), ViewVariant::All)
-            .await
-            .unwrap();
+    let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
+        &pool,
+        &config,
+        TodayHorizon::Today,
+        im::date::today_start(),
+        ViewVariant::All,
+    )
+    .await
+    .unwrap();
 
     // Null rows carry no payload: the name alone.
     let water = entries
@@ -1668,10 +1700,15 @@ async fn test_today_view_null_labels_relog_and_prev() {
         .await
         .unwrap();
 
-    let im::today::TodayFetch { entries, .. } =
-        im::today::fetch_today_entries(&pool, &config, TodayHorizon::Today, im::date::today_start(), ViewVariant::All)
-            .await
-            .unwrap();
+    let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
+        &pool,
+        &config,
+        TodayHorizon::Today,
+        im::date::today_start(),
+        ViewVariant::All,
+    )
+    .await
+    .unwrap();
     let water = entries
         .iter()
         .find(|e| e.id == Some(water_id))
@@ -2211,10 +2248,11 @@ async fn test_task_mood_links() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    let links: Vec<(i64, i64)> = sqlx::query_as("SELECT todo_id, id FROM mood WHERE todo_id IS NOT NULL")
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+    let links: Vec<(i64, i64)> =
+        sqlx::query_as("SELECT todo_id, id FROM mood WHERE todo_id IS NOT NULL")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
     assert_eq!(links.len(), 2, "both links recorded");
     assert!(links.contains(&(1, felt_id)));
     assert!(links.contains(&(2, tired_id)));
@@ -2373,15 +2411,14 @@ async fn test_null_tracker_semantics() {
         .await
         .unwrap();
     }
-    let sips_rows: Vec<String> = sqlx::query(
-        "SELECT CAST(score AS TEXT) AS s FROM tracker WHERE type = 'sips' ORDER BY id",
-    )
-    .fetch_all(&pool)
-    .await
-    .unwrap()
-    .into_iter()
-    .map(|r| r.get::<String, _>("s"))
-    .collect();
+    let sips_rows: Vec<String> =
+        sqlx::query("SELECT CAST(score AS TEXT) AS s FROM tracker WHERE type = 'sips' ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.get::<String, _>("s"))
+            .collect();
     assert_eq!(sips_rows.len(), 2, "cumulative keeps every log");
     assert_eq!(sips_rows, vec!["0".to_string(), "0".to_string()]);
 
@@ -2724,7 +2761,7 @@ async fn test_today_view_per_window_recurring_rows() {
                 &pool,
                 &config,
                 im::types::TodayHorizon::Today,
-        anchored_day,
+                anchored_day,
                 $show,
             )
             .await
@@ -2746,10 +2783,7 @@ async fn test_today_view_per_window_recurring_rows() {
     // B: only the next (earliest) window per task.
     assert_eq!(get_labels!(im::types::ViewVariant::B), ["03:00"]);
     // A: displays completions instead of tasks — only the completed 08:30 event appears.
-    assert_eq!(
-        get_labels!(im::types::ViewVariant::A),
-        ["08:30"]
-    );
+    assert_eq!(get_labels!(im::types::ViewVariant::A), ["08:30"]);
 }
 
 /// A completed recurring window shows the last completion time even while
@@ -3212,7 +3246,10 @@ async fn test_tracker_mood_dots() {
         verbose_cmd,
         &pool,
         &config,
-        &CliOpts { qv: [0, 1], fullscreen: false },
+        &CliOpts {
+            qv: [0, 1],
+            fullscreen: false,
+        },
         &mut out,
         false,
     )
@@ -3229,7 +3266,10 @@ async fn test_tracker_mood_dots() {
         vv_cmd,
         &pool,
         &config,
-        &CliOpts { qv: [0, 2], fullscreen: false },
+        &CliOpts {
+            qv: [0, 2],
+            fullscreen: false,
+        },
         &mut out,
         false,
     )
@@ -3288,7 +3328,10 @@ async fn test_tracker_dots() {
         vv_cmd,
         &pool,
         &config,
-        &CliOpts { qv: [0, 2], fullscreen: false },
+        &CliOpts {
+            qv: [0, 2],
+            fullscreen: false,
+        },
         &mut out,
         false,
     )
@@ -3346,7 +3389,10 @@ async fn test_tracker_recurring_dots() {
         vv_cmd,
         &pool,
         &config,
-        &CliOpts { qv: [0, 2], fullscreen: false },
+        &CliOpts {
+            qv: [0, 2],
+            fullscreen: false,
+        },
         &mut out,
         false,
     )
@@ -3406,7 +3452,10 @@ async fn test_tracker_recurring_year_uses_middle_dot() {
         vv_cmd,
         &pool,
         &config,
-        &CliOpts { qv: [0, 2], fullscreen: false },
+        &CliOpts {
+            qv: [0, 2],
+            fullscreen: false,
+        },
         &mut out,
         false,
     )
@@ -3736,10 +3785,9 @@ async fn test_tracker_parse_errors() {
     .await;
     assert!(result.is_err());
     assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("Cannot parse 'good' for tracker 'sleep' (kind=float): expected a plain number"),
+        result.unwrap_err().to_string().contains(
+            "Cannot parse 'good' for tracker 'sleep' (kind=float): expected a plain number"
+        ),
         "expected a clear float parse error"
     );
 
@@ -3780,10 +3828,9 @@ async fn test_tracker_parse_errors() {
     .await;
     assert!(result.is_err());
     assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("Cannot parse '3.5' for tracker 'bugs' (kind=integer): expected a plain whole number"),
+        result.unwrap_err().to_string().contains(
+            "Cannot parse '3.5' for tracker 'bugs' (kind=integer): expected a plain whole number"
+        ),
         "expected a clear integer parse error"
     );
 
@@ -3802,7 +3849,9 @@ async fn test_tracker_parse_errors() {
         .await;
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("Cannot parse") && err.contains("(kind=integer)") && err.contains("expected a plain whole number"),
+            err.contains("Cannot parse")
+                && err.contains("(kind=integer)")
+                && err.contains("expected a plain whole number"),
             "integer must reject {bad}, got: {err}"
         );
     }
@@ -4002,14 +4051,20 @@ async fn test_today_view_tasks_filters() {
         let pool = &pool;
         let base = &config;
         async move {
-            im::today::fetch_today_entries(pool, base, im::types::TodayHorizon::Today, im::date::today_start(), show)
-                .await
-                .unwrap()
-                .entries
-                .into_iter()
-                .filter(|e| e.kind.is_task())
-                .map(|e| e.label)
-                .collect::<Vec<_>>()
+            im::today::fetch_today_entries(
+                pool,
+                base,
+                im::types::TodayHorizon::Today,
+                im::date::today_start(),
+                show,
+            )
+            .await
+            .unwrap()
+            .entries
+            .into_iter()
+            .filter(|e| e.kind.is_task())
+            .map(|e| e.label)
+            .collect::<Vec<_>>()
         }
     };
 
@@ -4661,11 +4716,7 @@ async fn test_untoggle_reassigns_smallest_free_short_id() {
     // Undo via the word query form (`- <words> -1`): a completed task has no
     // short id, so it's only addressable by words. Untoggling reassigns the
     // smallest free short id (1 — the completed task's own former slot).
-    let cmd = parse_from(vec![
-        "+toggle".to_string(),
-        "-1".to_string(),
-    ])
-    .unwrap();
+    let cmd = parse_from(vec!["+toggle".to_string(), "-1".to_string()]).unwrap();
     execute_command(
         cmd,
         &pool,
@@ -6204,7 +6255,10 @@ async fn test_today_view_journal_shows_oneshot_completions_with_progress_and_pre
         None,
     );
     let preview1_text: String = preview1.into_iter().map(|l| l.to_string()).collect();
-    assert!(preview1_text.contains("2/5"), "preview 1 must show 2/5: {preview1_text}");
+    assert!(
+        preview1_text.contains("2/5"),
+        "preview 1 must show 2/5: {preview1_text}"
+    );
 
     let preview2 = im::ui::build_preview(
         task_entries[1].task.as_ref().unwrap(),
@@ -6216,7 +6270,10 @@ async fn test_today_view_journal_shows_oneshot_completions_with_progress_and_pre
         None,
     );
     let preview2_text: String = preview2.into_iter().map(|l| l.to_string()).collect();
-    assert!(preview2_text.contains("3/5"), "preview 2 must show 3/5: {preview2_text}");
+    assert!(
+        preview2_text.contains("3/5"),
+        "preview 2 must show 3/5: {preview2_text}"
+    );
 
     let preview3 = im::ui::build_preview(
         task_entries[2].task.as_ref().unwrap(),
@@ -6228,7 +6285,10 @@ async fn test_today_view_journal_shows_oneshot_completions_with_progress_and_pre
         None,
     );
     let preview3_text: String = preview3.into_iter().map(|l| l.to_string()).collect();
-    assert!(preview3_text.contains("4/5"), "preview 3 must show 4/5: {preview3_text}");
+    assert!(
+        preview3_text.contains("4/5"),
+        "preview 3 must show 4/5: {preview3_text}"
+    );
 }
 
 #[tokio::test]
@@ -6258,7 +6318,9 @@ async fn test_today_view_tasks_variant_omits_completed_today() {
     .unwrap();
 
     // Show: Tasks (ViewVariant::B) should not explicitly include tasks completed today.
-    let im::today::TodayFetch { entries: entries_b, .. } = im::today::fetch_today_entries(
+    let im::today::TodayFetch {
+        entries: entries_b, ..
+    } = im::today::fetch_today_entries(
         &pool,
         &config,
         im::types::TodayHorizon::Today,
@@ -6276,7 +6338,10 @@ async fn test_today_view_tasks_variant_omits_completed_today() {
     );
 
     // Show: All (ViewVariant::All) should include tasks completed today.
-    let im::today::TodayFetch { entries: entries_all, .. } = im::today::fetch_today_entries(
+    let im::today::TodayFetch {
+        entries: entries_all,
+        ..
+    } = im::today::fetch_today_entries(
         &pool,
         &config,
         im::types::TodayHorizon::Today,
@@ -6301,32 +6366,37 @@ async fn test_mood_links_at_most_one_task() {
     let t2 = insert_oneshot(&pool, "task 2", 1_700_000_000, 1).await;
 
     // Create a mood entry.
-    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (100, 'focused', '', 1_700_000_000)")
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO mood (id, mood, body, time) VALUES (100, 'focused', '', 1_700_000_000)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     // Link mood 100 to task 1.
     im::db::link_mood_to_task(&pool, 100, t1).await.unwrap();
-    let links: Vec<(Option<i64>, i64)> = sqlx::query_as("SELECT todo_id, id FROM mood WHERE id = 100")
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+    let links: Vec<(Option<i64>, i64)> =
+        sqlx::query_as("SELECT todo_id, id FROM mood WHERE id = 100")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
     assert_eq!(links, vec![(Some(t1), 100)]);
 
     // Link mood 100 to task 2 (replaces link to task 1).
     im::db::link_mood_to_task(&pool, 100, t2).await.unwrap();
-    let links: Vec<(Option<i64>, i64)> = sqlx::query_as("SELECT todo_id, id FROM mood WHERE id = 100")
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+    let links: Vec<(Option<i64>, i64)> =
+        sqlx::query_as("SELECT todo_id, id FROM mood WHERE id = 100")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
     assert_eq!(links, vec![(Some(t2), 100)]);
 
     // Link via link_mood_to_tasks replaces as well.
     im::db::link_mood_to_tasks(&pool, 100, &[t1]).await.unwrap();
-    let links: Vec<(Option<i64>, i64)> = sqlx::query_as("SELECT todo_id, id FROM mood WHERE id = 100")
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+    let links: Vec<(Option<i64>, i64)> =
+        sqlx::query_as("SELECT todo_id, id FROM mood WHERE id = 100")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
     assert_eq!(links, vec![(Some(t1), 100)]);
 }

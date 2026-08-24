@@ -20,8 +20,8 @@ use ratatui::{
 use std::sync::{Arc, Mutex};
 
 use crate::config::{Config, TrackerKind};
-use crate::global::{config, pool, GLOBAL_CONFIG};
 use crate::db::{TaskRow, TrackerValue};
+use crate::global::{GLOBAL_CONFIG, config, pool};
 use crate::task::{
     AcceptAction, accept_action, apply_accept_action, apply_completion_delta, reset_task_progress,
 };
@@ -176,12 +176,11 @@ impl TodayApp {
                 }
                 spans.push(Span::styled(label, Style::default().fg(Color::White)));
                 Text::from(Line::from(spans))
-            })
+            }),
         ];
 
         let worker = Worker::new(
-            columns,
-            // Default column: label (index 2, after priority + time).
+            columns, // Default column: label (index 2, after priority + time).
             2,
         );
         // The accept hook reports the selected entry (its item kind + row
@@ -192,10 +191,7 @@ impl TodayApp {
         let mut mm = Matchmaker::new(worker, |state: &mut MMState<'_, TodayEntry, ()>| {
             state
                 .current_raw()
-                .and_then(|e| {
-                    e.id.or(e.task_id)
-                        .map(|id| (ItemKind::from(e.kind), id))
-                })
+                .and_then(|e| e.id.or(e.task_id).map(|id| (ItemKind::from(e.kind), id)))
                 .into_iter()
                 .collect()
         });
@@ -316,12 +312,8 @@ impl TodayApp {
                     while let Ok(more) = color_rx.try_recv() {
                         rows.extend(more);
                     }
-                    let added = crate::color::compute_mood_colors_and_backfill(
-                        pool_opt,
-                        &rows,
-                        axes,
-                    )
-                    .await;
+                    let added =
+                        crate::color::compute_mood_colors_and_backfill(pool_opt, &rows, axes).await;
                     if added > 0 {
                         let _ = bg_render_tx.send(RenderCommand::Redraw);
                     }
@@ -645,9 +637,9 @@ async fn accept_entry(ctx: &TodayCtx, entry: TodayEntry) {
             id,
             body: entry.body.clone(),
         });
-        let _ = ctx
-            .tx
-            .send(RenderCommand::Action(MMAction::Custom(ImAction::EditExecute)));
+        let _ = ctx.tx.send(RenderCommand::Action(MMAction::Custom(
+            ImAction::EditExecute,
+        )));
         return;
     }
     if let Some(window) = &entry.recurring_window {
@@ -740,8 +732,7 @@ async fn tracker_accept(ctx: &TodayCtx, kind: TrackerKind, tracker_id: Option<i6
         if let Some(interval) = setting.interval {
             let current =
                 crate::date::interval_slot_unix_secs(interval.anchor, interval.span, row_time);
-            let target =
-                crate::date::interval_slot_unix_secs(interval.anchor, interval.span, now);
+            let target = crate::date::interval_slot_unix_secs(interval.anchor, interval.span, now);
             if !matches!((current, target), (Some(c), Some(t)) if c == t) {
                 log::error!(
                     "tracker '{tracker_type}': cannot move the entry into a different interval slot"
@@ -757,7 +748,10 @@ async fn tracker_accept(ctx: &TodayCtx, kind: TrackerKind, tracker_id: Option<i6
         .split_once(':')
         .map(|(n, _)| n.trim().to_string())
         .unwrap_or_default();
-    open_input(ctx.clone(), update_tracker_prompt(ctx, tracker_id, &tracker_type, kind));
+    open_input(
+        ctx.clone(),
+        update_tracker_prompt(ctx, tracker_id, &tracker_type, kind),
+    );
 }
 
 /// The strict-gate measure for a parsed tracker value: the numeric score
@@ -789,7 +783,8 @@ async fn submit_tracker_update(
         }
     };
     if let Some(setting) = config().tracker.get(tracker_type)
-        && let Err(e) = crate::tracker::enforce_strict(tracker_type, setting, tracker_measure(&parsed))
+        && let Err(e) =
+            crate::tracker::enforce_strict(tracker_type, setting, tracker_measure(&parsed))
     {
         log::error!("{e}");
         return;
@@ -1189,9 +1184,6 @@ mod tests {
         assert_eq!(day_label_for(today - 86400), "Yesterday");
         // Any other day → DD-MM-YY.
         let other = crate::date::parse_datetime("2024-03-15", crate::date::DATE_DIALECT).unwrap();
-        assert_eq!(
-            day_label_for(crate::date::day_start(other)),
-            "15-03-24"
-        );
+        assert_eq!(day_label_for(crate::date::day_start(other)), "15-03-24");
     }
 }

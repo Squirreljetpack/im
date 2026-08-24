@@ -753,7 +753,7 @@ pub async fn reset_task_completions(pool: &SqlitePool, id: i64, floor: Option<i6
 mod tests {
     use super::*;
     use crate::db::test_pool;
-    use crate::db::{create_task, TaskObject};
+    use crate::db::{TaskObject, create_task};
 
     /// Seed a root-level task; returns its id.
     async fn seed_task(pool: &SqlitePool, name: &str) -> i64 {

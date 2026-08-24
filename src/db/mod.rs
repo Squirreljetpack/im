@@ -3,7 +3,6 @@ use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-
 pub async fn init_database(db_path: &Path) -> anyhow::Result<SqlitePool> {
     // Ensure parent directory exists
     if let Some(parent) = db_path.parent() {
@@ -67,7 +66,7 @@ pub fn delete_database(db_path: &Path) -> Result<()> {
             Ok(()) => log::debug!("Removed {}", path.display()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
-                return Err(e).with_context(|| format!("Failed to remove {}", path.display()))
+                return Err(e).with_context(|| format!("Failed to remove {}", path.display()));
             }
         }
     }

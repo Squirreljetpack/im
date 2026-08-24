@@ -109,10 +109,7 @@ pub fn nnls(columns: &[Vec<f32>], b: &[f32], max_iter: usize) -> Vec<f32> {
         return Vec::new();
     }
 
-    let at_b: Vec<f32> = columns
-        .iter()
-        .map(|col| global::dot(col, b))
-        .collect();
+    let at_b: Vec<f32> = columns.iter().map(|col| global::dot(col, b)).collect();
 
     let mut at_a = vec![vec![0.0_f32; n]; n];
     for i in 0..n {

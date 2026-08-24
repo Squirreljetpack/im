@@ -27,22 +27,18 @@ pub async fn update_mood_embedding_and_score(
                 .await
                 .context("Failed to update mood embedding and score")?
         }
-        (Some(blob), None) => {
-            sqlx::query("UPDATE mood SET embedding = ? WHERE id = ?")
-                .bind(blob)
-                .bind(id)
-                .execute(pool)
-                .await
-                .context("Failed to update mood embedding")?
-        }
-        (None, Some(score)) => {
-            sqlx::query("UPDATE mood SET score = ? WHERE id = ?")
-                .bind(score)
-                .bind(id)
-                .execute(pool)
-                .await
-                .context("Failed to update mood score")?
-        }
+        (Some(blob), None) => sqlx::query("UPDATE mood SET embedding = ? WHERE id = ?")
+            .bind(blob)
+            .bind(id)
+            .execute(pool)
+            .await
+            .context("Failed to update mood embedding")?,
+        (None, Some(score)) => sqlx::query("UPDATE mood SET score = ? WHERE id = ?")
+            .bind(score)
+            .bind(id)
+            .execute(pool)
+            .await
+            .context("Failed to update mood score")?,
         (None, None) => return Ok(0),
     };
     Ok(res.rows_affected())

@@ -100,7 +100,14 @@ async fn today_tui_row_content_renders() {
     seed_mood(&pool, "sad", "").await;
 
     let config = Config::default();
-    let app = TodayApp::new(config, im::date::today_start(), ViewVariant::All, TodayHorizon::Today, false).await;
+    let app = TodayApp::new(
+        config,
+        im::date::today_start(),
+        ViewVariant::All,
+        TodayHorizon::Today,
+        false,
+    )
+    .await;
     // Quit once the mood row shows up.
     app.run_with(headless_cfg("sad")).await.unwrap();
 
@@ -132,8 +139,6 @@ fn strip_ansi(s: &str) -> String {
     }
     out
 }
-
-
 
 /// Reconstruct the last screen state from the raw ANSI capture: the diff
 /// writer skips unchanged cells (e.g. the spaces inside the ui border
@@ -204,7 +209,14 @@ async fn today_tui_menu_title() {
     im::global::set_pool(pool.clone());
     seed_mood(&pool, "sad", "").await;
     let config = Config::default();
-    let app = TodayApp::new(config, im::date::today_start(), ViewVariant::All, TodayHorizon::Today, false).await;
+    let app = TodayApp::new(
+        config,
+        im::date::today_start(),
+        ViewVariant::All,
+        TodayHorizon::Today,
+        false,
+    )
+    .await;
     // Quit on any rendered frame (the title is set by the initializer).
     app.run_with(headless_cfg("Today")).await.unwrap();
 
@@ -222,8 +234,7 @@ async fn today_tui_menu_title() {
         .unwrap()
         .trim();
     assert_eq!(
-        title_text,
-        "Today [sort: time] [show: all]",
+        title_text, "Today [sort: time] [show: all]",
         "menu title must render the full header label: {title:?}"
     );
 }
@@ -242,7 +253,14 @@ async fn today_tui_alt_h_help_toggles() {
     im::global::set_pool(pool.clone());
     seed_mood(&pool, "sad", "").await;
     let config = Config::default();
-    let app = TodayApp::new(config, im::date::today_start(), ViewVariant::All, TodayHorizon::Today, false).await;
+    let app = TodayApp::new(
+        config,
+        im::date::today_start(),
+        ViewVariant::All,
+        TodayHorizon::Today,
+        false,
+    )
+    .await;
 
     // The on_start task records the last screen at each stage; the
     // assertions run after run_with returns so a failed stage can never
@@ -339,7 +357,14 @@ async fn today_tui_resize_shrinks_to_small_window() {
     seed_mood(&pool, "sad", "").await;
     seed_mood(&pool, "okay", "").await;
     let config = Config::default();
-    let app = TodayApp::new(config, im::date::today_start(), ViewVariant::All, TodayHorizon::Today, false).await;
+    let app = TodayApp::new(
+        config,
+        im::date::today_start(),
+        ViewVariant::All,
+        TodayHorizon::Today,
+        false,
+    )
+    .await;
 
     let cfg = TodayRunCfg {
         tui: Some(TerminalConfig {
@@ -350,7 +375,15 @@ async fn today_tui_resize_shrinks_to_small_window() {
         on_start: Some(Box::new(move |tx| {
             tokio::spawn(async move {
                 // Sweep through small sizes, one resize per frame-ish.
-                for (w, h) in [(60, 20), (40, 12), (30, 10), (24, 8), (18, 6), (12, 5), (8, 4)] {
+                for (w, h) in [
+                    (60, 20),
+                    (40, 12),
+                    (30, 10),
+                    (24, 8),
+                    (18, 6),
+                    (12, 5),
+                    (8, 4),
+                ] {
                     let _ = tx.send(RenderCommand::Resize(Rect::new(0, 0, w, h)));
                     tokio::time::sleep(Duration::from_millis(120)).await;
                 }

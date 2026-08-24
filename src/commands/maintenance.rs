@@ -3,13 +3,13 @@ use cba::{ebog, ibog};
 use sqlx::SqlitePool;
 use std::collections::{BTreeMap, HashMap};
 
-use crate::global;
 use crate::config::{
-    Config, TrackerKind, TrackerSetting, DEFAULT_CONFIG, DEFAULT_MOODS, DEFAULT_TRACKER_COLORS,
+    Config, DEFAULT_CONFIG, DEFAULT_MOODS, DEFAULT_TRACKER_COLORS, TrackerKind, TrackerSetting,
 };
 use crate::date;
 use crate::db::{TrackerPruneRule, TrackerScoreKindRow};
 use crate::editor::open_editor_at;
+use crate::global;
 use crate::paths::{colors_path, default_config_path};
 
 /// `im :clear [@date]` — clear/delete all mood entries from that day.
@@ -136,9 +136,10 @@ pub(super) async fn db_backfill(pool: &SqlitePool) -> Result<()> {
                 .then(|| crate::color::predict_saliency(embedder, &mood.mood)),
         )
         .await
-            && rows > 0 {
-                backfilled += 1;
-            }
+            && rows > 0
+        {
+            backfilled += 1;
+        }
     }
 
     if backfilled == 0 {
@@ -527,10 +528,7 @@ mod tests {
             vec![TrackerPruneLine {
                 tracker_type: "pills".to_string(),
                 reason: "kind null (null rows store score 0)".to_string(),
-                per_storage: vec![
-                    ("integer ≠ 0".to_string(), 3),
-                    ("text".to_string(), 1),
-                ],
+                per_storage: vec![("integer ≠ 0".to_string(), 3), ("text".to_string(), 1),],
                 total: 4,
             }]
         );

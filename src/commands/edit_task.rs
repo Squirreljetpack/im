@@ -18,10 +18,11 @@ pub(super) async fn handle_task_edit(
     // Resolve task id
     let task_id = match task_ref {
         None | Some(TaskRef::Pick) => {
-            let picked = crate::ui::oneshots::OneshotPickerApp::new(config.clone(), opts.fullscreen)
-                .await?
-                .run()
-                .await?;
+            let picked =
+                crate::ui::oneshots::OneshotPickerApp::new(config.clone(), opts.fullscreen)
+                    .await?
+                    .run()
+                    .await?;
             let Some((id, _)) = picked else {
                 return Ok(());
             };
@@ -38,7 +39,11 @@ pub(super) async fn handle_task_edit(
             match matches.len() {
                 0 => anyhow::bail!("No task found matching query '{}'", words.join(" ")),
                 1 => matches[0].id,
-                n => anyhow::bail!("Multiple tasks match query '{}' (found {})", words.join(" "), n),
+                n => anyhow::bail!(
+                    "Multiple tasks match query '{}' (found {})",
+                    words.join(" "),
+                    n
+                ),
             }
         }
     };
@@ -203,13 +208,11 @@ pub(super) async fn handle_task_edit(
                 }
             }
             "parent" => {
-                let picked = crate::ui::oneshots::OneshotPickerApp::new(
-                    config.clone(),
-                    opts.fullscreen,
-                )
-                .await?
-                .run()
-                .await?;
+                let picked =
+                    crate::ui::oneshots::OneshotPickerApp::new(config.clone(), opts.fullscreen)
+                        .await?
+                        .run()
+                        .await?;
                 if let Some((id, _)) = picked {
                     parent = Some(id);
                 }
@@ -227,8 +230,8 @@ pub(super) async fn handle_task_edit(
                 }
             }
             "interval" => {
-                let cur = interval_secs
-                    .map(|s| crate::date::format_span(&crate::date::db_to_span(s)));
+                let cur =
+                    interval_secs.map(|s| crate::date::format_span(&crate::date::db_to_span(s)));
                 if let Ok(s) = crate::prompts::prompt_interval(cur.as_deref()) {
                     let span = crate::date::parse_span(&s)?;
                     interval_secs = Some(crate::date::span_to_db(&span));

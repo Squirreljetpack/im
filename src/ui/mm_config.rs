@@ -2,7 +2,7 @@ use cba::bait::TransformExt;
 use matchmaker::{
     action::Action as MMAction,
     bindmap,
-    binds::{key, BindMap, BindMapExt},
+    binds::{BindMap, BindMapExt, key},
     config::{OverlayConfig, RenderConfig, TerminalConfig},
 };
 

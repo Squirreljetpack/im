@@ -1,12 +1,12 @@
 use anyhow::Result;
 use sqlx::SqlitePool;
 
-use crate::global;
 use crate::cli::CliOpts;
 use crate::config::{Config, TrackerInterval, TrackerKind};
 use crate::date;
 use crate::db::{EntryObject, TrackerObject, TrackerValue};
 use crate::editor::open_editor_for_body;
+use crate::global;
 use crate::tracker::parse_tracker_value;
 use crate::types::{Entry, TaskRef};
 
@@ -59,7 +59,9 @@ pub(super) async fn record_entry(
                 if crossterm::event::poll(std::time::Duration::from_millis(200))?
                     && let crossterm::event::Event::Key(key) = crossterm::event::read()?
                 {
-                    if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                    if key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL)
                         && key.code == crossterm::event::KeyCode::Char('c')
                     {
                         println!();
@@ -99,13 +101,17 @@ pub(super) async fn record_entry(
                 }
                 if render {
                     let remaining = total_dur.saturating_sub(elapsed_active);
-                    print!("\r{}", crate::date::format_countdown(remaining.as_secs() as i64));
+                    print!(
+                        "\r{}",
+                        crate::date::format_countdown(remaining.as_secs() as i64)
+                    );
                     let _ = std::io::stdout().flush();
                 }
             }
 
             drop(_raw);
-            if render {                print!("\r\x1b[2K");
+            if render {
+                print!("\r\x1b[2K");
                 let _ = std::io::stdout().flush();
                 if ended_early {
                     cliclack::log::info("Session ended")?;
@@ -209,7 +215,9 @@ pub(super) async fn record_entry(
                     if !crate::tracker::null_zone_contains(tracker, time_epoch) {
                         anyhow::bail!(
                             "tracker '{}': cannot log at this time — outside the strict [{}, {}] offset zone",
-                            tracker_type, low, high
+                            tracker_type,
+                            low,
+                            high
                         );
                     }
                 }
@@ -316,10 +324,7 @@ pub(super) async fn record_entry(
             TaskRef::Words(words) => {
                 let matches = crate::db::fetch_task_matching_words(pool, &words).await?;
                 match matches.len() {
-                    0 => anyhow::bail!(
-                        "No task found matching query '{}'",
-                        words.join(" ")
-                    ),
+                    0 => anyhow::bail!("No task found matching query '{}'", words.join(" ")),
                     1 => matches[0].id,
                     n => anyhow::bail!(
                         "Multiple tasks match query '{}' (found {})",
@@ -357,9 +362,7 @@ pub(super) async fn record_entry(
         match mood_id {
             Some(mood_id) => crate::db::link_mood_to_tasks(pool, mood_id, &[task_id]).await?,
             None if entry_count.is_none() => {
-                anyhow::bail!(
-                    "Task links (+<ref>) require a mood or journal entry to attach to"
-                );
+                anyhow::bail!("Task links (+<ref>) require a mood or journal entry to attach to");
             }
             None => {}
         }
