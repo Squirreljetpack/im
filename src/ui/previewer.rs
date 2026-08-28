@@ -1,14 +1,24 @@
 //! Lightweight previewer: owns the preview content as a shared
-//! `Text<'static>` that matchmaker's `Preview` widget renders every frame.
+//! `Override::Text` that matchmaker's `Preview` widget renders every frame.
 //! The UI event listener calls [`Previewer::update_today`] /
 //! [`Previewer::update_task`] with the current item (cloned once at the
 //! call site); each call bumps an internal generation counter — dropping
 //! stale in-flight computes — and spawns the async build, which writes the
-//! shared string only when its generation is still current.
+//! shared override only when its generation is still current and then nudges
+//! the event loop with `Event::Tick` — the same wake-up matchmaker's image
+//! worker uses after an async build lands.
+//!
+//! The nudge is required: the render loop draws a frame only for input and
+//! for ticks it is still subscribed to, and once the first `Event::Synced`
+//! arrives idle ticks stop. A compute that lands after the frame its event
+//! triggered would otherwise stay invisible until the next keypress or mouse
+//! event.
 
-use matchmaker::preview::{AppendOnly, Preview};
+use matchmaker::event::EventSender;
+use matchmaker::message::Event;
+use matchmaker::preview::{AppendOnly, Override, Preview};
 use ratatui::text::Text;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::color::ColorAxes;
@@ -24,32 +34,37 @@ use tokio::sync::OnceCell;
 
 #[derive(Clone)]
 pub struct Previewer {
-    /// The preview content the `Preview` widget renders; `None` = blank.
-    string: Arc<Mutex<Option<Text<'static>>>>,
+    /// The content the `Preview` widget renders; `Override::None` = blank.
+    content: Arc<Mutex<Override>>,
     /// Bumped on every update/stop; in-flight computes check their captured
     /// value before writing, so stale results never overwrite newer ones.
     generation: Arc<AtomicU64>,
     /// Lazily initialized color axes shared across the app run.
     axes: Arc<OnceCell<ColorAxes>>,
+    /// Wakes the render loop so a compute that landed after its frame is
+    /// painted shows up without waiting for the next input event.
+    event_tx: EventSender,
 }
 
 impl Previewer {
-    pub fn new(axes: Arc<OnceCell<ColorAxes>>) -> Self {
+    pub fn new(axes: Arc<OnceCell<ColorAxes>>, event_tx: EventSender) -> Self {
         Self {
-            string: Arc::new(Mutex::new(None)),
+            content: Arc::new(Mutex::new(Override::None)),
             generation: Arc::new(AtomicU64::new(0)),
             axes,
+            event_tx,
         }
     }
 
     /// The widget to attach via `PickOptions::preview`. The append-only
-    /// lines stay empty (the string override wins); the changed flag is a
-    /// no-op — matchmaker re-reads the string on every frame.
+    /// lines stay empty (the text override wins) and the widget's own
+    /// generation counter is unused (it only drives image loading).
     pub fn view(&self) -> Preview {
         Preview::new(
             AppendOnly::new(),
-            self.string.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Default::default(),
+            self.content.clone(),
+            Arc::new(AtomicUsize::new(0)),
         )
     }
 
@@ -59,23 +74,24 @@ impl Previewer {
     /// overwrite it.
     pub fn set_text(&self, text: Text<'static>) {
         self.generation.fetch_add(1, Ordering::SeqCst);
-        *self.string.lock().unwrap() = Some(text);
+        *self.content.lock().unwrap() = Override::Text(text);
     }
 
     /// Blank the preview and invalidate in-flight computes.
     pub fn stop(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
-        *self.string.lock().unwrap() = None;
+        *self.content.lock().unwrap() = Override::None;
     }
 
     /// Kickstart a preview compute for a today-view entry.
     pub fn update_today(&self, entry: TodayEntry) {
         let my_gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let string = self.string.clone();
+        let content = self.content.clone();
         let generation = self.generation.clone();
         let pool = pool();
         let config = config().clone();
         let axes_cell = self.axes.clone();
+        let event_tx = self.event_tx.clone();
         tokio::spawn(async move {
             let lines = if let Some(task_id) = entry.task_id {
                 let task_opt = if let Some(w) = &entry.recurring_window {
@@ -146,7 +162,8 @@ impl Previewer {
                 build_today_preview(&entry, &config)
             };
             if generation.load(Ordering::SeqCst) == my_gen {
-                *string.lock().unwrap() = Some(Text::from(lines));
+                *content.lock().unwrap() = Override::Text(Text::from(lines));
+                let _ = event_tx.send(Event::Tick);
             }
         });
     }
@@ -154,11 +171,12 @@ impl Previewer {
     /// Kickstart a preview compute for a tasks-view row.
     pub fn update_task(&self, task: TaskRow) {
         let my_gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let string = self.string.clone();
+        let content = self.content.clone();
         let generation = self.generation.clone();
         let pool = pool();
         let config = config().clone();
         let axes_cell = self.axes.clone();
+        let event_tx = self.event_tx.clone();
         tokio::spawn(async move {
             let linked_moods = crate::db::fetch_linked_moods(&pool, task.id)
                 .await
@@ -204,7 +222,8 @@ impl Previewer {
                 tree.as_ref(),
             );
             if generation.load(Ordering::SeqCst) == my_gen {
-                *string.lock().unwrap() = Some(Text::from(lines));
+                *content.lock().unwrap() = Override::Text(Text::from(lines));
+                let _ = event_tx.send(Event::Tick);
             }
         });
     }

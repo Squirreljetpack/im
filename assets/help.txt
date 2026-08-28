@@ -3,30 +3,15 @@ im — immediate mood, journal, and task tracker
 Usage:
   im <mood> [. [body]]                           log a mood (with an optional body)
   im %<duration>                                 start a timed session
-  im [-tracker [value]]...                       add one or more custom tracker records
-  im [link]... [entry] [link]...                 add new tracker records and task completions
-                                                 linked to a new mood entry.
-  where:
-    entry :=             mood | %duration
-    link  := -tracker [value] | +task [count]
-  
-  im !                                           create a oneshot task (interactive)
-  im ! [+[parent_task]] <name> [@<time>]         create a oneshot task
+  im [-<tracker> [value]]... [mood]              add one or more custom tracker records
+                                                        (optionally attached to a mood)
+
+  im ! [name] [@<time>]                          create a task (interactive without a name)
   im ! %<duration> [name]                        create a recurring task (interactive)
   im ! @ [<time>] [:<name>] [%<duration>]        create a scheduled task 
                                                         (interactive if partial)
-  im +[task] [count]                             edit a task or update its completion state
-  
-  All the previous subcommands support a trailing [<dots> [body]].
-  - <dots> is an argument of only .'s.
-  - If no body follows, `$EDITOR` will open for writing it.
-  - the number of dots then chooses which template the `$EDITOR` opens with (defined under [editor]).
-
-  Tasks are referred to (i.e. when editing or linking a oneshot to a parent or a mood),
-  by a single argument that begins with `+`, followed by either:
-  - the short id of the task (+7)
-  - an ordered sequence of query words that matches only one task name (+groceries)
-  - or nothing (+): pick interactively.
+  im +[task] [count]                             edit or update a task by its reference
+                                                        (see the creation grammar at bottom)
 
 Views:
   im @[date]                                     today view
@@ -52,6 +37,36 @@ Other:
   im :db backfill                                compute and persist missing mood embeddings
   im :db doctor                                  check tracker entries vs kinds; prune mismatches
 
+---
+
 Flags:
   im -q | -v <command>                           quiet / verbose; flags go first
   im --help | -h                                 show this help
+
+
+Entry creation full grammar:
+  im <mood> [. [body]]                           log a mood (with an optional body)
+  im %<duration>                                 start a timed session
+  im [-<tracker> [value]]...                     add one or more custom tracker records
+  im [link]... [entry] [link]...                 add new tracker records and task completions
+                                                 linked to a new mood entry.
+  where:
+    entry :=             mood | %duration
+    link  := -<tracker> [value] | +<task> [count]
+  
+  im ! [+[task]] [name] [@<time>]                create a oneshot task (linked to a parent)
+  im ! %<duration> [name]                        create a recurring task (interactive)
+  im ! @ [<time>] [:<name>] [%<duration>]        create a scheduled task 
+                                                        (interactive if partial)
+  im +[task] [count]                             edit a task or update its completion state
+
+  Tasks are referred to (i.e. when editing or linking a oneshot to a parent or a mood),
+  by a single argument that begins with `+`, followed by either:
+  - the short id of the task (+7)
+  - an ordered sequence of query words that matches only one task name (+groceries)
+  - or nothing (+): pick interactively.
+
+  All the previous subcommands support a trailing [<dots> [body]].
+  - <dots> is an argument of only .'s.
+  - If without a body, `$EDITOR` will open.
+  - the number of dots then chooses which template (defined in your config file) the `$EDITOR` opens.

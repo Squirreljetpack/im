@@ -103,7 +103,7 @@ impl MoodConfig {
             return MoodsFile::default().pairs;
         }
         let path = crate::paths::config_dir().join(&self.source);
-        let file = cba::bo::load_type_or_default(path, |s| toml::from_str::<MoodsFile>(s));
+        let file = cba::bo::load_type_or_default(path, None, |s| toml::from_str::<MoodsFile>(s));
         if file.pairs.is_empty() {
             return MoodsFile::default().pairs;
         }

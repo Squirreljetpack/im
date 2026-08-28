@@ -334,6 +334,9 @@ impl Default for TrackerSetting {
     }
 }
 
+static DEFAULT_TRACKER_BINS: std::sync::LazyLock<ColorBins> =
+    std::sync::LazyLock::new(|| ColorBins::from(crate::config::DEFAULT_TRACKER_PALETTE.to_vec()));
+
 impl TrackerSetting {
     /// Create a tracker setting for the given value kind; all optional
     /// fields (`interval`, `low`/`high`, `strict`, `colors`) default. The
@@ -384,8 +387,9 @@ impl TrackerSetting {
     /// `colors.toml` and missing themes fall back to the `default` theme),
     /// so this always returns the palette.
     pub fn colors(&self) -> &ColorBins {
-        self.colors
-            .as_ref()
-            .expect("tracker colors are resolved by Config::init")
+        match &self.colors {
+            Ok(bins) => bins,
+            Err(_) => &DEFAULT_TRACKER_BINS,
+        }
     }
 }

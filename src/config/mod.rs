@@ -158,7 +158,7 @@ impl Config {
     /// `colors` field is `Ok`.
     fn resolve_tracker_colors(&mut self) {
         let colors_file: ColorsFile =
-            cba::bo::load_type_or_default(paths::colors_path(), |s| toml::from_str(s));
+            cba::bo::load_type_or_default(paths::colors_path(), None, |s| toml::from_str(s));
         // The default palette is the colors file's `default` key when present
         // and non-empty; otherwise the code-defined `DEFAULT_TRACKER_PALETTE`.
         let default_palette = colors_file.default_palette();

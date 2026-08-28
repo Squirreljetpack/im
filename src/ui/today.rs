@@ -195,6 +195,13 @@ impl TodayApp {
                 .into_iter()
                 .collect()
         });
+        // Keep the app's entry order — rows are injected in `apply_sort`
+        // order, so score ties must fall back to injection index. Nucleo's
+        // default stability (0) breaks such ties by matcher-column text
+        // length instead, which scrambles an empty query (every row scores
+        // the same). A threshold keeps score differences under that bucket
+        // in injected order, so near-ties while filtering stay time-ordered.
+        mm.worker.set_stability(15);
 
         // The event loop owns the binds; the alt-h help renders the live
         // bind map through the loop's pointer (`get_binds_ptr`), so the
@@ -208,12 +215,17 @@ impl TodayApp {
         mm.config_render(render_cfg);
         mm.config_tui(tui_cfg);
 
+        // The event loop's controller: a preview compute that lands after its
+        // frame was drawn nudges the loop with a tick so the pane repaints.
+        let event_tx = event_loop.controller();
+
         let axes = Arc::new(tokio::sync::OnceCell::new());
 
         // Previewer: the event listener owns it (the `Preview` widget built
         // by `view()` holds its own clones of the shared string). A
-        // generation counter drops stale async results.
-        let previewer = Previewer::new(axes.clone());
+        // generation counter drops stale async results, and the controller
+        // repaints the frame they land in.
+        let previewer = Previewer::new(axes.clone(), event_tx);
         let preview_view = previewer.view();
         // Clone for the PreviewSet handler below (the cursor handler moves
         // the original).
@@ -294,6 +306,8 @@ impl TodayApp {
             .overlay(SharedOverlay::new(confirm_ov.clone()))
             .overlay(SharedOverlay::new(input_ov.clone()));
 
+        // The render channel: async tasks push actions back into the render
+        // loop through this sender.
         let render_tx = options.render_tx();
 
         let pool = pool();

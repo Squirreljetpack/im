@@ -60,11 +60,14 @@ impl Embedder {
             }))
             .map_err(|e| anyhow::anyhow!("Failed to set truncation: {e}"))?;
 
-        let embed = Session::builder()
+        let env = ort::init()
+            .build()
+            .context("Failed to build ORT environment")?;
+        let embed = Session::builder(&env)
             .context("Failed to build ORT session builder")?
             .commit_from_memory(EMBED_ONNX)
             .context("Failed to load embedded embed.onnx session")?;
-        let saliency = Session::builder()
+        let saliency = Session::builder(&env)
             .context("Failed to build ORT session builder")?
             .commit_from_memory(SALIENCY_ONNX)
             .context("Failed to load embedded saliency_adaptor.onnx session")?;
