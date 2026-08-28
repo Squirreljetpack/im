@@ -16,7 +16,7 @@ use anyhow::Result;
 use matchmaker::{
     MatchError, Matchmaker, PickOptions,
     action::{Action as MMAction, Actions},
-    binds::{BindMapExt, key},
+    binds::{BindMapExt, Trigger, key},
     message::Interrupt,
     nucleo::Worker,
 };
@@ -75,7 +75,7 @@ impl OneshotPickerApp {
 
         // Enter picks: the builtin Accept fires the accept hook and
         // finishes the pick. Tab continues to cycle modes (Pending <-> Done).
-        binds.remove(&key!(enter).into());
+        binds.shift_remove(&Trigger::from(key!(enter)));
         binds.insert(key!(enter).into(), Actions::from(MMAction::Accept));
         let view = Arc::new(Mutex::new(self.inner));
         let worker = Worker::new(

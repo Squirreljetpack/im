@@ -92,7 +92,7 @@ async fn test_create_mood_with_trackers() {
             high: None,
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     config.tracker.insert(
@@ -103,7 +103,7 @@ async fn test_create_mood_with_trackers() {
             high: None,
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -162,7 +162,7 @@ async fn test_create_tracker_only() {
             high: None,
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -209,7 +209,7 @@ async fn test_tracker_interval_insert_strategies() {
             high: None,
             kind: TrackerKind::Text,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     // float + interval: re-logging replaces the previous entry in the slot
@@ -221,7 +221,7 @@ async fn test_tracker_interval_insert_strategies() {
             high: None,
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     // integer + interval + cumulative: every log is kept (the grid sums)
@@ -238,7 +238,7 @@ async fn test_tracker_interval_insert_strategies() {
             high: None,
             kind: TrackerKind::Integer,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -310,7 +310,7 @@ async fn test_tracker_interval_insert_strategies() {
             high: None,
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     for _ in 0..2 {
@@ -562,7 +562,7 @@ async fn test_cumulative_interval_today_rows() {
             high: None,
             kind: TrackerKind::Integer,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     for v in ["20", "30"] {
@@ -621,7 +621,7 @@ async fn test_tracker_range_not_enforced() {
             high: Some(10.0),
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -685,7 +685,7 @@ async fn test_tracker_strict_gate_enforced() {
             high: Some(10.0),
             kind: TrackerKind::Float,
             strict: true,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     for ok in ["4", "10", "7"] {
@@ -711,7 +711,7 @@ async fn test_tracker_strict_gate_enforced() {
             high: None,
             kind: TrackerKind::Integer,
             strict: true,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     insert(&pool, &config, "pushups", "10").await.unwrap();
@@ -733,7 +733,7 @@ async fn test_tracker_strict_gate_enforced() {
             high: Some(2.0),
             kind: TrackerKind::Float,
             strict: true,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     insert(&pool, &config, "water", "5").await.unwrap();
@@ -769,7 +769,7 @@ async fn test_multiple_trackers_same_mood() {
             high: None,
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     config.tracker.insert(
@@ -780,7 +780,7 @@ async fn test_multiple_trackers_same_mood() {
             high: None,
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     config.tracker.insert(
@@ -791,7 +791,7 @@ async fn test_multiple_trackers_same_mood() {
             high: None,
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -1199,7 +1199,7 @@ async fn test_create_mood_tracker_in_final_position() {
             high: None,
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     config.tracker.insert(
@@ -1210,7 +1210,7 @@ async fn test_create_mood_tracker_in_final_position() {
             high: None,
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -1265,7 +1265,7 @@ async fn test_out_of_range_tracker_still_inserts() {
             high: Some(10.0),
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -1382,7 +1382,7 @@ async fn test_today_view_with_data() {
             high: None,
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     config.tracker.insert(
@@ -1393,7 +1393,7 @@ async fn test_today_view_with_data() {
             high: None,
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -1484,7 +1484,7 @@ async fn test_today_view_linked_trackers_and_tasks() {
             high: Some(10.0),
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -1577,7 +1577,7 @@ async fn test_today_view_null_labels_relog_and_prev() {
             high: None,
             kind: TrackerKind::Null,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     // Replace-mode null tracker: interval + both bounds (time offsets).
@@ -1589,7 +1589,7 @@ async fn test_today_view_null_labels_relog_and_prev() {
             high: Some(86400.0),
             kind: TrackerKind::Null,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     // Plain float tracker (no interval) for the prev: checks.
@@ -1601,7 +1601,7 @@ async fn test_today_view_null_labels_relog_and_prev() {
             high: Some(10.0),
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -1772,7 +1772,7 @@ async fn test_today_view_horizon_includes_moods_and_trackers() {
             high: None,
             kind: TrackerKind::Integer,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -2308,7 +2308,7 @@ async fn test_null_tracker_semantics() {
             high: None,
             kind: im::config::TrackerKind::Null,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     // Replace mode with both bounds (23:00 / 2h before the span end):
@@ -2325,7 +2325,7 @@ async fn test_null_tracker_semantics() {
             high: None,
             kind: im::config::TrackerKind::Null,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     // Both bounds: the marker's circular time position drives its color.
@@ -2337,7 +2337,7 @@ async fn test_null_tracker_semantics() {
             high: Some(2.0 * 3600.0),
             kind: im::config::TrackerKind::Null,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     // Without an interval: unsupported.
@@ -2349,7 +2349,7 @@ async fn test_null_tracker_semantics() {
             high: None,
             kind: im::config::TrackerKind::Null,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -3293,7 +3293,7 @@ async fn test_tracker_dots() {
             high: None,
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -3653,7 +3653,7 @@ async fn test_text_tracker_entry_today_badge_and_listing() {
             high: None,
             kind: TrackerKind::Text,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -3726,7 +3726,7 @@ async fn test_text_tracker_lists_all_entries_in_range() {
             high: None,
             kind: TrackerKind::Text,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -3770,7 +3770,7 @@ async fn test_tracker_parse_errors() {
             high: None,
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     let cmd = parse_from(vec!["-sleep".to_string(), "good".to_string()]).unwrap();
@@ -3813,7 +3813,7 @@ async fn test_tracker_parse_errors() {
             high: None,
             kind: TrackerKind::Integer,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     let cmd = parse_from(vec!["-bugs".to_string(), "3.5".to_string()]).unwrap();
@@ -3865,7 +3865,7 @@ async fn test_tracker_parse_errors() {
             high: None,
             kind: TrackerKind::Duration,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     let cmd = parse_from(vec!["-mile".to_string(), "390".to_string()]).unwrap();
@@ -3911,7 +3911,7 @@ async fn test_tracker_parse_errors() {
             high: None,
             kind: TrackerKind::Null,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     let cmd = parse_from(vec!["-pills".to_string(), "3".to_string()]).unwrap();
@@ -3953,7 +3953,7 @@ async fn test_number_tracker_stored_as_integer() {
             high: Some(10.0),
             kind: TrackerKind::Integer,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -4257,7 +4257,7 @@ async fn test_tracker_grid_uses_colors_override() {
             high: Some(10.0),
             kind: TrackerKind::Integer,
             strict: false,
-            colors: Some(override_palette.clone()),
+            colors: Ok(override_palette.clone()),
         },
     );
     config.tracker.insert(
@@ -4268,7 +4268,7 @@ async fn test_tracker_grid_uses_colors_override() {
             high: Some(10.0),
             kind: TrackerKind::Integer,
             strict: false,
-            colors: Some(override_palette),
+            colors: Ok(override_palette),
         },
     );
 
@@ -5169,7 +5169,7 @@ async fn test_delete_mood_removes_linked_tracker_rows() {
             high: None,
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -5243,7 +5243,7 @@ async fn test_delete_tracker_row() {
             high: None,
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -5313,7 +5313,7 @@ async fn test_delete_mood_without_cascade_fails_with_fk_enforced() {
             high: None,
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -5411,7 +5411,7 @@ async fn test_edit_tracker_text_payload() {
             high: None,
             kind: TrackerKind::Text,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -5458,7 +5458,7 @@ async fn test_edit_tracker_float_payload() {
             high: None,
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -5630,7 +5630,7 @@ async fn test_fetch_today_entries_carries_tracker_ids() {
             high: None,
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
 
@@ -5989,7 +5989,7 @@ async fn test_db_doctor_noninteractive_reports_only() {
             high: None,
             kind: TrackerKind::Float,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     sqlx::query("INSERT INTO tracker (type, score, time) VALUES ('sleep', ?, 100)")
@@ -6049,7 +6049,7 @@ async fn test_db_doctor_buckets_and_prune() {
             high: Some(7200.0),
             kind: TrackerKind::Null,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     config.tracker.insert(
@@ -6060,7 +6060,7 @@ async fn test_db_doctor_buckets_and_prune() {
             high: None,
             kind: TrackerKind::Integer,
             strict: false,
-            colors: None,
+            colors: Err("default".to_string()),
         },
     );
     // sleep: 2 zero integers (keep) + 1 nonzero integer (stale count-mode
@@ -6359,7 +6359,7 @@ async fn test_today_view_tasks_variant_omits_completed_today() {
 #[tokio::test]
 async fn test_mood_links_at_most_one_task() {
     let pool = test_pool().await.unwrap();
-    let config = Config::default();
+    let _config = Config::default();
 
     // Insert two tasks.
     let t1 = insert_oneshot(&pool, "task 1", 1_700_000_000, 1).await;

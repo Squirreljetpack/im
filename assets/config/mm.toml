@@ -14,7 +14,6 @@ border = { type = "Plain" }
 # The status row is reserved by default (`show = true`) with an empty
 # template, rendering as a blank line between the input and the header.
 [status]
-show = false
 # Match/total counter (`\m` = match count, `\t` = total), e.g. `3/40`:
 # template = "\m/\t"
 
