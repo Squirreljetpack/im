@@ -410,7 +410,7 @@ async fn a_delete_that_beats_an_unsynced_edit_prompts() {
         report.conflicts[0].kind,
         ConflictKind::RemoteDeleteVsLocalEdit
     );
-    session::resolve(&device_b, &report.conflicts[0], Resolution::ConfirmRemote)
+    session::resolve(&device_b, &report.conflicts[0], Resolution::ConfirmDeletion)
         .await
         .unwrap();
     settle(&[&device_a, &device_b]).await;
@@ -546,4 +546,118 @@ async fn a_deep_backlog_is_pulled_page_by_page() {
     .await
     .unwrap();
     assert_eq!(total, 1001, "the completions all landed");
+}
+
+/// Edit one task field through the mutation the CLI uses (`edit_task` builds a
+/// field-level diff from what actually changed).
+async fn edit_task_field(
+    pool: &SqlitePool,
+    id: im::db::Id,
+    change: impl FnOnce(&mut im::db::UpdateTaskObject),
+) {
+    let row = im::db::fetch_task_by_id(pool, id, im::date::now())
+        .await
+        .expect("read the task")
+        .expect("the task exists");
+    let mut update = im::db::UpdateTaskObject {
+        id,
+        short_id: row.short_id,
+        name: row.name.clone(),
+        body: row.body.clone(),
+        priority: row.priority,
+        start_time: row.start_time,
+        available_duration_secs: row.available_duration_secs,
+        interval_secs: row.interval_secs,
+        target_count: row.target_count,
+        optional: row.optional != 0,
+        end_time: row.end_time,
+        parent: row.parent,
+    };
+    change(&mut update);
+    im::db::edit_task(pool, &update)
+        .await
+        .expect("edit the task");
+}
+
+async fn task_column(pool: &SqlitePool, id: im::db::Id, column: &str) -> Option<i64> {
+    let sql = format!("SELECT {column} FROM todos WHERE id = ?");
+    sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("read the column")
+}
+
+/// Two devices editing *different* fields of one task keep both edits, however
+/// the events order on the server (§4.1.1) — the property that rules out a
+/// per-entity watermark.
+#[tokio::test]
+async fn disjoint_edits_from_two_devices_both_survive() {
+    let (device_a, token) = device("fields").await;
+    let device_b = second_device(&token).await;
+    let (task, _) = create_task(&device_a, &task_object("shared", "note"))
+        .await
+        .unwrap();
+    settle(&[&device_a, &device_b]).await;
+
+    edit_task_field(&device_a, task, |update| update.priority = 9).await;
+    edit_task_field(&device_b, task, |update| {
+        update.start_time = Some(1_800_000_000)
+    })
+    .await;
+    settle(&[&device_a, &device_b]).await;
+
+    for (label, pool) in [("A", &device_a), ("B", &device_b)] {
+        assert_eq!(
+            task_column(pool, task, "priority").await,
+            Some(9),
+            "device {label} keeps the priority edit"
+        );
+        assert_eq!(
+            task_column(pool, task, "start_time").await,
+            Some(1_800_000_000),
+            "device {label} keeps the start-time edit"
+        );
+    }
+}
+
+/// Both devices replacing a note is the promptable text conflict of §4.2.1,
+/// and appending both converges on every device.
+#[tokio::test]
+async fn a_contested_note_is_settled_by_the_user() {
+    let (device_a, token) = device("note").await;
+    let device_b = second_device(&token).await;
+    let (_task, _) = create_task(&device_a, &task_object("shared", "base"))
+        .await
+        .unwrap();
+    settle(&[&device_a, &device_b]).await;
+
+    set_body(&device_a, "shared", "from A").await;
+    set_body(&device_b, "shared", "from B").await;
+    sync(&device_a).await;
+
+    let report = sync(&device_b).await;
+    assert_eq!(report.conflicts.len(), 1, "one note conflict");
+    assert_eq!(report.conflicts[0].kind, ConflictKind::TextReplaced);
+    assert_eq!(
+        report.conflicts[0].remote_value.as_deref(),
+        Some("from A"),
+        "the incoming note is the one from A"
+    );
+    session::resolve(
+        &device_b,
+        &report.conflicts[0],
+        im::sync::Resolution::AppendBoth,
+    )
+    .await
+    .expect("resolve the note conflict");
+    settle(&[&device_a, &device_b]).await;
+
+    for (label, pool) in [("A", &device_a), ("B", &device_b)] {
+        assert_eq!(
+            body_of(pool, "shared").await.as_deref(),
+            Some("from B\nfrom A"),
+            "device {label} keeps both notes"
+        );
+    }
 }

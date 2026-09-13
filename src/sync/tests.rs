@@ -7,7 +7,7 @@ use crate::config::{Config, TrackerInterval, TrackerKind, TrackerSetting};
 use crate::db::{
     EventId, Id, TaskObject, create_entry, create_task, delete_task, test_pool, update_task,
 };
-use crate::sync::apply::{ApplyOutcome, ConflictKind, Resolution};
+use crate::sync::apply::{ConflictKind, Resolution};
 use crate::sync::{EntityPayload, RemoteEvent, state};
 use crate::tracker::TrackerSlots;
 
@@ -29,7 +29,7 @@ fn task_object(name: &str) -> TaskObject {
 }
 
 fn task_payload(name: &str) -> crate::sync::EntityPayload {
-    crate::sync::EntityPayload::Task(crate::sync::TaskData {
+    crate::sync::EntityPayload::TaskCreate(crate::sync::TaskCreateData {
         name: name.to_string(),
         body: String::new(),
         priority: 5,
@@ -62,6 +62,11 @@ fn remote(
 }
 
 /// A timestamp that beats anything this device authored locally.
+/// Whether applying left the event unapplied and uncontested.
+fn is_stale(step: &crate::sync::apply::Applied) -> bool {
+    !step.wrote && step.conflicts.is_empty()
+}
+
 fn future_ts() -> i64 {
     state::now_ms() + 1_000_000
 }
@@ -93,7 +98,7 @@ async fn mutations_append_outbox_events() {
     assert_eq!(event.entity_id, id);
     assert!(matches!(
         event.payload,
-        Some(crate::sync::EntityPayload::Task(_))
+        Some(crate::sync::EntityPayload::TaskCreate(_))
     ));
 
     update_task(&pool, id, 2).await.unwrap();
@@ -160,7 +165,7 @@ async fn remote_task_upsert_allocates_a_short_id() {
     )
     .await
     .unwrap();
-    assert!(matches!(outcome, ApplyOutcome::Applied));
+    assert!(outcome.wrote);
 
     let short_id: Option<i64> = sqlx::query_scalar("SELECT short_id FROM todos WHERE id = ?")
         .bind(id)
@@ -194,11 +199,10 @@ async fn lww_converges_regardless_of_replay_order() {
             "the newer (timestamp, device) must win in either order"
         );
         assert!(
-            matches!(
-                crate::sync::apply::apply_event(&pool, &older)
+            is_stale(
+                &crate::sync::apply::apply_event(&pool, &older)
                     .await
-                    .unwrap(),
-                ApplyOutcome::Stale
+                    .unwrap()
             ),
             "replaying the loser is a no-op"
         );
@@ -232,13 +236,13 @@ async fn local_edit_conflicts_with_remote_delete() {
     let outcome = crate::sync::apply::apply_event(&pool, &delete)
         .await
         .unwrap();
-    let ApplyOutcome::Conflict(conflict) = outcome else {
+    let Some(conflict) = outcome.conflicts.into_iter().next() else {
         panic!("a remote delete must not discard a local edit silently");
     };
     assert_eq!(conflict.kind, ConflictKind::RemoteDeleteVsLocalEdit);
     assert!(conflict.resurrectable);
 
-    crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::ConfirmRemote)
+    crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::ConfirmDeletion)
         .await
         .unwrap();
     assert_eq!(task_count(&pool, id).await, 0);
@@ -257,7 +261,7 @@ async fn local_edit_conflicts_with_remote_delete() {
     let outcome = crate::sync::apply::apply_event(&pool, &delete)
         .await
         .unwrap();
-    let ApplyOutcome::Conflict(conflict) = outcome else {
+    let Some(conflict) = outcome.conflicts.into_iter().next() else {
         panic!("expected a conflict");
     };
     crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::Resurrect)
@@ -269,7 +273,7 @@ async fn local_edit_conflicts_with_remote_delete() {
     assert!(republished.timestamp > delete.event.timestamp);
     assert!(matches!(
         republished.payload,
-        Some(crate::sync::EntityPayload::Task(_))
+        Some(crate::sync::EntityPayload::TaskCreate(_))
     ));
 }
 
@@ -288,20 +292,20 @@ async fn remote_upsert_conflicts_with_local_delete() {
     let outcome = crate::sync::apply::apply_event(&pool, &upsert)
         .await
         .unwrap();
-    let ApplyOutcome::Conflict(conflict) = outcome else {
+    let Some(conflict) = outcome.conflicts.into_iter().next() else {
         panic!("a remote upsert must not silently undo a local delete");
     };
-    assert_eq!(conflict.kind, ConflictKind::RemoteUpsertVsLocalDelete);
+    assert_eq!(conflict.kind, ConflictKind::LocalDeleteVsRemoteUpdate);
 
     // [1] keep the deletion: a fresh delete event settles it everywhere.
-    crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::ConfirmRemote)
+    crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::ConfirmDeletion)
         .await
         .unwrap();
     assert_eq!(task_count(&pool, id).await, 0);
     let pending = crate::sync::apply::pending_events(&pool).await.unwrap();
     assert!(pending.last().unwrap().payload.is_none());
 
-    // [2] keep the edit: the incoming snapshot is applied and re-published.
+    // [2] take the edit: the incoming values are applied and re-published.
     let pool = test_pool().await.unwrap();
     let (id, _) = create_task(&pool, &task_object("doomed")).await.unwrap();
     delete_task(&pool, id).await.unwrap();
@@ -314,17 +318,17 @@ async fn remote_upsert_conflicts_with_local_delete() {
     let outcome = crate::sync::apply::apply_event(&pool, &upsert)
         .await
         .unwrap();
-    let ApplyOutcome::Conflict(conflict) = outcome else {
+    let Some(conflict) = outcome.conflicts.into_iter().next() else {
         panic!("expected a conflict");
     };
-    crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::Resurrect)
+    crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::KeepRemote)
         .await
         .unwrap();
     assert_eq!(task_name(&pool, id).await.as_deref(), Some("resurrect me"));
     let pending = crate::sync::apply::pending_events(&pool).await.unwrap();
     assert!(matches!(
         pending.last().unwrap().payload,
-        Some(crate::sync::EntityPayload::Task(_))
+        Some(crate::sync::EntityPayload::TaskCreate(_))
     ));
 }
 
@@ -363,7 +367,7 @@ async fn completion_on_a_deleted_task_can_resurrect_it() {
     let outcome = crate::sync::apply::apply_event(&pool, &event)
         .await
         .unwrap();
-    let ApplyOutcome::Conflict(conflict) = outcome else {
+    let Some(conflict) = outcome.conflicts.into_iter().next() else {
         panic!("a completion for a missing task must ask the user");
     };
     assert_eq!(conflict.kind, ConflictKind::CompletionOnMissingTask);
@@ -405,13 +409,16 @@ async fn completion_on_a_deleted_task_can_resurrect_it() {
             },
         )),
     );
-    let ApplyOutcome::Conflict(conflict) = crate::sync::apply::apply_event(&pool, &event)
+    let Some(conflict) = crate::sync::apply::apply_event(&pool, &event)
         .await
         .unwrap()
+        .conflicts
+        .into_iter()
+        .next()
     else {
         panic!("expected a conflict");
     };
-    crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::ConfirmRemote)
+    crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::ConfirmDeletion)
         .await
         .unwrap();
     let pending = crate::sync::apply::pending_events(&pool).await.unwrap();
@@ -489,11 +496,11 @@ async fn mood_and_tracker_mutations_emit_events() {
     );
     assert!(matches!(
         payloads[0],
-        Some(crate::sync::EntityPayload::Mood(_))
+        Some(crate::sync::EntityPayload::MoodCreate(_))
     ));
     assert!(matches!(
         payloads[1],
-        Some(crate::sync::EntityPayload::Tracker(_))
+        Some(crate::sync::EntityPayload::TrackerCreate(_))
     ));
 
     // Applying the mood elsewhere recreates the row without its local
@@ -637,7 +644,7 @@ async fn a_replayed_tracker_slot_keeps_only_the_winner() {
             1,
             state::now_ms() + 10_000,
             winner,
-            Some(EntityPayload::Tracker(crate::sync::TrackerData {
+            Some(EntityPayload::TrackerCreate(crate::sync::TrackerData {
                 tracker_type: "sleep".to_string(),
                 score: crate::sync::TrackerScore::Integer(9),
                 time,
@@ -649,7 +656,7 @@ async fn a_replayed_tracker_slot_keeps_only_the_winner() {
             2,
             state::now_ms() + 20_000,
             loser,
-            Some(EntityPayload::Tracker(crate::sync::TrackerData {
+            Some(EntityPayload::TrackerCreate(crate::sync::TrackerData {
                 tracker_type: "other".to_string(),
                 score: crate::sync::TrackerScore::Integer(1),
                 time,
@@ -682,4 +689,374 @@ async fn a_replayed_tracker_slot_keeps_only_the_winner() {
         queued,
         "the slot cleanup emits no event"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Field-level diffs (§3, §4.1)
+// ---------------------------------------------------------------------------
+
+fn task_update(fields: crate::sync::TaskUpdateData) -> crate::sync::EntityPayload {
+    crate::sync::EntityPayload::TaskUpdate(fields)
+}
+
+fn priority_change(priority: i32) -> crate::sync::EntityPayload {
+    task_update(crate::sync::TaskUpdateData {
+        priority: Some(priority),
+        ..Default::default()
+    })
+}
+
+async fn task_i64(pool: &SqlitePool, id: Id, column: &str) -> Option<i64> {
+    let sql = format!("SELECT {column} FROM todos WHERE id = ?");
+    sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn task_body(pool: &SqlitePool, id: Id) -> Option<String> {
+    sqlx::query_scalar("SELECT body FROM todos WHERE id = ?")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn task_parent(pool: &SqlitePool, id: Id) -> Option<Id> {
+    sqlx::query_scalar("SELECT parent FROM todos WHERE id = ?")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// A clear survives the JSON round trip: an absent field means *unchanged*, an
+/// explicit `null` means *clear the column*, and the two never collapse.
+#[test]
+fn a_clear_is_not_an_absent_field() {
+    let update = crate::sync::TaskUpdateData {
+        available_duration_secs: Some(None),
+        parent_id: Some(None),
+        priority: Some(3),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&update).unwrap();
+    assert!(json.contains("\"available_duration_secs\":null"), "{json}");
+    assert!(json.contains("\"parent_id\":null"), "{json}");
+    assert!(
+        !json.contains("target_count"),
+        "unset fields stay out: {json}"
+    );
+
+    let parsed: crate::sync::TaskUpdateData = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, update);
+
+    // A field that is only absent still means unchanged.
+    let absent: crate::sync::TaskUpdateData = serde_json::from_str("{}").unwrap();
+    assert_eq!(absent, crate::sync::TaskUpdateData::default());
+    assert!(absent.is_empty());
+}
+
+/// Two devices editing *different* fields keep both edits, whatever order the
+/// events replay in (§4.1.1) — the property a per-entity watermark loses.
+#[tokio::test]
+async fn disjoint_field_updates_both_survive() {
+    for reversed in [false, true] {
+        let pool = test_pool().await.unwrap();
+        let (id, _) = create_task(&pool, &task_object("shared")).await.unwrap();
+        let older = remote(Id::new(), future_ts(), id, Some(priority_change(9)));
+        let newer = remote(
+            Id::new(),
+            future_ts() + 500,
+            id,
+            Some(task_update(crate::sync::TaskUpdateData {
+                start_time: Some(1_800_000_000),
+                ..Default::default()
+            })),
+        );
+        let events = if reversed {
+            vec![newer, older]
+        } else {
+            vec![older, newer]
+        };
+
+        let page = crate::sync::apply::apply_page(&pool, &events, 2, &TrackerSlots::default())
+            .await
+            .unwrap();
+        assert_eq!(page.applied, 2, "both fields are new information");
+        assert_eq!(
+            task_i64(&pool, id, "priority").await,
+            Some(9),
+            "the priority edit survives (reversed={reversed})"
+        );
+        assert_eq!(
+            task_i64(&pool, id, "start_time").await,
+            Some(1_800_000_000),
+            "the start-time edit survives (reversed={reversed})"
+        );
+    }
+}
+
+/// The same field on two devices is last-write-wins, and replaying the loser
+/// afterwards changes nothing (§4.1.2).
+#[tokio::test]
+async fn one_field_keeps_the_later_event() {
+    let pool = test_pool().await.unwrap();
+    let (id, _) = create_task(&pool, &task_object("shared")).await.unwrap();
+    let older = remote(Id::new(), future_ts(), id, Some(priority_change(3)));
+    let newer = remote(Id::new(), future_ts() + 1, id, Some(priority_change(7)));
+
+    crate::sync::apply::apply_event(&pool, &older)
+        .await
+        .unwrap();
+    crate::sync::apply::apply_event(&pool, &newer)
+        .await
+        .unwrap();
+    assert_eq!(task_i64(&pool, id, "priority").await, Some(7));
+
+    assert!(
+        is_stale(
+            &crate::sync::apply::apply_event(&pool, &older)
+                .await
+                .unwrap()
+        ),
+        "the older value must not come back"
+    );
+    assert_eq!(task_i64(&pool, id, "priority").await, Some(7));
+}
+
+/// An edit that clears a nullable field propagates as a clear (§3).
+#[tokio::test]
+async fn a_cleared_field_reaches_the_other_device() {
+    let pool = test_pool().await.unwrap();
+    let (id, _) = create_task(&pool, &task_object("shared")).await.unwrap();
+    crate::sync::apply::apply_event(
+        &pool,
+        &remote(
+            Id::new(),
+            future_ts(),
+            id,
+            Some(task_update(crate::sync::TaskUpdateData {
+                available_duration_secs: Some(Some(600)),
+                ..Default::default()
+            })),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        task_i64(&pool, id, "available_duration_secs").await,
+        Some(600)
+    );
+
+    crate::sync::apply::apply_event(
+        &pool,
+        &remote(
+            Id::new(),
+            future_ts() + 1,
+            id,
+            Some(task_update(crate::sync::TaskUpdateData {
+                available_duration_secs: Some(None),
+                ..Default::default()
+            })),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(task_i64(&pool, id, "available_duration_secs").await, None);
+}
+
+// ---------------------------------------------------------------------------
+// Text replacement conflicts (§4.2.1)
+// ---------------------------------------------------------------------------
+
+async fn note_conflict(pool: &SqlitePool) -> (Id, crate::sync::apply::Conflict) {
+    let (id, _) = create_task(pool, &task_object("shared")).await.unwrap();
+    crate::db::update_todo_body(pool, id, "local note")
+        .await
+        .unwrap();
+    let incoming = remote(
+        Id::new(),
+        future_ts(),
+        id,
+        Some(task_update(crate::sync::TaskUpdateData {
+            body: Some("remote note".to_string()),
+            ..Default::default()
+        })),
+    );
+    let step = crate::sync::apply::apply_event(pool, &incoming)
+        .await
+        .unwrap();
+    assert!(!step.wrote, "a contested note is not written");
+    let conflict = step
+        .conflicts
+        .into_iter()
+        .next()
+        .expect("both devices replaced the note");
+    assert_eq!(conflict.kind, ConflictKind::TextReplaced);
+    assert_eq!(conflict.field, Some(crate::sync::task_field::BODY));
+    assert_eq!(conflict.local_value.as_deref(), Some("local note"));
+    assert_eq!(conflict.remote_value.as_deref(), Some("remote note"));
+    (id, conflict)
+}
+
+#[tokio::test]
+async fn a_contested_note_can_take_the_incoming_text() {
+    let pool = test_pool().await.unwrap();
+    let (id, conflict) = note_conflict(&pool).await;
+    crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::KeepRemote)
+        .await
+        .unwrap();
+    assert_eq!(task_body(&pool, id).await.as_deref(), Some("remote note"));
+}
+
+#[tokio::test]
+async fn a_contested_note_can_keep_the_local_text() {
+    let pool = test_pool().await.unwrap();
+    let (id, conflict) = note_conflict(&pool).await;
+    crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::KeepLocal)
+        .await
+        .unwrap();
+    assert_eq!(task_body(&pool, id).await.as_deref(), Some("local note"));
+
+    // The choice is published, so it outranks the incoming text elsewhere.
+    let pending = crate::sync::apply::pending_events(&pool).await.unwrap();
+    let published = pending.last().unwrap();
+    assert!(published.timestamp > conflict.event.event.timestamp);
+    match &published.payload {
+        Some(crate::sync::EntityPayload::TaskUpdate(data)) => {
+            assert_eq!(data.body.as_deref(), Some("local note"));
+        }
+        other => panic!("expected a body update, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_contested_note_can_append_both() {
+    let pool = test_pool().await.unwrap();
+    let (id, conflict) = note_conflict(&pool).await;
+    crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::AppendBoth)
+        .await
+        .unwrap();
+    assert_eq!(
+        task_body(&pool, id).await.as_deref(),
+        Some("local note\nremote note")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Parent cycles (§4.2.3)
+// ---------------------------------------------------------------------------
+
+async fn cycle_conflict(pool: &SqlitePool) -> (Id, Id, crate::sync::apply::Conflict) {
+    let (a, _) = create_task(pool, &task_object("A")).await.unwrap();
+    let (b, _) = create_task(pool, &task_object("B")).await.unwrap();
+    // This device made A a child of B; the other device made B a child of A.
+    crate::db::set_task_parent(pool, a, b).await.unwrap();
+    let incoming = remote(
+        Id::new(),
+        future_ts(),
+        b,
+        Some(task_update(crate::sync::TaskUpdateData {
+            parent_id: Some(Some(a)),
+            ..Default::default()
+        })),
+    );
+    let step = crate::sync::apply::apply_event(pool, &incoming)
+        .await
+        .unwrap();
+    assert_eq!(
+        task_parent(pool, b).await,
+        None,
+        "the cycle is not written before the user decides"
+    );
+    let conflict = step
+        .conflicts
+        .into_iter()
+        .next()
+        .expect("a cycle asks the user");
+    assert_eq!(conflict.kind, ConflictKind::ParentCycle);
+    (a, b, conflict)
+}
+
+#[tokio::test]
+async fn a_parent_cycle_can_take_the_incoming_link() {
+    let pool = test_pool().await.unwrap();
+    let (a, b, conflict) = cycle_conflict(&pool).await;
+    crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::UseRemoteParent)
+        .await
+        .unwrap();
+    assert_eq!(task_parent(&pool, b).await, Some(a));
+    assert_eq!(task_parent(&pool, a).await, None, "the other link detached");
+}
+
+#[tokio::test]
+async fn a_parent_cycle_can_keep_the_local_link() {
+    let pool = test_pool().await.unwrap();
+    let (a, b, conflict) = cycle_conflict(&pool).await;
+    crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::UseLocalParent)
+        .await
+        .unwrap();
+    assert_eq!(task_parent(&pool, a).await, Some(b), "this device's link");
+    assert_eq!(task_parent(&pool, b).await, None);
+}
+
+#[tokio::test]
+async fn a_parent_cycle_can_detach_both() {
+    let pool = test_pool().await.unwrap();
+    let (a, b, conflict) = cycle_conflict(&pool).await;
+    crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::DetachBoth)
+        .await
+        .unwrap();
+    assert_eq!(task_parent(&pool, a).await, None);
+    assert_eq!(task_parent(&pool, b).await, None);
+}
+
+/// A device that decided neither link repairs the cycle on its own: the later
+/// link wins and the older one is detached, with no event and no prompt.
+#[tokio::test]
+async fn a_third_device_repairs_a_cycle_deterministically() {
+    for reversed in [false, true] {
+        let pool = test_pool().await.unwrap();
+        let (a, _) = create_task(&pool, &task_object("A")).await.unwrap();
+        let (b, _) = create_task(&pool, &task_object("B")).await.unwrap();
+        let ab = remote(
+            Id::new(),
+            future_ts(),
+            a,
+            Some(task_update(crate::sync::TaskUpdateData {
+                parent_id: Some(Some(b)),
+                ..Default::default()
+            })),
+        );
+        let ba = remote(
+            Id::new(),
+            future_ts() + 500,
+            b,
+            Some(task_update(crate::sync::TaskUpdateData {
+                parent_id: Some(Some(a)),
+                ..Default::default()
+            })),
+        );
+        let events = if reversed { vec![ba, ab] } else { vec![ab, ba] };
+
+        let page = crate::sync::apply::apply_page(&pool, &events, 2, &TrackerSlots::default())
+            .await
+            .unwrap();
+        assert!(
+            page.conflicts.is_empty(),
+            "no local decision, no prompt (reversed={reversed})"
+        );
+        assert_eq!(
+            task_parent(&pool, b).await,
+            Some(a),
+            "the later link is the parent (reversed={reversed})"
+        );
+        assert_eq!(
+            task_parent(&pool, a).await,
+            None,
+            "the older link is detached (reversed={reversed})"
+        );
+    }
 }
