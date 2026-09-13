@@ -307,9 +307,8 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     // decided per field, so two devices that edited different fields of one row
     // keep both edits (§4.1) while a shared field still converges. `field = ''`
     // is the entity itself: the stamp of the last event that changed anything,
-    // which delete comparisons and the tracker slot cleanup read. `value` is the
-    // JSON of the winning value (`NULL` for a cleared column); together the rows
-    // rebuild the snapshot a resurrection needs (§4.2.2).
+    // which the tracker slot cleanup ranks on. No field values are kept: a
+    // deletion is terminal, so nothing is ever rebuilt from here.
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS _sync_watermark (
@@ -320,7 +319,6 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
             -- The applied event's id: the final LWW tie-breaker, so two
             -- machines sharing a copied device id still converge.
             event_id  TEXT NOT NULL,
-            value     TEXT,
             PRIMARY KEY (entity_id, field)
         )
         "#,

@@ -9,7 +9,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use im::db::{TaskObject, create_task, test_pool};
-use im::sync::apply::Resolution;
 use im::sync::client::Client;
 use im::sync::session;
 use im::sync::{ConflictKind, KEY_AUTH_TOKEN, sync_once};
@@ -153,8 +152,12 @@ async fn second_device(token: &str) -> SqlitePool {
 }
 
 async fn sync(pool: &SqlitePool) -> session::SyncReport {
+    sync_with(pool, &TrackerSlots::default()).await
+}
+
+async fn sync_with(pool: &SqlitePool, slots: &TrackerSlots) -> session::SyncReport {
     let server = server().await;
-    sync_once(pool, &server.base, SYNC_TIMEOUT, &TrackerSlots::default())
+    sync_once(pool, &server.base, SYNC_TIMEOUT, slots)
         .await
         .expect("sync")
 }
@@ -355,11 +358,10 @@ async fn completions_from_two_devices_add_up() {
     }
 }
 
-/// A local edit that is *newer* than the incoming delete simply wins the
-/// last-write-wins comparison: nothing contradicts it, so nothing is asked
-/// and both devices keep the edit.
+/// A deletion wins over an edit made after it, on the device that made the
+/// edit too: no prompt, nothing to decide (§4.2.2).
 #[tokio::test]
-async fn a_later_local_edit_outlives_a_remote_delete() {
+async fn a_deletion_wins_over_a_later_local_edit() {
     let (device_a, token) = device("outlive").await;
     let device_b = second_device(&token).await;
     let (task, _) = create_task(&device_a, &task_object("kept", "original"))
@@ -367,31 +369,41 @@ async fn a_later_local_edit_outlives_a_remote_delete() {
         .unwrap();
     settle(&[&device_a, &device_b]).await;
 
-    // A deletes first, then B edits: the edit is the later decision.
+    // A deletes first, then B edits: the edit is the later decision by
+    // timestamp, and still loses.
     im::db::delete_task(&device_a, task).await.unwrap();
     sleep_between_mutations().await;
     set_body(&device_b, "kept", "still here").await;
     sync(&device_a).await;
 
-    // The delete loses to the edit, silently: no prompt.
     let report = sync(&device_b).await;
-    assert_eq!(report.conflicts.len(), 0, "the edit already wins the slot");
-    assert!(report.stale >= 1, "the delete is dropped as stale");
+    assert!(
+        report.conflicts.is_empty(),
+        "a deletion is applied without asking"
+    );
+    assert!(report.applied >= 1, "the deletion lands on B");
+    assert!(
+        task_row(&device_b, "kept").await.is_none(),
+        "B drops the task it had just edited"
+    );
+
+    // The losing edit reaches A and is discarded there, not resurrected.
+    let report = sync(&device_a).await;
+    assert!(report.discarded >= 1, "the later edit is discarded");
     settle(&[&device_a, &device_b]).await;
 
     for (label, pool) in [("A", &device_a), ("B", &device_b)] {
-        assert_eq!(
-            body_of(pool, "kept").await.as_deref(),
-            Some("still here"),
-            "device {label} must keep the winning edit"
+        assert!(
+            task_row(pool, "kept").await.is_none(),
+            "device {label} must end up without the deleted task"
         );
     }
 }
 
-/// A delete that outranks an edit this device has not pushed yet is the
-/// promptable conflict: the user confirms and the deletion stands everywhere.
+/// An edit this device has not pushed yet is discarded by the deletion too:
+/// there is no conflict to confirm.
 #[tokio::test]
-async fn a_delete_that_beats_an_unsynced_edit_prompts() {
+async fn a_deletion_discards_an_unsynced_edit() {
     let (device_a, token) = device("delete").await;
     let device_b = second_device(&token).await;
     let (task, _) = create_task(&device_a, &task_object("doomed", ""))
@@ -405,14 +417,10 @@ async fn a_delete_that_beats_an_unsynced_edit_prompts() {
     sync(&device_a).await;
 
     let report = sync(&device_b).await;
-    assert_eq!(report.conflicts.len(), 1, "one delete/update conflict");
-    assert_eq!(
-        report.conflicts[0].kind,
-        ConflictKind::RemoteDeleteVsLocalEdit
+    assert!(
+        report.conflicts.is_empty(),
+        "an unsynced edit is discarded, not confirmed"
     );
-    session::resolve(&device_b, &report.conflicts[0], Resolution::ConfirmDeletion)
-        .await
-        .unwrap();
     settle(&[&device_a, &device_b]).await;
 
     for (label, pool) in [("A", &device_a), ("B", &device_b)] {
@@ -423,34 +431,27 @@ async fn a_delete_that_beats_an_unsynced_edit_prompts() {
     }
 }
 
-/// The same conflict, resolved the other way: the local edit is re-published
-/// above the deletion, so both devices end up with the task.
+/// The rule holds across three devices: the one that never saw either decision
+/// converges on the deletion, and nothing resurfaces an edit made after it.
 #[tokio::test]
-async fn resurrecting_a_task_discards_the_remote_deletion() {
-    let (device_a, token) = device("resurrect").await;
+async fn a_deletion_holds_across_three_devices() {
+    let (device_a, token) = device("triple").await;
     let device_b = second_device(&token).await;
-    let (task, _) = create_task(&device_a, &task_object("kept", "original"))
+    let device_c = second_device(&token).await;
+    let (task, _) = create_task(&device_a, &task_object("shared", "original"))
         .await
         .unwrap();
-    settle(&[&device_a, &device_b]).await;
+    settle(&[&device_a, &device_b, &device_c]).await;
 
-    set_body(&device_b, "kept", "mine").await;
-    sleep_between_mutations().await;
     im::db::delete_task(&device_a, task).await.unwrap();
-    sync(&device_a).await;
+    sleep_between_mutations().await;
+    set_body(&device_b, "shared", "edited after the delete").await;
+    settle(&[&device_a, &device_b, &device_c]).await;
 
-    let report = sync(&device_b).await;
-    assert_eq!(report.conflicts.len(), 1);
-    session::resolve(&device_b, &report.conflicts[0], Resolution::Resurrect)
-        .await
-        .unwrap();
-    settle(&[&device_a, &device_b]).await;
-
-    for (label, pool) in [("A", &device_a), ("B", &device_b)] {
-        assert_eq!(
-            body_of(pool, "kept").await.as_deref(),
-            Some("mine"),
-            "device {label} must keep the resurrected task"
+    for (label, pool) in [("A", &device_a), ("B", &device_b), ("C", &device_c)] {
+        assert!(
+            task_row(pool, "shared").await.is_none(),
+            "device {label} must converge on the deletion"
         );
     }
 }
@@ -660,4 +661,88 @@ async fn a_contested_note_is_settled_by_the_user() {
             "device {label} keeps both notes"
         );
     }
+}
+
+/// Log one non-cumulative tracker entry, as the CLI does for a configured type.
+async fn log_sleep(pool: &SqlitePool, time: i64, score: i32) {
+    use im::db::{EntryObject, TrackerObject, TrackerValue};
+    im::db::create_entry(
+        pool,
+        &EntryObject {
+            mood: String::new(),
+            body: String::new(),
+            time,
+            embedding: None,
+            score: None,
+            trackers: vec![TrackerObject {
+                tracker_type: "sleep".to_string(),
+                value: TrackerValue::Integer(score.into()),
+                replace_slot: Some((time, time + 3_600)),
+            }],
+            duration: None,
+            todo_id: None,
+        },
+    )
+    .await
+    .expect("log a tracker entry");
+}
+
+/// Non-cumulative slot rules for `sleep`, as the CLI builds them from config.
+fn sleep_slots() -> TrackerSlots {
+    use im::config::{Config, TrackerInterval, TrackerKind, TrackerSetting};
+    let mut config = Config::default();
+    config.tracker.insert(
+        "sleep".to_string(),
+        TrackerSetting::new(TrackerKind::Integer).with_interval(TrackerInterval {
+            anchor: 0,
+            span: jiff::Span::new().seconds(3_600),
+            cumulative: false,
+        }),
+    );
+    TrackerSlots::from_config(&config)
+}
+
+async fn sleep_rows(pool: &SqlitePool) -> Vec<i64> {
+    sqlx::query_scalar(
+        "SELECT CAST(score AS INTEGER) FROM tracker WHERE type = 'sleep' ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("read the sleep entries")
+}
+
+/// Two devices logging the same non-cumulative slot converge on one entry: the
+/// loser is deleted locally, its deletion is pushed in the same `sync_once`
+/// call (§4.1.4), and a peer that never evaluated the slot still honours it.
+#[tokio::test]
+async fn a_tracker_slot_loser_is_deleted_and_flushed() {
+    let slots = sleep_slots();
+    let (device_a, token) = device("slots").await;
+    let device_b = second_device(&token).await;
+    let time = 1_700_000_000;
+
+    log_sleep(&device_a, time, 4).await;
+    sync_with(&device_a, &slots).await;
+    sleep_between_mutations().await;
+    log_sleep(&device_b, time, 7).await;
+
+    // B pulls A's entry into the slot its own entry already occupies: B's later
+    // entry wins, and the tombstone of the loser leaves the outbox here.
+    let report = sync_with(&device_b, &slots).await;
+    assert!(
+        report.pushed >= 2,
+        "the loser's deletion is pushed in the same sync, got {}",
+        report.pushed
+    );
+    assert_eq!(sleep_rows(&device_b).await, vec![7]);
+
+    // A converges on B's entry through the tombstone, and the duplicate
+    // tombstone A emits for its own row is a no-op for everyone.
+    let report = sync_with(&device_a, &slots).await;
+    assert!(report.conflicts.is_empty(), "slot repair asks nothing");
+    assert_eq!(sleep_rows(&device_a).await, vec![7]);
+
+    settle(&[&device_a, &device_b]).await;
+    assert_eq!(sleep_rows(&device_a).await, vec![7], "no ping-pong on A");
+    assert_eq!(sleep_rows(&device_b).await, vec![7], "no ping-pong on B");
 }

@@ -7,6 +7,12 @@
 //! decision that is still unsynced become a [`Conflict`]: the caller asks the
 //! user and [`resolve_conflict`] turns the answer into an event, so every
 //! device converges and prompt loops terminate (§4.2).
+//!
+//! Deletions are terminal and ask nothing: once a deletion has been applied for
+//! an entity, every later arrival for it — a newer edit, a completion, a whole
+//! creation snapshot — is discarded rather than argued about. A device that
+//! deleted an entry, and a device whose edit lost to that deletion, therefore
+//! agree without a prompt.
 
 use std::collections::HashSet;
 
@@ -20,8 +26,8 @@ use crate::tracker::TrackerSlots;
 use super::events;
 use super::state::{self, Stamp};
 use super::types::{
-    Change, EntityPayload, RemoteEvent, TrackerScore, completion_field, fields, is_text_field,
-    mood_field, task_field, tracker_field,
+    Change, EntityPayload, RemoteEvent, TrackerScore, completion_field, is_text_field, mood_field,
+    task_field, tracker_field,
 };
 
 /// How many parent hops a cycle check follows before giving up: a loop already
@@ -31,14 +37,6 @@ const MAX_PARENT_HOPS: usize = 64;
 /// Why an incoming event needs the user's decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictKind {
-    /// A delete arrived for an entity this device edited locally, while those
-    /// edits are still unsynced (§4.2.2).
-    RemoteDeleteVsLocalEdit,
-    /// An update arrived for an entity this device deleted locally, while that
-    /// deletion is still unsynced (§4.2.2).
-    LocalDeleteVsRemoteUpdate,
-    /// A completion arrived for a task this device does not have (§4.2.2).
-    CompletionOnMissingTask,
     /// Both devices replaced the same text field (§4.2.1).
     TextReplaced,
     /// The incoming parent link closes a hierarchy cycle (§4.2.3).
@@ -48,10 +46,6 @@ pub enum ConflictKind {
 /// The user's decision on a conflict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolution {
-    /// Confirm the deletion, dropping the other side's change.
-    ConfirmDeletion,
-    /// Restore the entity (from its snapshot / with this device's values).
-    Resurrect,
     /// Keep this device's value for the conflicting field.
     KeepLocal,
     /// Take the other device's value for the conflicting field.
@@ -83,8 +77,6 @@ pub struct Conflict {
     /// The local and incoming parent task (parent cycles).
     pub local_parent: Option<Id>,
     pub remote_parent: Option<Id>,
-    /// Whether the entity can be restored from its snapshot.
-    pub resurrectable: bool,
 }
 
 /// What applying one event did.
@@ -93,6 +85,9 @@ pub struct Applied {
     /// The event wrote to the materialized tables (a field that lost to its
     /// own watermark changes nothing).
     pub wrote: bool,
+    /// The event was dropped because the entity is deleted here: a newer edit,
+    /// a completion or a whole creation snapshot that arrived too late.
+    pub discarded: bool,
     /// Contradictions left to the user (see [`resolve_conflict`]).
     pub conflicts: Vec<Conflict>,
 }
@@ -104,6 +99,8 @@ pub struct PageOutcome {
     pub applied: usize,
     /// Events that lost to a watermark.
     pub stale: usize,
+    /// Events dropped for an entity that is deleted here.
+    pub discarded: usize,
     /// Contradictions left to the user.
     pub conflicts: Vec<Conflict>,
 }
@@ -111,15 +108,6 @@ pub struct PageOutcome {
 impl ConflictKind {
     pub fn describe(&self) -> &'static str {
         match self {
-            ConflictKind::RemoteDeleteVsLocalEdit => {
-                "another device deleted an entry this device edited"
-            }
-            ConflictKind::LocalDeleteVsRemoteUpdate => {
-                "another device edited an entry this device deleted"
-            }
-            ConflictKind::CompletionOnMissingTask => {
-                "a completion arrived for a task this device does not have"
-            }
             ConflictKind::TextReplaced => "both devices replaced the same text",
             ConflictKind::ParentCycle => "the two tasks would become each other's parent",
         }
@@ -128,42 +116,6 @@ impl ConflictKind {
     /// The choices this conflict offers, in prompt order (§4.2).
     pub fn options(&self, conflict: &Conflict) -> Vec<(Resolution, &'static str, &'static str)> {
         match self {
-            ConflictKind::RemoteDeleteVsLocalEdit => vec![
-                (
-                    Resolution::ConfirmDeletion,
-                    "Confirm the deletion",
-                    "discard this device's edits",
-                ),
-                (
-                    Resolution::Resurrect,
-                    "Resurrect the entry",
-                    "keep this device's values",
-                ),
-            ],
-            ConflictKind::LocalDeleteVsRemoteUpdate => vec![
-                (
-                    Resolution::ConfirmDeletion,
-                    "Keep the deletion",
-                    "discard the other device's edit",
-                ),
-                (
-                    Resolution::KeepRemote,
-                    "Take the edit",
-                    "resurrect with the other device's values",
-                ),
-            ],
-            ConflictKind::CompletionOnMissingTask => vec![
-                (
-                    Resolution::ConfirmDeletion,
-                    "Drop the completion",
-                    "the task stays deleted",
-                ),
-                (
-                    Resolution::Resurrect,
-                    "Resurrect the task",
-                    "restore the task and keep the completion",
-                ),
-            ],
             ConflictKind::TextReplaced => {
                 let mut options = vec![
                     (Resolution::KeepLocal, "Keep this device's text", ""),
@@ -220,7 +172,11 @@ pub async fn apply_page(
                 }
                 _ => {}
             }
-        } else if step.conflicts.is_empty() {
+        } else if !step.conflicts.is_empty() {
+            // Left to the user: neither applied nor settled.
+        } else if step.discarded {
+            outcome.discarded += 1;
+        } else {
             outcome.stale += 1;
         }
         outcome.conflicts.extend(step.conflicts);
@@ -281,6 +237,9 @@ fn replay_order(events: &[RemoteEvent]) -> Vec<&RemoteEvent> {
     ordered
 }
 
+/// Apply a deletion. A deletion is terminal, so it is applied whatever the
+/// watermarks hold and it asks nothing: an entry another device deleted is gone
+/// here too, even when this device edited it a moment before (§4.2.2).
 async fn apply_delete(
     conn: &mut SqliteConnection,
     remote: &RemoteEvent,
@@ -288,53 +247,16 @@ async fn apply_delete(
     known: Option<state::Entity>,
 ) -> Result<Applied> {
     let entity_id = remote.event.entity_id;
+    if known.as_ref().is_some_and(|entity| entity.deleted) {
+        // Already gone here: a re-delivered deletion changes nothing.
+        return Ok(Applied::default());
+    }
     let kind = known
         .as_ref()
         .map(|entity| entity.kind.clone())
         .unwrap_or_else(|| "unknown".to_string());
 
-    // LWW first: the deletion changes nothing when a decision of this device
-    // already outranks it.
-    if let Some(current) = state::watermark(&mut *conn, entity_id, state::ENTITY).await?
-        && !state::wins(incoming, &current)
-    {
-        return Ok(Applied::default());
-    }
-
-    let alive = known.as_ref().is_some_and(|entity| !entity.deleted);
-    if alive && state::has_pending(&mut *conn, entity_id).await? {
-        return Ok(Applied {
-            wrote: false,
-            conflicts: vec![Conflict {
-                kind: ConflictKind::RemoteDeleteVsLocalEdit,
-                entity_id,
-                event: remote.clone(),
-                field: None,
-                local_value: None,
-                remote_value: None,
-                local_parent: None,
-                remote_parent: None,
-                resurrectable: true,
-            }],
-        });
-    }
-
-    commit_delete(conn, entity_id, &kind, incoming).await?;
-    Ok(Applied {
-        wrote: true,
-        conflicts: Vec::new(),
-    })
-}
-
-/// Drop the row and record the deletion as the winner of every field, keeping
-/// the field values so a resurrection has a snapshot (§4.2.2).
-async fn commit_delete(
-    conn: &mut SqliteConnection,
-    entity_id: Id,
-    kind: &str,
-    stamp: &Stamp,
-) -> Result<()> {
-    if let Some(table) = entity_table(kind) {
+    if let Some(table) = entity_table(&kind) {
         let sql = format!("DELETE FROM {table} WHERE id = ?");
         sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(entity_id)
@@ -342,12 +264,12 @@ async fn commit_delete(
             .await
             .with_context(|| format!("Failed to delete a synced {table} row"))?;
     }
-    for field in fields(kind) {
-        state::record_stamp_keep_value(&mut *conn, entity_id, field, stamp).await?;
-    }
-    state::record(&mut *conn, entity_id, state::ENTITY, stamp, None).await?;
-    state::set_entity(&mut *conn, entity_id, kind, true).await?;
-    Ok(())
+    state::record(&mut *conn, entity_id, state::ENTITY, incoming).await?;
+    state::set_entity(&mut *conn, entity_id, &kind, true).await?;
+    Ok(Applied {
+        wrote: true,
+        ..Applied::default()
+    })
 }
 
 async fn apply_mutation(
@@ -360,51 +282,24 @@ async fn apply_mutation(
     let entity_id = remote.event.entity_id;
     let kind = payload.kind();
 
-    // A completion may not reference a task that is gone here (§4.2.2).
-    if let EntityPayload::Completion(data) = payload
-        && !entity_exists(&mut *conn, data.todo_id).await?
-    {
-        let snapshot = !state::values(&mut *conn, data.todo_id).await?.is_empty();
+    // A deletion is terminal: nothing that arrives for an entity deleted here
+    // is applied, and nothing is asked about it (§4.2.2).
+    if known.as_ref().is_some_and(|entity| entity.deleted) {
         return Ok(Applied {
-            wrote: false,
-            conflicts: vec![Conflict {
-                kind: ConflictKind::CompletionOnMissingTask,
-                entity_id,
-                event: remote.clone(),
-                field: None,
-                local_value: None,
-                remote_value: None,
-                local_parent: None,
-                remote_parent: None,
-                resurrectable: snapshot,
-            }],
+            discarded: true,
+            ..Applied::default()
         });
     }
 
-    if known.as_ref().is_some_and(|entity| entity.deleted) {
-        if state::pending_delete(&mut *conn, entity_id).await? {
-            return Ok(Applied {
-                wrote: false,
-                conflicts: vec![Conflict {
-                    kind: ConflictKind::LocalDeleteVsRemoteUpdate,
-                    entity_id,
-                    event: remote.clone(),
-                    field: None,
-                    local_value: None,
-                    remote_value: None,
-                    local_parent: None,
-                    remote_parent: None,
-                    resurrectable: true,
-                }],
-            });
-        }
-        // The deletion is acknowledged: LWW decides, and a mutation above it
-        // resurrects the entity from the snapshot.
-        if let Some(delete_stamp) = state::watermark(&mut *conn, entity_id, state::ENTITY).await?
-            && !state::wins(incoming, &delete_stamp)
-        {
-            return Ok(Applied::default());
-        }
+    // A completion may not reference a task that is gone here: the task was
+    // deleted somewhere, and the completion goes with it.
+    if let EntityPayload::Completion(data) = payload
+        && !entity_exists(&mut *conn, data.todo_id).await?
+    {
+        return Ok(Applied {
+            discarded: true,
+            ..Applied::default()
+        });
     }
 
     let mut values = current_values(&mut *conn, entity_id, kind).await?;
@@ -427,7 +322,6 @@ async fn apply_mutation(
                 remote_value: text_of(change.value.as_ref()),
                 local_parent: None,
                 remote_parent: None,
-                resurrectable: true,
             });
             continue;
         }
@@ -459,7 +353,6 @@ async fn apply_mutation(
                     remote_value: None,
                     local_parent: values.get(task_field::PARENT_ID).and_then(as_id),
                     remote_parent: Some(parent),
-                    resurrectable: true,
                 });
                 continue;
             }
@@ -475,14 +368,7 @@ async fn apply_mutation(
         }
 
         set_value(&mut values, &change);
-        state::record(
-            &mut *conn,
-            entity_id,
-            change.field,
-            incoming,
-            change.value.as_ref(),
-        )
-        .await?;
+        state::record(&mut *conn, entity_id, change.field, incoming).await?;
         wrote = true;
     }
 
@@ -491,10 +377,14 @@ async fn apply_mutation(
         // `ON DELETE SET NULL` would have left them (§4.1).
         drop_missing_links(&mut *conn, kind, &mut values).await?;
         write_values(&mut *conn, entity_id, kind, &values).await?;
-        state::record(&mut *conn, entity_id, state::ENTITY, incoming, None).await?;
+        state::record(&mut *conn, entity_id, state::ENTITY, incoming).await?;
         state::set_entity(&mut *conn, entity_id, kind, false).await?;
     }
-    Ok(Applied { wrote, conflicts })
+    Ok(Applied {
+        wrote,
+        discarded: false,
+        conflicts,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -516,109 +406,31 @@ pub async fn resolve_conflict(
     };
 
     match (conflict.kind, resolution) {
-        (ConflictKind::RemoteDeleteVsLocalEdit, Resolution::ConfirmDeletion) => {
-            // The deletion stands; the local edits are dropped.
-            commit_delete(&mut tx, entity_id, &kind, &Stamp::from(&conflict.event)).await?;
-            mark_events_synced(&mut tx, entity_id).await?;
-        }
-        (ConflictKind::RemoteDeleteVsLocalEdit, Resolution::Resurrect) => {
-            // Acknowledge the deletion, then publish this device's values above
-            // it so every peer resurrects the entry.
-            record_event_stamps(&mut tx, conflict).await?;
-            events::republish(&mut tx, entity_id, &kind).await?;
-        }
-        (ConflictKind::LocalDeleteVsRemoteUpdate, Resolution::ConfirmDeletion) => {
-            mark_events_synced(&mut tx, entity_id).await?;
-            events::delete(&mut tx, entity_id, &kind).await?;
-        }
-        (ConflictKind::LocalDeleteVsRemoteUpdate, Resolution::KeepRemote) => {
-            // Take the other device's values, then publish them above this
-            // device's deletion.
-            let payload = conflict
-                .event
-                .event
-                .payload
-                .as_ref()
-                .context("an update conflict must carry a mutation")?
-                .clone();
-            apply_remote_force(
-                &mut tx,
-                entity_id,
-                &kind,
-                &payload,
-                &Stamp::from(&conflict.event),
-            )
-            .await?;
-            mark_events_synced(&mut tx, entity_id).await?;
-            events::republish(&mut tx, entity_id, &kind).await?;
-        }
-        (ConflictKind::CompletionOnMissingTask, Resolution::ConfirmDeletion) => {
-            mark_events_synced(&mut tx, entity_id).await?;
-            events::delete(&mut tx, entity_id, "completion").await?;
-        }
-        (ConflictKind::CompletionOnMissingTask, Resolution::Resurrect) => {
-            let todo_id = completion_todo_id(conflict)?;
-            let snapshot: Map<String, Value> =
-                state::values(&mut tx, todo_id).await?.into_iter().collect();
-            anyhow::ensure!(
-                !snapshot.is_empty(),
-                "no snapshot of the deleted task is available"
-            );
-            let mut snapshot = snapshot;
-            drop_missing_links(&mut tx, "task", &mut snapshot).await?;
-            write_values(&mut tx, todo_id, "task", &snapshot).await?;
-            state::set_entity(&mut tx, todo_id, "task", false).await?;
-            events::republish(&mut tx, todo_id, "task").await?;
-            apply_remote_force(
-                &mut tx,
-                entity_id,
-                "completion",
-                conflict
-                    .event
-                    .event
-                    .payload
-                    .as_ref()
-                    .context("no payload")?,
-                &Stamp::from(&conflict.event),
-            )
-            .await?;
-            mark_events_synced(&mut tx, entity_id).await?;
-            crate::db::sync_short_id(&mut tx, todo_id).await?;
-        }
-        (ConflictKind::TextReplaced, Resolution::KeepLocal) => {
-            // Re-publish this device's text above the incoming one.
+        (ConflictKind::TextReplaced, resolution) => {
             let field = conflict
                 .field
                 .context("a text conflict carries its field")?;
+            let chosen = match resolution {
+                Resolution::KeepLocal => conflict.local_value.clone().unwrap_or_default(),
+                Resolution::KeepRemote => conflict.remote_value.clone().unwrap_or_default(),
+                Resolution::AppendBoth => {
+                    anyhow::ensure!(
+                        field == task_field::BODY || field == mood_field::BODY,
+                        "only a note can hold both texts"
+                    );
+                    format!(
+                        "{}\n{}",
+                        conflict.local_value.clone().unwrap_or_default(),
+                        conflict.remote_value.clone().unwrap_or_default()
+                    )
+                }
+                other => anyhow::bail!("{other:?} does not settle a text conflict"),
+            };
+            // The chosen text wins locally and is published with a fresh stamp,
+            // so every device that saw either replacement — the one this device
+            // still had queued included — converges on it (§4.2.1).
             record_event_stamps(&mut tx, conflict).await?;
-            let change = Change::set(field, conflict.local_value.clone().unwrap_or_default());
-            events::republish_field(&mut tx, entity_id, &kind, &change).await?;
-        }
-        (ConflictKind::TextReplaced, Resolution::KeepRemote) => {
-            // The incoming text already loses to nothing: apply it.
-            let field = conflict
-                .field
-                .context("a text conflict carries its field")?;
-            let value = conflict.remote_value.clone().map(Value::String);
-            write_field(
-                &mut tx,
-                entity_id,
-                &kind,
-                field,
-                value.as_ref(),
-                &Stamp::from(&conflict.event),
-            )
-            .await?;
-        }
-        (ConflictKind::TextReplaced, Resolution::AppendBoth) => {
-            let field = conflict
-                .field
-                .context("a text conflict carries its field")?;
-            let local = conflict.local_value.clone().unwrap_or_default();
-            let remote = conflict.remote_value.clone().unwrap_or_default();
-            let merged = format!("{local}\n{remote}");
-            record_event_stamps(&mut tx, conflict).await?;
-            let change = Change::set(field, &merged);
+            let change = Change::set(field, &chosen);
             write_field(
                 &mut tx,
                 entity_id,
@@ -632,9 +444,6 @@ pub async fn resolve_conflict(
         }
         (ConflictKind::ParentCycle, resolution) => {
             resolve_cycle(&mut tx, conflict, resolution).await?;
-        }
-        (kind, resolution) => {
-            anyhow::bail!("{kind:?} cannot be resolved with {resolution:?}");
         }
     }
     tx.commit().await.context("Failed to commit a resolution")?;
@@ -719,45 +528,10 @@ async fn record_event_stamps(conn: &mut SqliteConnection, conflict: &Conflict) -
     let entity_id = conflict.entity_id;
     if let Some(payload) = &conflict.event.event.payload {
         for change in payload.changes() {
-            state::record(
-                &mut *conn,
-                entity_id,
-                change.field,
-                &stamp,
-                change.value.as_ref(),
-            )
-            .await?;
+            state::record(&mut *conn, entity_id, change.field, &stamp).await?;
         }
     }
-    state::record(&mut *conn, entity_id, state::ENTITY, &stamp, None).await?;
-    Ok(())
-}
-
-/// Materialize a remote mutation over whatever this device has, ignoring the
-/// watermarks: the decision was "take the other device's values".
-async fn apply_remote_force(
-    conn: &mut SqliteConnection,
-    entity_id: Id,
-    kind: &str,
-    payload: &EntityPayload,
-    stamp: &Stamp,
-) -> Result<()> {
-    let mut values = current_values(&mut *conn, entity_id, kind).await?;
-    for change in payload.changes() {
-        set_value(&mut values, &change);
-        state::record(
-            &mut *conn,
-            entity_id,
-            change.field,
-            stamp,
-            change.value.as_ref(),
-        )
-        .await?;
-    }
-    drop_missing_links(&mut *conn, kind, &mut values).await?;
-    write_values(&mut *conn, entity_id, kind, &values).await?;
-    state::record(&mut *conn, entity_id, state::ENTITY, stamp, None).await?;
-    state::set_entity(&mut *conn, entity_id, kind, false).await?;
+    state::record(&mut *conn, entity_id, state::ENTITY, &stamp).await?;
     Ok(())
 }
 
@@ -774,20 +548,9 @@ async fn write_field(
     values.insert(field.to_string(), value.cloned().unwrap_or(Value::Null));
     drop_missing_links(&mut *conn, kind, &mut values).await?;
     write_values(&mut *conn, entity_id, kind, &values).await?;
-    state::record(&mut *conn, entity_id, field, stamp, value).await?;
-    state::record(&mut *conn, entity_id, state::ENTITY, stamp, None).await?;
+    state::record(&mut *conn, entity_id, field, stamp).await?;
+    state::record(&mut *conn, entity_id, state::ENTITY, stamp).await?;
     state::set_entity(&mut *conn, entity_id, kind, false).await?;
-    Ok(())
-}
-
-/// Stop pushing the queued events of an entity: the user's decision superseded
-/// them.
-async fn mark_events_synced(conn: &mut SqliteConnection, entity_id: Id) -> Result<()> {
-    sqlx::query("UPDATE _sync_events SET synced = 1 WHERE entity_id = ? AND synced = 0")
-        .bind(entity_id)
-        .execute(&mut *conn)
-        .await
-        .context("Failed to settle the sync outbox")?;
     Ok(())
 }
 
@@ -795,8 +558,8 @@ async fn mark_events_synced(conn: &mut SqliteConnection, entity_id: Id) -> Resul
 // Values
 // ---------------------------------------------------------------------------
 
-/// The current values of every field of an entity: its row, or the watermark
-/// snapshot when the row is gone (a resurrection, §4.2.2).
+/// The current values of every field of an entity row. An entity without a row
+/// starts from nothing: a creation snapshot carries every field.
 async fn current_values(
     conn: &mut SqliteConnection,
     entity_id: Id,
@@ -853,10 +616,7 @@ async fn current_values(
     };
     match row {
         Some(values) => Ok(values),
-        None => Ok(state::values(&mut *conn, entity_id)
-            .await?
-            .into_iter()
-            .collect()),
+        None => Ok(Map::new()),
     }
 }
 
@@ -1164,7 +924,7 @@ async fn detach_parent(conn: &mut SqliteConnection, task: Id, stamp: &Stamp) -> 
         .execute(&mut *conn)
         .await
         .context("Failed to detach a task from its parent")?;
-    state::record(&mut *conn, task, task_field::PARENT_ID, stamp, None).await?;
+    state::record(&mut *conn, task, task_field::PARENT_ID, stamp).await?;
     Ok(())
 }
 
@@ -1196,8 +956,11 @@ async fn mark_tracker_slot(
 /// landed in it (`@@SYNC.md` §4.1).
 ///
 /// Two devices logging the same non-cumulative slot while offline produce
-/// several rows once they sync. Every device runs this cleanup over the same
-/// events, so it is idempotent and emits no cleanup event of its own.
+/// several rows once they sync. Each superseded row is deleted here *and* the
+/// deletion is published as a tombstone of its own, so a peer converges on the
+/// winner without having to agree about interval configuration, timezone or
+/// clock. Two devices that both drop the same loser emit two tombstones for it;
+/// a deletion is terminal, so applying the second one is a no-op.
 async fn dedup_tracker_slots(
     conn: &mut SqliteConnection,
     touched: &HashSet<(String, (i64, i64))>,
@@ -1244,6 +1007,7 @@ async fn dedup_tracker_slots(
                     .execute(&mut *conn)
                     .await
                     .context("Failed to drop a superseded tracker entry")?;
+                events::delete(&mut *conn, *id, "tracker").await?;
             }
         }
     }
@@ -1339,13 +1103,6 @@ fn json_id(value: Option<Id>) -> Value {
 
 fn text_of(value: Option<&Value>) -> Option<String> {
     value.and_then(Value::as_str).map(str::to_string)
-}
-
-fn completion_todo_id(conflict: &Conflict) -> Result<Id> {
-    match &conflict.event.event.payload {
-        Some(EntityPayload::Completion(data)) => Ok(data.todo_id),
-        _ => anyhow::bail!("a completion conflict must carry a completion payload"),
-    }
 }
 
 fn conflict_kind_of(conflict: &Conflict) -> String {

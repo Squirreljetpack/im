@@ -29,6 +29,7 @@ pub async fn sync_command(pool: &SqlitePool, config: &Config) -> Result<()> {
     let mut pushed = 0;
     let mut applied = 0;
     let mut stale = 0;
+    let mut discarded = 0;
     let mut conflicts = 0;
 
     for _ in 0..MAX_PAGES {
@@ -36,6 +37,7 @@ pub async fn sync_command(pool: &SqlitePool, config: &Config) -> Result<()> {
         pushed += report.pushed;
         applied += report.applied;
         stale += report.stale;
+        discarded += report.discarded;
 
         if !report.conflicts.is_empty() {
             if !interactive {
@@ -57,6 +59,9 @@ pub async fn sync_command(pool: &SqlitePool, config: &Config) -> Result<()> {
         }
 
         println!("Pushed {pushed} event(s); applied {applied}; already known {stale}.");
+        if discarded > 0 {
+            println!("Discarded {discarded} event(s) for entries deleted on another device.");
+        }
         if conflicts == 0 {
             println!("Up to date at server version {}.", report.server_version);
         } else {
@@ -102,7 +107,6 @@ async fn conflict_question(pool: &SqlitePool, conflict: &Conflict) -> String {
             parent_label(pool, conflict.remote_parent, "the incoming parent").await,
             entity,
         ),
-        _ => format!("{} ({entity})", conflict.kind.describe()),
     }
 }
 

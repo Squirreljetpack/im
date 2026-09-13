@@ -145,14 +145,11 @@ pub async fn completion(conn: &mut SqliteConnection, id: Id) -> Result<()> {
     .await
 }
 
-/// Emit a delete: the entity loses every field, so a later mutation has to
-/// outrank the deletion to resurrect it (§4.2.2).
+/// Emit a delete. A deletion is terminal: this device will not materialize the
+/// entity again, whatever arrives for it later.
 pub async fn delete(conn: &mut SqliteConnection, id: Id, kind: &str) -> Result<()> {
     let stamp = append(conn, id, &None).await?;
-    for field in super::types::fields(kind) {
-        state::record_stamp_keep_value(&mut *conn, id, field, &stamp).await?;
-    }
-    state::record(&mut *conn, id, state::ENTITY, &stamp, None).await?;
+    state::record(&mut *conn, id, state::ENTITY, &stamp).await?;
     state::set_entity(&mut *conn, id, kind, true).await?;
     Ok(())
 }
@@ -167,18 +164,6 @@ pub async fn republish_field(
 ) -> Result<()> {
     let payload = super::types::payload_of_change(kind, change)?;
     emit_mutation(conn, id, payload).await
-}
-
-/// Re-publish an entity's current values: the compensating event of a
-/// resurrection (§4.2.2), which has to outrank the deletion it overrules.
-pub async fn republish(conn: &mut SqliteConnection, id: Id, kind: &str) -> Result<()> {
-    match kind {
-        "task" => task_create(conn, id).await,
-        "mood" => mood_create(conn, id).await,
-        "tracker" => tracker_create(conn, id).await,
-        "completion" => completion(conn, id).await,
-        other => anyhow::bail!("cannot re-publish an entity of kind '{other}'"),
-    }
 }
 
 /// Append one event to the outbox: the device id, the monotonic timestamp and
@@ -221,16 +206,9 @@ async fn emit_mutation(
     let kind = payload.kind();
     let stamp = append(conn, entity_id, &Some(payload)).await?;
     for change in changes {
-        state::record(
-            &mut *conn,
-            entity_id,
-            change.field,
-            &stamp,
-            change.value.as_ref(),
-        )
-        .await?;
+        state::record(&mut *conn, entity_id, change.field, &stamp).await?;
     }
-    state::record(&mut *conn, entity_id, state::ENTITY, &stamp, None).await?;
+    state::record(&mut *conn, entity_id, state::ENTITY, &stamp).await?;
     state::set_entity(&mut *conn, entity_id, kind, false).await?;
     Ok(())
 }

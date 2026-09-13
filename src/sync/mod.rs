@@ -24,6 +24,6 @@ pub use state::{
 };
 pub use types::{
     Change, CompletionData, EntityPayload, MoodCreateData, MoodUpdateData, RemoteEvent, SyncEvent,
-    TaskCreateData, TaskUpdateData, TrackerData, TrackerScore, TrackerUpdateData, fields,
-    is_text_field, task_field,
+    TaskCreateData, TaskUpdateData, TrackerData, TrackerScore, TrackerUpdateData, is_text_field,
+    task_field,
 };

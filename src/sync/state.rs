@@ -163,115 +163,34 @@ pub async fn watermark(
     }))
 }
 
-/// Record a field event that won. `value` is the JSON of the value the field
-/// now holds (`None` for a cleared column, and for the entity row).
+/// Record a field event that won.
 pub async fn record(
     conn: &mut SqliteConnection,
     entity_id: Id,
     field: &str,
     stamp: &Stamp,
-    value: Option<&serde_json::Value>,
 ) -> Result<()> {
-    let json = value.map(|value| value.to_string());
     sqlx::query(
-        "INSERT INTO _sync_watermark (entity_id, field, timestamp, device_id, event_id, value)
-         VALUES (?, ?, ?, ?, ?, ?)
+        "INSERT INTO _sync_watermark (entity_id, field, timestamp, device_id, event_id)
+         VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(entity_id, field) DO UPDATE SET
              timestamp = excluded.timestamp,
              device_id = excluded.device_id,
-             event_id = excluded.event_id,
-             value = excluded.value",
+             event_id = excluded.event_id",
     )
     .bind(entity_id)
     .bind(field)
     .bind(stamp.timestamp)
     .bind(&stamp.device_id)
     .bind(&stamp.event_id)
-    .bind(json)
     .execute(&mut *conn)
     .await
     .with_context(|| format!("Failed to record the sync watermark of '{field}'"))?;
     Ok(())
 }
 
-/// Move a field's stamp without touching the value it holds: a delete wins the
-/// field, while the snapshot a resurrection starts from stays intact (§4.2.2).
-pub async fn record_stamp_keep_value(
-    conn: &mut SqliteConnection,
-    entity_id: Id,
-    field: &str,
-    stamp: &Stamp,
-) -> Result<()> {
-    let updated = sqlx::query(
-        "UPDATE _sync_watermark SET timestamp = ?, device_id = ?, event_id = ?
-          WHERE entity_id = ? AND field = ?",
-    )
-    .bind(stamp.timestamp)
-    .bind(&stamp.device_id)
-    .bind(&stamp.event_id)
-    .bind(entity_id)
-    .bind(field)
-    .execute(&mut *conn)
-    .await
-    .context("Failed to move the sync watermark")?;
-    if updated.rows_affected() == 0 {
-        sqlx::query(
-            "INSERT INTO _sync_watermark (entity_id, field, timestamp, device_id, event_id, value)
-             VALUES (?, ?, ?, ?, ?, NULL)",
-        )
-        .bind(entity_id)
-        .bind(field)
-        .bind(stamp.timestamp)
-        .bind(&stamp.device_id)
-        .bind(&stamp.event_id)
-        .execute(&mut *conn)
-        .await
-        .context("Failed to record the sync watermark")?;
-    }
-    Ok(())
-}
-
-/// Whether the newest decision still sitting in the outbox for this entity is
-/// a delete: the local side of a tombstone conflict (§4.2.2).
-pub async fn pending_delete(conn: &mut SqliteConnection, entity_id: Id) -> Result<bool> {
-    let payload: Option<String> = sqlx::query_scalar(
-        "SELECT payload FROM _sync_events WHERE entity_id = ? AND synced = 0
-         ORDER BY version DESC LIMIT 1",
-    )
-    .bind(entity_id)
-    .fetch_optional(&mut *conn)
-    .await
-    .context("Failed to inspect the sync outbox")?;
-    Ok(payload.is_some_and(|json| json.trim() == "null"))
-}
-
-/// Every known field value of an entity, newest winner per field: the snapshot
-/// a deleted entity is resurrected from (§4.2.2).
-pub async fn values(
-    conn: &mut SqliteConnection,
-    entity_id: Id,
-) -> Result<Vec<(String, serde_json::Value)>> {
-    use sqlx::Row;
-    let rows = sqlx::query(
-        "SELECT field, value FROM _sync_watermark
-          WHERE entity_id = ? AND field != '' AND value IS NOT NULL",
-    )
-    .bind(entity_id)
-    .fetch_all(&mut *conn)
-    .await
-    .context("Failed to read the sync snapshot")?;
-    rows.iter()
-        .map(|row| {
-            let field: String = row.get("field");
-            let value: String = row.get("value");
-            let value = serde_json::from_str(&value).context("Corrupt sync snapshot value")?;
-            Ok((field, value))
-        })
-        .collect()
-}
-
-/// What this device knows about an entity: its kind and whether it is deleted
-/// here.
+/// What this device knows about an entity: its kind and whether a deletion has
+/// been applied for it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entity {
     pub kind: String,
@@ -292,7 +211,8 @@ pub async fn entity(conn: &mut SqliteConnection, entity_id: Id) -> Result<Option
     }))
 }
 
-/// Record what kind of entity an id is and whether it is deleted here.
+/// Record what kind of entity an id is and whether a deletion has been applied
+/// for it here.
 pub async fn set_entity(
     conn: &mut SqliteConnection,
     entity_id: Id,
@@ -310,18 +230,6 @@ pub async fn set_entity(
     .await
     .context("Failed to record the synced entity")?;
     Ok(())
-}
-
-/// Whether anything about this entity is still waiting in the outbox: the local
-/// decision a remote delete can contradict (§4.2.2).
-pub async fn has_pending(conn: &mut SqliteConnection, entity_id: Id) -> Result<bool> {
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM _sync_events WHERE entity_id = ? AND synced = 0")
-            .bind(entity_id)
-            .fetch_one(&mut *conn)
-            .await
-            .context("Failed to inspect the sync outbox")?;
-    Ok(count > 0)
 }
 
 /// The fields an unsynced *edit* of this entity wrote: the local decisions a

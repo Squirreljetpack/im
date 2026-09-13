@@ -511,45 +511,6 @@ pub fn payload_of_change(kind: &str, change: &Change) -> anyhow::Result<EntityPa
     }
 }
 
-/// Every field a kind carries: the set a delete wins (and a resurrection
-/// starts from).
-pub fn fields(kind: &str) -> &'static [&'static str] {
-    match kind {
-        "task" => &[
-            task_field::NAME,
-            task_field::BODY,
-            task_field::PRIORITY,
-            task_field::START_TIME,
-            task_field::AVAILABLE_DURATION_SECS,
-            task_field::INTERVAL_SECS,
-            task_field::TARGET_COUNT,
-            task_field::OPTIONAL,
-            task_field::END_TIME,
-            task_field::PARENT_ID,
-        ],
-        "mood" => &[
-            mood_field::MOOD,
-            mood_field::BODY,
-            mood_field::TIME,
-            mood_field::SCORE,
-            mood_field::DURATION,
-            mood_field::TODO_ID,
-        ],
-        "tracker" => &[
-            tracker_field::TRACKER_TYPE,
-            tracker_field::SCORE,
-            tracker_field::TIME,
-            tracker_field::MOOD_ID,
-        ],
-        "completion" => &[
-            completion_field::TODO_ID,
-            completion_field::TIME,
-            completion_field::COUNT,
-        ],
-        _ => &[],
-    }
-}
-
 /// Whether concurrent replacements of this field need the user's decision
 /// (`@@SYNC.md` §4.2.1) instead of a silent field-level LWW.
 pub fn is_text_field(kind: &str, field: &str) -> bool {

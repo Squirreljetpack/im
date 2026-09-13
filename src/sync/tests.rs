@@ -64,7 +64,7 @@ fn remote(
 /// A timestamp that beats anything this device authored locally.
 /// Whether applying left the event unapplied and uncontested.
 fn is_stale(step: &crate::sync::apply::Applied) -> bool {
-    !step.wrote && step.conflicts.is_empty()
+    !step.wrote && !step.discarded && step.conflicts.is_empty()
 }
 
 fn future_ts() -> i64 {
@@ -225,122 +225,68 @@ async fn remote_delete_removes_the_row() {
     assert_eq!(task_count(&pool, id).await, 0);
 }
 
+/// A deletion is terminal: it is applied without asking, and nothing that
+/// arrives for the entity afterwards brings it back (§4.2.2).
 #[tokio::test]
-async fn local_edit_conflicts_with_remote_delete() {
-    // Confirming the deletion drops the row and settles the local outbox.
+async fn a_deletion_is_terminal() {
     let pool = test_pool().await.unwrap();
-    let (id, _) = create_task(&pool, &task_object("local edit"))
+    let (id, _) = create_task(&pool, &task_object("doomed")).await.unwrap();
+    let step = crate::sync::apply::apply_event(&pool, &remote(Id::new(), future_ts(), id, None))
         .await
         .unwrap();
-    let delete = remote(Id::new(), future_ts(), id, None);
-    let outcome = crate::sync::apply::apply_event(&pool, &delete)
-        .await
-        .unwrap();
-    let Some(conflict) = outcome.conflicts.into_iter().next() else {
-        panic!("a remote delete must not discard a local edit silently");
-    };
-    assert_eq!(conflict.kind, ConflictKind::RemoteDeleteVsLocalEdit);
-    assert!(conflict.resurrectable);
-
-    crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::ConfirmDeletion)
-        .await
-        .unwrap();
+    assert!(step.wrote, "the deletion is applied");
+    assert!(step.conflicts.is_empty(), "a deletion asks nothing");
     assert_eq!(task_count(&pool, id).await, 0);
-    assert!(
-        crate::sync::apply::pending_events(&pool)
-            .await
-            .unwrap()
-            .is_empty(),
-        "the superseded local edit must leave the outbox"
-    );
 
-    // Resurrecting re-publishes the local state with a fresh timestamp.
-    let pool = test_pool().await.unwrap();
-    let (id, _) = create_task(&pool, &task_object("keep me")).await.unwrap();
-    let delete = remote(Id::new(), future_ts(), id, None);
-    let outcome = crate::sync::apply::apply_event(&pool, &delete)
+    // A newer edit and a whole creation snapshot arrive too late, however new
+    // their timestamps are: the entity stays gone.
+    for payload in [priority_change(9), task_payload("resurrect me")] {
+        let step = crate::sync::apply::apply_event(
+            &pool,
+            &remote(Id::new(), future_ts() + 1_000, id, Some(payload)),
+        )
         .await
         .unwrap();
-    let Some(conflict) = outcome.conflicts.into_iter().next() else {
-        panic!("expected a conflict");
-    };
-    crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::Resurrect)
-        .await
-        .unwrap();
-    assert_eq!(task_name(&pool, id).await.as_deref(), Some("keep me"));
-    let pending = crate::sync::apply::pending_events(&pool).await.unwrap();
-    let republished = pending.last().unwrap();
-    assert!(republished.timestamp > delete.event.timestamp);
-    assert!(matches!(
-        republished.payload,
-        Some(crate::sync::EntityPayload::TaskCreate(_))
-    ));
+        assert!(
+            step.discarded,
+            "a deleted entity discards what arrives later"
+        );
+        assert!(step.conflicts.is_empty());
+    }
+    assert_eq!(task_count(&pool, id).await, 0);
 }
 
+/// A deletion this device made holds against a remote edit, whatever the
+/// timestamps say.
 #[tokio::test]
-async fn remote_upsert_conflicts_with_local_delete() {
+async fn a_local_delete_is_not_undone_by_a_remote_edit() {
     let pool = test_pool().await.unwrap();
     let (id, _) = create_task(&pool, &task_object("doomed")).await.unwrap();
     delete_task(&pool, id).await.unwrap();
 
-    let upsert = remote(
-        Id::new(),
-        future_ts(),
-        id,
-        Some(task_payload("resurrect me")),
-    );
-    let outcome = crate::sync::apply::apply_event(&pool, &upsert)
-        .await
-        .unwrap();
-    let Some(conflict) = outcome.conflicts.into_iter().next() else {
-        panic!("a remote upsert must not silently undo a local delete");
-    };
-    assert_eq!(conflict.kind, ConflictKind::LocalDeleteVsRemoteUpdate);
-
-    // [1] keep the deletion: a fresh delete event settles it everywhere.
-    crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::ConfirmDeletion)
-        .await
-        .unwrap();
+    let step = crate::sync::apply::apply_event(
+        &pool,
+        &remote(
+            Id::new(),
+            future_ts() + 1_000,
+            id,
+            Some(task_payload("resurrect me")),
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(step.discarded, "the later edit still loses to the deletion");
+    assert!(step.conflicts.is_empty(), "a deletion asks nothing");
     assert_eq!(task_count(&pool, id).await, 0);
-    let pending = crate::sync::apply::pending_events(&pool).await.unwrap();
-    assert!(pending.last().unwrap().payload.is_none());
-
-    // [2] take the edit: the incoming values are applied and re-published.
-    let pool = test_pool().await.unwrap();
-    let (id, _) = create_task(&pool, &task_object("doomed")).await.unwrap();
-    delete_task(&pool, id).await.unwrap();
-    let upsert = remote(
-        Id::new(),
-        future_ts(),
-        id,
-        Some(task_payload("resurrect me")),
-    );
-    let outcome = crate::sync::apply::apply_event(&pool, &upsert)
-        .await
-        .unwrap();
-    let Some(conflict) = outcome.conflicts.into_iter().next() else {
-        panic!("expected a conflict");
-    };
-    crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::KeepRemote)
-        .await
-        .unwrap();
-    assert_eq!(task_name(&pool, id).await.as_deref(), Some("resurrect me"));
-    let pending = crate::sync::apply::pending_events(&pool).await.unwrap();
-    assert!(matches!(
-        pending.last().unwrap().payload,
-        Some(crate::sync::EntityPayload::TaskCreate(_))
-    ));
+    assert_eq!(task_name(&pool, id).await, None);
 }
 
+/// A completion for a task that was deleted elsewhere is dropped with it.
 #[tokio::test]
-async fn completion_on_a_deleted_task_can_resurrect_it() {
+async fn a_completion_for_a_deleted_task_is_dropped() {
     let pool = test_pool().await.unwrap();
-    let task = Id::new();
-    let completion = Id::new();
     let other = Id::new();
-
-    // The task lived here, then was deleted elsewhere: the watermark keeps
-    // the snapshot that resurrection restores.
+    let task = Id::new();
     crate::sync::apply::apply_event(
         &pool,
         &remote(other, 1_000, task, Some(task_payload("habit"))),
@@ -352,77 +298,33 @@ async fn completion_on_a_deleted_task_can_resurrect_it() {
         .unwrap();
     assert_eq!(task_count(&pool, task).await, 0);
 
-    let event = remote(
-        other,
-        3_000,
-        completion,
-        Some(crate::sync::EntityPayload::Completion(
-            crate::sync::CompletionData {
-                todo_id: task,
-                time: 1_700_000_100,
-                count: 1,
-            },
-        )),
-    );
-    let outcome = crate::sync::apply::apply_event(&pool, &event)
-        .await
-        .unwrap();
-    let Some(conflict) = outcome.conflicts.into_iter().next() else {
-        panic!("a completion for a missing task must ask the user");
-    };
-    assert_eq!(conflict.kind, ConflictKind::CompletionOnMissingTask);
-    assert!(conflict.resurrectable);
-
-    crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::Resurrect)
-        .await
-        .unwrap();
-    assert_eq!(task_count(&pool, task).await, 1, "the task is restored");
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM todo_completions WHERE todo_id = ?")
+    let completion = Id::new();
+    let step = crate::sync::apply::apply_event(
+        &pool,
+        &remote(
+            other,
+            3_000,
+            completion,
+            Some(crate::sync::EntityPayload::Completion(
+                crate::sync::CompletionData {
+                    todo_id: task,
+                    time: 1_700_000_100,
+                    count: 1,
+                },
+            )),
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(step.discarded, "the completion goes with its task");
+    assert!(step.conflicts.is_empty(), "a deletion asks nothing");
+    assert_eq!(task_count(&pool, task).await, 0, "the task stays deleted");
+    let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM todo_completions WHERE todo_id = ?")
         .bind(task)
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(count, 1, "the completion is kept");
-
-    // Dropping it records an explicit delete instead.
-    let pool = test_pool().await.unwrap();
-    let drop_task = Id::new();
-    let drop_completion = Id::new();
-    crate::sync::apply::apply_event(
-        &pool,
-        &remote(other, 1_000, drop_task, Some(task_payload("gone"))),
-    )
-    .await
-    .unwrap();
-    crate::sync::apply::apply_event(&pool, &remote(other, 2_000, drop_task, None))
-        .await
-        .unwrap();
-    let event = remote(
-        other,
-        3_000,
-        drop_completion,
-        Some(crate::sync::EntityPayload::Completion(
-            crate::sync::CompletionData {
-                todo_id: drop_task,
-                time: 1_700_000_100,
-                count: 1,
-            },
-        )),
-    );
-    let Some(conflict) = crate::sync::apply::apply_event(&pool, &event)
-        .await
-        .unwrap()
-        .conflicts
-        .into_iter()
-        .next()
-    else {
-        panic!("expected a conflict");
-    };
-    crate::sync::apply::resolve_conflict(&pool, &conflict, Resolution::ConfirmDeletion)
-        .await
-        .unwrap();
-    let pending = crate::sync::apply::pending_events(&pool).await.unwrap();
-    assert!(pending.last().unwrap().payload.is_none());
+    assert_eq!(kept, 0, "the completion is dropped, not resurrected");
 }
 
 #[tokio::test]
@@ -629,7 +531,11 @@ async fn a_replayed_tracker_slot_keeps_only_the_winner() {
     )
     .await
     .unwrap();
-    let queued = crate::sync::apply::pending_events(&pool)
+    let local: Id = sqlx::query_scalar("SELECT id FROM tracker WHERE type = 'sleep'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let queued_before = crate::sync::apply::pending_events(&pool)
         .await
         .unwrap()
         .len();
@@ -680,15 +586,17 @@ async fn a_replayed_tracker_slot_keeps_only_the_winner() {
     assert_eq!(entries.len(), 1, "the slot keeps a single entry");
     assert_eq!(entries[0].0, winner, "the later log wins the slot");
     assert_eq!(entries[0].1, 9);
-    // The remote entry's own tracker row is untouched by the cleanup.
+    // The superseded local entry is published as a tombstone of its own, so a
+    // peer converges on the winner without knowing this device's slots (§4.1.4).
+    let queued = crate::sync::apply::pending_events(&pool).await.unwrap();
     assert_eq!(
-        crate::sync::apply::pending_events(&pool)
-            .await
-            .unwrap()
-            .len(),
-        queued,
-        "the slot cleanup emits no event"
+        queued.len(),
+        queued_before + 1,
+        "the cleanup queues exactly one deletion"
     );
+    let tombstone = queued.last().unwrap();
+    assert!(tombstone.payload.is_none(), "the loser is deleted outright");
+    assert_eq!(tombstone.entity_id, local, "the deleted row is the loser");
 }
 
 // ---------------------------------------------------------------------------

@@ -11,6 +11,11 @@ use super::state::{self, KEY_AUTH_TOKEN, KEY_LAST_SERVER_VERSION, KEY_USER_ID};
 use crate::db::EventId;
 use crate::tracker::TrackerSlots;
 
+/// How many round trips one `sync_once` may make while settling deletions the
+/// replay queued: a second pass is the norm, more than a couple means two
+/// devices keep colliding on the same tracker slot.
+const MAX_FLUSH_ROUNDS: usize = 4;
+
 /// What one round trip did.
 #[derive(Debug, Clone, Default)]
 pub struct SyncReport {
@@ -20,6 +25,8 @@ pub struct SyncReport {
     pub applied: usize,
     /// Remote events that were older than what this device already has.
     pub stale: usize,
+    /// Remote events dropped for an entity that is deleted here.
+    pub discarded: usize,
     /// Events left to the user's decision (see [`Conflict`]).
     pub conflicts: Vec<Conflict>,
     /// The cursor the next sync resumes from.
@@ -100,39 +107,54 @@ pub async fn sync_once(
             .context("Failed to acquire a db connection")?;
         state::device_id(&mut conn).await?
     };
-    let since = state_get(pool, KEY_LAST_SERVER_VERSION)
+    let mut since = state_get(pool, KEY_LAST_SERVER_VERSION)
         .await?
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
 
-    let events = apply::pending_events(pool).await?;
-    let pushed: Vec<EventId> = events.iter().map(|event| event.event_id).collect();
+    let mut report = SyncReport::default();
+    // One round trip per pass. A pass can queue deletions of its own — tracker
+    // slot deduplication during the replay (§4.1.4) — so it pushes whatever the
+    // replay added before it returns: no tombstone is left waiting in the
+    // outbox for a later command to notice.
+    for _ in 0..MAX_FLUSH_ROUNDS {
+        let events = apply::pending_events(pool).await?;
+        let pushed: Vec<EventId> = events.iter().map(|event| event.event_id).collect();
 
-    let client = Client::with_timeout(server, Some(token), timeout);
-    let request_client = client.clone();
-    let outcome = run_blocking(move || request_client.sync(device, since, &events)).await?;
-    // The page is replayed before the push counts as acknowledged: an incoming
-    // event that contradicts a decision made in this same round is still a
-    // concurrent decision, and the user settles it (`@@SYNC.md` §4.4). Marking
-    // late is harmless — a crash here only re-pushes, and `event_id` is unique
-    // server-side.
-    let page = apply::apply_page(
-        pool,
-        &outcome.remote_events,
-        outcome.new_server_version,
-        slots,
-    )
-    .await?;
-    apply::mark_pushed(pool, &pushed).await?;
+        let client = Client::with_timeout(server, Some(token.clone()), timeout);
+        let outcome = run_blocking(move || client.sync(device, since, &events)).await?;
+        // The page is replayed before the push counts as acknowledged: an
+        // incoming event that contradicts a decision made in this same round is
+        // still a concurrent decision, and the user settles it (`@@SYNC.md`
+        // §4.2). Marking late is harmless — a crash here only re-pushes, and
+        // `event_id` is unique server-side.
+        let page = apply::apply_page(
+            pool,
+            &outcome.remote_events,
+            outcome.new_server_version,
+            slots,
+        )
+        .await?;
+        apply::mark_pushed(pool, &pushed).await?;
 
-    let report = SyncReport {
-        pushed: pushed.len(),
-        applied: page.applied,
-        stale: page.stale,
-        conflicts: page.conflicts,
-        server_version: outcome.new_server_version,
-        has_more: outcome.has_more,
-    };
+        report.pushed += pushed.len();
+        report.applied += page.applied;
+        report.stale += page.stale;
+        report.discarded += page.discarded;
+        report.conflicts.extend(page.conflicts);
+        report.server_version = outcome.new_server_version;
+        report.has_more = outcome.has_more;
+        since = outcome.new_server_version;
+
+        if apply::pending_events(pool).await?.is_empty() {
+            break;
+        }
+    }
+    if !apply::pending_events(pool).await?.is_empty() {
+        // Slot deduplication on two devices that keep colliding: the next
+        // `im sync` settles the rest.
+        cba::ebog!("The sync outbox is still not empty after flushing");
+    }
     Ok(report)
 }
 
