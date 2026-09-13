@@ -2,7 +2,9 @@
 //!
 //! Every event is applied by field-level last-write-wins (§4.1); the one thing
 //! the user decides here is a conflict between the incoming event and a change
-//! this device has not pushed yet (§4.2).
+//! this device has not pushed yet (§4.2). `im sync --reset` throws the local
+//! copy away and rebuilds it from the server log (§4.4.2), which is the escape
+//! hatch when the local state is diverged or unreadable.
 
 use std::time::Duration;
 
@@ -21,11 +23,49 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// Safety net for the page loop: the server pages at 1000 events, so a
 /// backlog deeper than this is a server problem, not a sync in progress.
 const MAX_PAGES: usize = 10_000;
+/// What to do about local mutations that `--reset` is about to drop.
+#[derive(Debug)]
+enum ResetGuard {
+    /// Nothing unsynced: reset without asking.
+    Proceed,
+    /// Ask before dropping this many unsynced mutations.
+    Confirm(usize),
+}
 
-pub async fn sync_command(pool: &SqlitePool, config: &Config) -> Result<()> {
+/// The `--reset` tripwire. Dropped mutations exist nowhere but the local
+/// database, so a non-interactive run refuses instead of guessing.
+fn reset_guard(pending: usize, interactive: bool) -> Result<ResetGuard> {
+    if pending == 0 {
+        return Ok(ResetGuard::Proceed);
+    }
+    if !interactive {
+        bail!(
+            "{pending} local change(s) have not been synced yet and `im sync --reset` would discard \
+             them — sync first, or run it in a terminal to confirm"
+        );
+    }
+    Ok(ResetGuard::Confirm(pending))
+}
+
+pub async fn sync_command(pool: &SqlitePool, config: &Config, reset: bool) -> Result<()> {
     let server = server_url();
     let slots = TrackerSlots::from_config(config);
     let interactive = atty::is(atty::Stream::Stdin);
+
+    if reset {
+        let pending = session::unsynced_count(pool).await?;
+        if let ResetGuard::Confirm(pending) = reset_guard(pending, interactive)?
+            && !crate::prompts::prompt_discard_unsynced(pending)?
+        {
+            bail!("keeping the local database");
+        }
+        let dropped = session::reset_local_state(pool).await?;
+        println!("Cleared the local database; rebuilding it from the server log.");
+        if dropped > 0 {
+            println!("Discarded {dropped} unsynced local change(s).");
+        }
+    }
+
     let mut pushed = 0;
     let mut applied = 0;
     let mut stale = 0;
@@ -144,5 +184,30 @@ async fn parent_label(pool: &SqlitePool, task: Option<crate::db::Id>, fallback: 
     match crate::db::fetch_task_by_id(pool, task, crate::date::now()).await {
         Ok(Some(row)) => format!("\"{}\"", row.name),
         _ => fallback.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Nothing unsynced: a reset needs no confirmation.
+    #[test]
+    fn a_reset_without_pending_changes_proceeds() {
+        assert!(matches!(
+            reset_guard(0, false).unwrap(),
+            ResetGuard::Proceed
+        ));
+    }
+
+    /// Unsynced changes: a terminal asks, a pipe refuses.
+    #[test]
+    fn a_reset_with_pending_changes_refuses_without_a_terminal() {
+        assert!(matches!(
+            reset_guard(3, true).unwrap(),
+            ResetGuard::Confirm(3)
+        ));
+        let err = reset_guard(3, false).unwrap_err().to_string();
+        assert!(err.contains("3 local change(s)"), "{err}");
     }
 }

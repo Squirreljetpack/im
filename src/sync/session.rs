@@ -7,7 +7,7 @@ use sqlx::{SqliteConnection, SqlitePool};
 
 use super::apply::{self, Conflict};
 use super::client::{Account, AccountStatus, Client, run_blocking};
-use super::state::{self, KEY_AUTH_TOKEN, KEY_LAST_SERVER_VERSION, KEY_USER_ID};
+use super::state::{self, KEY_AUTH_TOKEN, KEY_DEVICE_ID, KEY_LAST_SERVER_VERSION, KEY_USER_ID};
 use crate::db::EventId;
 use crate::tracker::TrackerSlots;
 
@@ -88,7 +88,7 @@ pub async fn signed_in(pool: &SqlitePool) -> Result<Option<String>> {
 
 /// Push the outbox and apply one pulled page.
 ///
-/// The page commits as a unit together with the cursor (`@@SYNC.md` §4.5), so
+/// The page commits as a unit together with the cursor (`@@SYNC.md` §4.3), so
 /// a conflict skips only its own event: everything else in the page lands and
 /// the caller asks the user before the next request.
 pub async fn sync_once(
@@ -158,6 +158,58 @@ pub async fn sync_once(
     Ok(report)
 }
 
+/// How many local mutations have not reached the server yet.
+pub async fn unsynced_count(pool: &SqlitePool) -> Result<usize> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sync_events WHERE synced = 0")
+        .fetch_one(pool)
+        .await
+        .context("Failed to count the queued events")?;
+    Ok(count as usize)
+}
+
+/// Discard every local entity and sync watermark and ask for the whole log
+/// again: the device rebuilds its state from the event stream (`@@SYNC.md`
+/// §4.4.2). The credentials survive, so the pull resumes without a new login;
+/// the device id does not, because the server never sends a device its own
+/// events back — dropping the id is what makes the log readable again.
+///
+/// Returns how many unsynced local mutations were dropped: their content is
+/// nowhere but in this database, so the caller has to warn about them first.
+pub async fn reset_local_state(pool: &SqlitePool) -> Result<usize> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to start the reset transaction")?;
+    // Counted on the transaction's own connection: a pool with a single
+    // connection (as tests use) cannot hand out a second one before it commits.
+    let discarded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sync_events WHERE synced = 0")
+        .fetch_one(&mut *tx)
+        .await
+        .context("Failed to count the queued events")?;
+
+    // Completions and trackers reference the rows above them.
+    for table in [
+        "todo_completions",
+        "tracker",
+        "mood",
+        "todos",
+        "_sync_watermark",
+        "_sync_entities",
+        "_sync_events",
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(format!("DELETE FROM {table}")))
+            .execute(&mut *tx)
+            .await
+            .with_context(|| format!("Failed to clear {table}"))?;
+    }
+    state::set(&mut tx, KEY_LAST_SERVER_VERSION, "0").await?;
+    state::remove(&mut tx, KEY_DEVICE_ID).await?;
+
+    tx.commit()
+        .await
+        .context("Failed to commit the reset transaction")?;
+    Ok(discarded as usize)
+}
 /// Resolve one conflict and keep the local side consistent.
 pub async fn resolve(
     pool: &SqlitePool,

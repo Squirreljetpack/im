@@ -40,38 +40,10 @@ pub async fn run_app() {
 
     let tui = atty::is(atty::Stream::Stdout);
 
-    // Interactively, offer to delete it
-    // and start fresh (default: no — deleting destroys all data);
-    // non-interactive runs just fail with the error below.
+    // An unreadable database is quarantined and replaced inside
+    // `init_database` (§4.4); anything else is fatal.
     let db_path = paths::database_path();
-    let pool = match db::init_database(db_path).await {
-        Ok(opened) => opened,
-        Err(source) => {
-            let source = source.context(format!(
-                "Database at {} could not be opened (corrupt, or from an older version); \
-                 delete the file to start fresh",
-                db_path.display()
-            ));
-            if tui
-                && db_path.is_file()
-                && crate::prompts::prompt_delete_invalid_db(db_path).__ebog()
-            {
-                db::delete_database(db_path).__ebog();
-                let opened = db::init_database(db_path).await.__ebog();
-                cba::ibog!("Reinitialized db");
-                opened
-            } else {
-                Err(source).__ebog()
-            }
-        }
-    };
-    if let Some(backup) = &pool.legacy_backup {
-        cba::ibog!(
-            "Recreated the database empty for the synced schema; the previous file was copied to {}",
-            backup.display()
-        );
-    }
-    let pool = pool.pool;
+    let pool = db::init_database(db_path).await.__ebog();
     crate::global::set_pool(pool.clone());
 
     let result = commands::execute_command(

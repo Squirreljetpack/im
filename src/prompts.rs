@@ -5,7 +5,6 @@
 //! `crate::output`; database access lives in `crate::db`.
 
 use anyhow::Result;
-use std::path::Path;
 
 use crate::db::Id;
 
@@ -389,17 +388,19 @@ pub fn prompt_db_doctor_confirm(count: i64) -> Result<bool> {
         .map_err(|e| anyhow::anyhow!("Prompt cancelled: {}", e))
 }
 
-/// Confirm deleting an invalid database file so it can be recreated fresh.
-/// Interactive callers only — non-interactive runs never reach this. The
-/// default is `false`: deleting the db destroys all stored data.
-pub fn prompt_delete_invalid_db(_path: &Path) -> Result<bool> {
+/// Confirm dropping unsynced local changes so `im sync --reset` can rebuild
+/// the local database from the server log. The default is `false`: the dropped
+/// changes are not recoverable from anywhere.
+pub fn prompt_discard_unsynced(count: usize) -> Result<bool> {
     use cliclack::{confirm, intro};
 
-    intro("Invalid database")?;
+    intro("Reset local database")?;
 
-    cliclack::log::warning("This will permanently remove ALL stored data.")?;
+    cliclack::log::warning(format!(
+        "{count} local change(s) have not been synced and will be discarded."
+    ))?;
 
-    confirm("Database is invalid. Delete it and start fresh?".to_string())
+    confirm("Rebuild the local database from the server log?".to_string())
         .initial_value(false)
         .interact()
         .map_err(|e| anyhow::anyhow!("Prompt cancelled: {}", e))

@@ -121,10 +121,17 @@ pub fn parse_from(args: Vec<String>) -> anyhow::Result<Command> {
         return parse_auth_command(&args[1..]);
     }
     if first == "sync" {
-        if args.len() > 1 {
-            anyhow::bail!("`im sync` takes no arguments");
+        let reset = match args.get(1).map(String::as_str) {
+            None => false,
+            Some("--reset") => true,
+            Some(other) => {
+                anyhow::bail!("`im sync` takes no argument other than --reset, got {other}")
+            }
+        };
+        if args.len() > 2 {
+            anyhow::bail!("`im sync` takes at most one argument");
         }
-        return Ok(Command::Sync);
+        return Ok(Command::Sync { reset });
     }
 
     // Otherwise, it's an entry command

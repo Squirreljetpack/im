@@ -135,8 +135,12 @@ pub enum Command {
         sub: AuthSubcommand,
     },
     /// `im sync` — push the queued events and apply everything the other
-    /// devices wrote, asking about conflicting deletions.
-    Sync,
+    /// devices wrote, asking about concurrent rewrites of text and about
+    /// parent cycles. `--reset` discards the local copy first and rebuilds it
+    /// from the server log.
+    Sync {
+        reset: bool,
+    },
 }
 
 /// Subcommands of `im auth`.

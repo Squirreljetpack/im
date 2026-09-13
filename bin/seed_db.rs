@@ -44,8 +44,7 @@ fn main() -> Result<()> {
     rt.block_on(async {
         let pool = im::db::init_database(&PathBuf::from(&db_path))
             .await
-            .context("Failed to open DB")?
-            .pool;
+            .context("Failed to open DB")?;
 
         populate(&pool, &config).await?;
 

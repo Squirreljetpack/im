@@ -4,27 +4,36 @@ use sqlx::sqlite::{SqliteConnection, SqlitePool, SqlitePoolOptions};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// An opened database: the pool plus, when the file still held the pre-sync
-/// integer-key schema, the backup taken before the schema was recreated.
-pub struct OpenedDatabase {
-    pub pool: SqlitePool,
-    /// Path of the `VACUUM INTO` copy of a legacy database (see
-    /// [`back_up_legacy_database`]); `None` for a fresh or current-schema
-    /// file.
-    pub legacy_backup: Option<PathBuf>,
-}
-
-pub async fn init_database(db_path: &Path) -> anyhow::Result<OpenedDatabase> {
+/// Open the database, replacing an unreadable file with a fresh one
+/// (`@@SYNC.md` §4.4). Returns the pool the rest of the run uses.
+pub async fn init_database(db_path: &Path) -> Result<SqlitePool> {
     // Ensure parent directory exists
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    // A file from an older version still has integer primary keys. Copy it
-    // aside and remove it before opening: the schema below is created with
-    // `IF NOT EXISTS`, so an existing legacy table would silently survive
-    // with the wrong key type.
-    let legacy_backup = back_up_legacy_database(db_path).await?;
+    match open_database(db_path).await {
+        Ok(pool) => Ok(pool),
+        Err(err) if is_corruption(&err) => {
+            // Nothing inside the file is readable, so it cannot be repaired in
+            // place: keep the bytes for inspection, then start over. The
+            // credentials went to the quarantine copy with everything else, so
+            // syncing resumes after `im auth login`.
+            let quarantine = quarantine_database(db_path)?;
+            let pool = open_database(db_path).await?;
+            cba::ebog!(
+                "The database was unreadable; the damaged file was copied to {} and a fresh one was initialized. Sign in again to resume syncing.",
+                quarantine.display()
+            );
+            Ok(pool)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Open, probe and migrate the database file.
+async fn open_database(db_path: &Path) -> Result<SqlitePool> {
+    probe_database(db_path).await?;
 
     let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
     let pool = SqlitePoolOptions::new()
@@ -63,88 +72,86 @@ pub async fn init_database(db_path: &Path) -> anyhow::Result<OpenedDatabase> {
     run_migrations(&pool).await?;
 
     log::debug!("Database initialized at {:?}", db_path);
-    Ok(OpenedDatabase {
-        pool,
-        legacy_backup,
+    Ok(pool)
+}
+
+/// Read the schema over a plain connection: a file that is not a SQLite
+/// database fails here at once, while a pool would retry its `after_connect`
+/// hooks until the acquire timeout.
+async fn probe_database(db_path: &Path) -> Result<()> {
+    let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
+    let mut conn = SqliteConnection::connect(&db_url)
+        .await
+        .with_context(|| format!("Failed to open {}", db_path.display()))?;
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sqlite_master")
+        .fetch_one(&mut conn)
+        .await
+        .with_context(|| format!("Failed to read the schema of {}", db_path.display()))?;
+    conn.close()
+        .await
+        .with_context(|| format!("Failed to close {}", db_path.display()))?;
+    Ok(())
+}
+
+/// Whether an error means the file is not a readable SQLite database.
+fn is_corruption(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        let Some(sqlx::Error::Database(db)) = cause.downcast_ref::<sqlx::Error>() else {
+            return false;
+        };
+        if db
+            .code()
+            .is_some_and(|code| code.starts_with("SQLITE_CORRUPT") || code == "SQLITE_NOTADB")
+        {
+            return true;
+        }
+        let message = db.message().to_lowercase();
+        message.contains("not a database") || message.contains("malformed")
     })
 }
 
-/// Backup path for a legacy database: `<file>.legacy-<unix-seconds>.bak`.
-fn legacy_backup_path(db_path: &Path) -> PathBuf {
-    let mut name = db_path.as_os_str().to_os_string();
-    let secs = std::time::SystemTime::now()
+/// Copy the database and its sidecars to `<file>.corrupt-<unix-seconds>.bak`
+/// and remove the originals. Nothing is removed unless every existing file was
+/// copied first, so a failed copy never costs the user the database.
+fn quarantine_database(db_path: &Path) -> Result<PathBuf> {
+    let backup = with_suffix(db_path, &format!(".corrupt-{}.bak", unix_seconds()));
+    for suffix in ["", "-wal", "-shm"] {
+        let source = with_suffix(db_path, suffix);
+        if !source.is_file() {
+            continue;
+        }
+        let target = with_suffix(&backup, suffix);
+        std::fs::copy(&source, &target).with_context(|| {
+            format!(
+                "Failed to copy the damaged database {} to {}",
+                source.display(),
+                target.display()
+            )
+        })?;
+    }
+    delete_database(db_path)?;
+    Ok(backup)
+}
+
+/// Seconds since the Unix epoch, for naming backups.
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default();
-    name.push(format!(".legacy-{secs}.bak"));
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default()
+}
+
+/// `<path><suffix>`: the shape SQLite uses for a file and its sidecars.
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
     PathBuf::from(name)
 }
 
-/// Whether an existing database file uses the pre-sync integer-key schema
-/// (`todos.id` declared `INTEGER`). A file without a `todos` table is not
-/// legacy — it is either fresh or half-built.
-async fn has_legacy_schema(db_path: &Path) -> Result<bool> {
-    let db_url = format!("sqlite:{}?mode=rw", db_path.display());
-    let mut conn = SqliteConnection::connect(&db_url)
-        .await
-        .with_context(|| format!("Failed to open {} for inspection", db_path.display()))?;
-    let declared: Option<String> =
-        sqlx::query_scalar("SELECT type FROM pragma_table_info('todos') WHERE name = 'id'")
-            .fetch_optional(&mut conn)
-            .await
-            .with_context(|| format!("Failed to inspect the schema of {}", db_path.display()))?;
-    conn.close()
-        .await
-        .with_context(|| format!("Failed to close {} after inspection", db_path.display()))?;
-    Ok(declared.is_some_and(|decl_type| decl_type.eq_ignore_ascii_case("INTEGER")))
-}
-
-/// Copy a legacy (integer-key) database aside with `VACUUM INTO` — a single
-/// consistent file, WAL contents included — then delete it so the caller
-/// starts from the current schema with no rows. Returns the backup path, or
-/// `None` when the file is absent or already uses UUID keys.
-async fn back_up_legacy_database(db_path: &Path) -> Result<Option<PathBuf>> {
-    if !db_path.is_file() || !has_legacy_schema(db_path).await? {
-        return Ok(None);
-    }
-
-    let backup = legacy_backup_path(db_path);
-    let escaped = backup.display().to_string().replace('\'', "''");
-    let db_url = format!("sqlite:{}?mode=rw", db_path.display());
-    let mut conn = SqliteConnection::connect(&db_url)
-        .await
-        .with_context(|| format!("Failed to open {} for backup", db_path.display()))?;
-    sqlx::query(sqlx::AssertSqlSafe(format!("VACUUM INTO '{escaped}'")))
-        .execute(&mut conn)
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to back up {} to {}",
-                db_path.display(),
-                backup.display()
-            )
-        })?;
-    conn.close().await?;
-
-    delete_database(db_path)?;
-    log::warn!(
-        "Recreated the database without the rows of the pre-sync schema; the old file was copied to {}",
-        backup.display()
-    );
-    Ok(Some(backup))
-}
-
 /// Delete the database file and its `-wal`/`-shm` sidecar files (if any).
-/// Called after the user confirms removing an invalid database so a fresh
-/// one can be initialized in its place. Missing files (including sidecars
-/// from a WAL-mode db) are not an error.
+/// Missing files (including sidecars from a WAL-mode db) are not an error.
 pub fn delete_database(db_path: &Path) -> Result<()> {
-    let mut targets = vec![db_path.to_path_buf()];
-    for suffix in ["-wal", "-shm"] {
-        let mut name = db_path.as_os_str().to_os_string();
-        name.push(suffix);
-        targets.push(PathBuf::from(name));
-    }
+    let targets = ["", "-wal", "-shm"].map(|suffix| with_suffix(db_path, suffix));
 
     for path in targets {
         match std::fs::remove_file(&path) {
@@ -399,74 +406,56 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    /// A db still holding the pre-sync integer-key schema is copied aside
-    /// with its rows and recreated empty with TEXT UUID keys.
+    /// The quarantine copies in a directory, newest name first.
+    fn quarantined(dir: &Path) -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.to_string_lossy().contains(".corrupt-"))
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// An unreadable db file is copied aside and replaced by a fresh one
+    /// (§4.4): the bytes survive for inspection, the schema is rebuilt.
     #[tokio::test]
-    async fn legacy_db_is_backed_up_and_recreated() {
+    async fn a_corrupt_database_is_quarantined_and_recreated() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("im.db");
-        {
-            let url = format!("sqlite:{}?mode=rwc", db_path.display());
-            let mut conn = SqliteConnection::connect(&url).await.unwrap();
-            sqlx::query(
-                "CREATE TABLE todos (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
-            )
-            .execute(&mut conn)
-            .await
-            .unwrap();
-            sqlx::query("INSERT INTO todos (name) VALUES ('old task')")
-                .execute(&mut conn)
-                .await
-                .unwrap();
-            conn.close().await.unwrap();
-        }
+        std::fs::write(&db_path, b"not a sqlite database").unwrap();
+        std::fs::write(dir.path().join("im.db-wal"), b"trailing frames").unwrap();
 
-        let opened = init_database(&db_path).await.unwrap();
-        let backup = opened
-            .legacy_backup
-            .expect("a pre-sync schema must be backed up");
-        assert!(backup.is_file(), "backup {} must exist", backup.display());
+        let start = std::time::Instant::now();
+        let pool = init_database(&db_path).await.unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "a corrupt db must be recognized without waiting for the pool timeout"
+        );
 
-        // The backup kept the old rows...
-        let url = format!("sqlite:{}?mode=rw", backup.display());
-        let mut conn = SqliteConnection::connect(&url).await.unwrap();
-        let name: String = sqlx::query_scalar("SELECT name FROM todos")
-            .fetch_one(&mut conn)
-            .await
-            .unwrap();
-        assert_eq!(name, "old task");
-        conn.close().await.unwrap();
+        // The db file is kept as `<file>.corrupt-<unix>.bak`. Its sidecar is
+        // copied next to it when SQLite has not already dropped the stale
+        // `-wal` while probing the file.
+        let backups: Vec<PathBuf> = quarantined(dir.path());
+        assert!(!backups.is_empty(), "the damaged file is kept aside");
+        let db_backup = backups
+            .iter()
+            .find(|path| path.to_string_lossy().ends_with(".bak"))
+            .expect("the db copy keeps the plain .bak name");
+        assert_eq!(std::fs::read(db_backup).unwrap(), b"not a sqlite database");
 
-        // ...and the reopened database starts empty with TEXT keys.
+        // The fresh database is usable and starts empty.
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM todos")
-            .fetch_one(&opened.pool)
+            .fetch_one(&pool)
             .await
             .unwrap();
         assert_eq!(count, 0);
-        let declared: String =
-            sqlx::query_scalar("SELECT type FROM pragma_table_info('todos') WHERE name = 'id'")
-                .fetch_one(&opened.pool)
-                .await
-                .unwrap();
-        assert_eq!(declared, "TEXT");
-        opened.pool.close().await;
-    }
+        pool.close().await;
 
-    /// A garbage db file must fail initialization quickly — the pool's
-    /// acquire timeout caps it instead of the 30s default hang.
-    #[tokio::test]
-    async fn init_fails_fast_on_invalid_db() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("invalid.db");
-        std::fs::write(&db_path, b"not a sqlite database").unwrap();
-
-        let start = std::time::Instant::now();
-        let result = init_database(&db_path).await;
-        assert!(result.is_err(), "garbage db must fail initialization");
-        assert!(
-            start.elapsed() < Duration::from_secs(10),
-            "invalid db must fail fast, not hang on the pool acquire timeout"
-        );
+        // Reopening the healthy file quarantines nothing further.
+        let pool = init_database(&db_path).await.unwrap();
+        pool.close().await;
+        assert_eq!(quarantined(dir.path()).len(), backups.len());
     }
 
     /// A fresh path is created (parent dirs included) and initialized.
@@ -475,7 +464,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("nested").join("fresh.db");
 
-        let pool = init_database(&db_path).await.unwrap().pool;
+        let pool = init_database(&db_path).await.unwrap();
         pool.close().await;
         assert!(db_path.exists(), "db file must be created");
     }

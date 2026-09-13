@@ -111,7 +111,10 @@ Sync:
   im auth status|logout                          show the signed-in account / forget it
   im sync                                        push local events and apply the other
                                                         devices' events (asks about
-                                                        conflicting deletions)
+                                                        concurrent rewrites and parent
+                                                        cycles)
+  im sync --reset                                discard the local database and rebuild
+                                                        it from the server log
 
 ---
 

@@ -663,6 +663,105 @@ async fn a_contested_note_is_settled_by_the_user() {
     }
 }
 
+/// A device that rebuilds its local database from the log gets every entity
+/// back — including the ones it authored itself, which the server never echoes
+/// — and asks nothing (§4.4.3). Its own unsynced work is gone, the server's
+/// state is not.
+#[tokio::test]
+async fn a_reset_rebuilds_local_state_from_the_log() {
+    let (device_a, token) = device("reset").await;
+    let device_b = second_device(&token).await;
+
+    create_task(&device_a, &task_object("alpha", "from A"))
+        .await
+        .expect("create the task on A");
+    sync(&device_a).await;
+    drain(&device_b).await;
+
+    // B authors an event of its own, then diverges with one that never left
+    // the device.
+    create_task(&device_b, &task_object("beta", "from B"))
+        .await
+        .expect("create the task on B");
+    sync(&device_b).await;
+    sleep_between_mutations().await;
+    create_task(&device_b, &task_object("local only", "never synced"))
+        .await
+        .expect("create the divergent task");
+    assert_eq!(
+        session::unsynced_count(&device_b).await.unwrap(),
+        1,
+        "the divergent task is still queued"
+    );
+
+    // The reset drops it and pulls the log from version 0 in one pass.
+    assert_eq!(session::reset_local_state(&device_b).await.unwrap(), 1);
+    assert!(
+        task_row(&device_b, "beta").await.is_none(),
+        "the local database is empty after the reset"
+    );
+
+    let report = sync(&device_b).await;
+    assert!(
+        report.conflicts.is_empty(),
+        "a rebuild meets no conflicts: nothing local is left to contradict"
+    );
+    assert!(report.applied >= 2, "the log is replayed from version 0");
+    assert_eq!(
+        body_of(&device_b, "alpha").await.as_deref(),
+        Some("from A"),
+        "the task A wrote is back"
+    );
+    assert_eq!(
+        body_of(&device_b, "beta").await.as_deref(),
+        Some("from B"),
+        "the task this device wrote before the reset is back too"
+    );
+    assert!(
+        task_row(&device_b, "local only").await.is_none(),
+        "the discarded task does not come back"
+    );
+
+    // The rebuilt watermarks are real: a later edit converges as usual.
+    sleep_between_mutations().await;
+    set_body(&device_a, "alpha", "edited after the reset").await;
+    sync(&device_a).await;
+    sync(&device_b).await;
+    assert_eq!(
+        body_of(&device_b, "alpha").await.as_deref(),
+        Some("edited after the reset")
+    );
+}
+
+/// The reset also drops the device id: the server skips the events a device
+/// authored, so a rebuilt device has to come back as a new one.
+#[tokio::test]
+async fn a_reset_rotates_the_device_id() {
+    let (device_a, _token) = device("rotate").await;
+    create_task(&device_a, &task_object("alpha", "body"))
+        .await
+        .expect("create the task");
+    sync(&device_a).await;
+    let before = session::device_id_of(&mut device_a.acquire().await.unwrap())
+        .await
+        .unwrap();
+
+    session::reset_local_state(&device_a).await.unwrap();
+    let after = session::device_id_of(&mut device_a.acquire().await.unwrap())
+        .await
+        .unwrap();
+    assert_ne!(before, after, "the rebuilt device has a fresh identity");
+
+    // And it is still a working peer: its own old event is replayed.
+    let report = sync(&device_a).await;
+    assert!(report.applied >= 1);
+    assert_eq!(
+        body_of(&device_a, "alpha").await.as_deref(),
+        Some("body"),
+        "the log survives the identity change"
+    );
+}
+
 /// Log one non-cumulative tracker entry, as the CLI does for a configured type.
 async fn log_sleep(pool: &SqlitePool, time: i64, score: i32) {
     use im::db::{EntryObject, TrackerObject, TrackerValue};
