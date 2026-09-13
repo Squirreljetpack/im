@@ -13,6 +13,7 @@ pub mod ort_compat;
 pub mod output;
 pub mod paths;
 pub mod prompts;
+pub mod sync;
 pub mod task;
 pub mod task_tree;
 pub mod task_view;

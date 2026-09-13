@@ -301,6 +301,24 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
+    // Sync engine: the last event applied per entity — the (timestamp,
+    // device_id) watermark that makes last-write-wins replay order-independent.
+    // `last_payload` keeps the newest upsert snapshot seen for the entity so a
+    // deleted entity can be resurrected (§4.3).
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS _sync_watermark (
+            entity_id    TEXT PRIMARY KEY,
+            timestamp    INTEGER NOT NULL,
+            device_id    TEXT NOT NULL,
+            deleted      INTEGER NOT NULL DEFAULT 0,
+            last_payload TEXT
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     // Add indexes for common queries
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_mood_time ON mood(time)")
         .execute(pool)

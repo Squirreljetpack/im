@@ -9,7 +9,7 @@ use super::models::{PrunedTask, TaskObject, TaskRow, TaskUpdateInfo, UpdateTaskO
 /// Insert a new task. Both the stable row id and the user-facing `short_id`
 /// are assigned by the database layer — the caller must not pass either
 /// (`task.id` and `task.short_id` must be `None`). Returns the row id and
-/// the allocated short id.
+/// the allocated short id. The insert and its sync event share a transaction.
 pub async fn create_task(pool: &SqlitePool, task: &TaskObject) -> Result<(Id, i64)> {
     assert!(
         task.short_id.is_none(),
@@ -24,7 +24,8 @@ pub async fn create_task(pool: &SqlitePool, task: &TaskObject) -> Result<(Id, i6
         "interval_secs must be None or positive, got {:?}",
         task.interval_secs
     );
-    let short_id = allocate_short_id(pool).await?;
+    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+    let short_id = allocate_short_id(&mut tx).await?;
     let id = Id::new();
 
     sqlx::query(
@@ -43,10 +44,12 @@ pub async fn create_task(pool: &SqlitePool, task: &TaskObject) -> Result<(Id, i6
     .bind(if task.optional { 1 } else { 0 })
     .bind(task.end_time)
     .bind(task.parent)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .context("Failed to create task")?;
 
+    crate::sync::events::task(&mut tx, id).await?;
+    tx.commit().await.context("Failed to commit transaction")?;
     Ok((id, short_id))
 }
 
@@ -57,6 +60,7 @@ pub async fn edit_task(pool: &SqlitePool, update: &UpdateTaskObject) -> Result<u
         "interval_secs must be None or positive, got {:?}",
         update.interval_secs
     );
+    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
     let res = sqlx::query(
         r#"UPDATE todos SET name = ?, body = ?, priority = ?, short_id = ?, start_time = ?,
                    available_duration_secs = ?, interval_secs = ?, target_count = ?,
@@ -74,19 +78,29 @@ pub async fn edit_task(pool: &SqlitePool, update: &UpdateTaskObject) -> Result<u
     .bind(update.end_time)
     .bind(update.parent)
     .bind(update.id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .context("Failed to update task")?;
+    if res.rows_affected() > 0 {
+        crate::sync::events::task(&mut tx, update.id).await?;
+    }
+    tx.commit().await.context("Failed to commit transaction")?;
     Ok(res.rows_affected())
 }
 
-/// Delete a task row; `todo_completions` rows cascade via `ON DELETE CASCADE`.
+/// Delete a task row; `todo_completions` rows cascade via `ON DELETE CASCADE`
+/// (peers replaying the delete event cascade identically).
 pub async fn delete_task(pool: &SqlitePool, id: Id) -> Result<u64> {
+    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
     let res = sqlx::query("DELETE FROM todos WHERE id = ?")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .context("Failed to delete task")?;
+    if res.rows_affected() > 0 {
+        crate::sync::events::delete(&mut tx, id).await?;
+    }
+    tx.commit().await.context("Failed to commit transaction")?;
     Ok(res.rows_affected())
 }
 
@@ -98,17 +112,20 @@ pub async fn delete_task(pool: &SqlitePool, id: Id) -> Result<u64> {
 /// never touched, and the returned total is the sum within the current
 /// interval only; oneshot tasks: full history).
 ///
-/// After applying the delta the task's `short_id` is synced to its completion
-/// state (see [`sync_short_id`]): a oneshot task that just completed loses
-/// its short id; a oneshot task that just became not-done again is assigned
-/// the smallest free one.
+/// Each completion row this touches gets its own sync event (upsert for a new
+/// or reduced row, delete for a fully consumed one), so peers replay the same
+/// completion totals. Afterwards the task's `short_id` is synced to its
+/// completion state (see [`sync_short_id`]) — a local projection that never
+/// syncs.
 pub async fn update_task(pool: &SqlitePool, todo_id: Id, delta: i32) -> Result<i32> {
+    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+
     // Determine the current interval boundary for recurring tasks so we never
     // touch completion events from before the current interval started.
     let interval_start: Option<i64> =
         sqlx::query("SELECT start_time, interval_secs FROM todos WHERE id = ?")
             .bind(todo_id)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *tx)
             .await?
             .and_then(|row| {
                 let start: Option<i64> = row.get("start_time");
@@ -124,13 +141,15 @@ pub async fn update_task(pool: &SqlitePool, todo_id: Id, delta: i32) -> Result<i
             });
 
     if delta > 0 {
+        let completion_id = Id::new();
         sqlx::query("INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, ?)")
-            .bind(Id::new())
+            .bind(completion_id)
             .bind(todo_id)
             .bind(crate::date::now())
             .bind(delta)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
+        crate::sync::events::completion(&mut tx, completion_id).await?;
     } else if delta < 0 {
         let rows = match interval_start {
             Some(boundary) => sqlx::query(
@@ -138,13 +157,13 @@ pub async fn update_task(pool: &SqlitePool, todo_id: Id, delta: i32) -> Result<i
             )
             .bind(todo_id)
             .bind(boundary)
-            .fetch_all(pool)
+            .fetch_all(&mut *tx)
             .await?,
             None => sqlx::query(
                 "SELECT id, count FROM todo_completions WHERE todo_id = ? ORDER BY id ASC",
             )
             .bind(todo_id)
-            .fetch_all(pool)
+            .fetch_all(&mut *tx)
             .await?,
         };
         let ids: Vec<Id> = rows.iter().map(|r| r.get("id")).collect();
@@ -161,17 +180,22 @@ pub async fn update_task(pool: &SqlitePool, todo_id: Id, delta: i32) -> Result<i
             for id in to_delete {
                 q = q.bind(id);
             }
-            q.execute(pool).await?;
+            q.execute(&mut *tx).await?;
+            for id in to_delete {
+                crate::sync::events::delete(&mut tx, *id).await?;
+            }
         }
         // The last surviving entry may have been partially reduced.
         if let Some(&nc) = new_counts.last() {
             let orig = counts[new_counts.len() - 1];
             if nc != orig {
+                let reduced = ids[new_counts.len() - 1];
                 sqlx::query("UPDATE todo_completions SET count = ? WHERE id = ?")
                     .bind(nc)
-                    .bind(ids[new_counts.len() - 1])
-                    .execute(pool)
+                    .bind(reduced)
+                    .execute(&mut *tx)
                     .await?;
+                crate::sync::events::completion(&mut tx, reduced).await?;
             }
         }
     }
@@ -183,17 +207,18 @@ pub async fn update_task(pool: &SqlitePool, todo_id: Id, delta: i32) -> Result<i
         )
         .bind(todo_id)
         .bind(boundary)
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await?,
         None => {
             sqlx::query_scalar(
                 "SELECT COALESCE(SUM(count), 0) FROM todo_completions WHERE todo_id = ?",
             )
             .bind(todo_id)
-            .fetch_one(pool)
+            .fetch_one(&mut *tx)
             .await?
         }
     };
+    tx.commit().await.context("Failed to commit transaction")?;
     sync_short_id(pool, todo_id).await?;
     Ok(total)
 }
@@ -201,8 +226,9 @@ pub async fn update_task(pool: &SqlitePool, todo_id: Id, delta: i32) -> Result<i
 /// Delete completed oneshot tasks and expired (end_time passed) recurring
 /// tasks in one `RETURNING` statement so the report reflects exactly the
 /// rows deleted. A oneshot task counts as completed when its completion
-/// state satisfies `is_task_done`.
+/// state satisfies `is_task_done`. Every pruned row gets a delete event.
 pub async fn prune_tasks(pool: &SqlitePool, now: i64) -> Result<Vec<PrunedTask>> {
+    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
     let rows = sqlx::query(
         r#"DELETE FROM todos
            WHERE (interval_secs IS NULL AND (
@@ -218,11 +244,11 @@ pub async fn prune_tasks(pool: &SqlitePool, now: i64) -> Result<Vec<PrunedTask>>
                           ELSE 'expired' END AS reason"#,
     )
     .bind(now)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
     .context("Failed to delete pruned tasks")?;
 
-    Ok(rows
+    let pruned: Vec<PrunedTask> = rows
         .iter()
         .map(|row| PrunedTask {
             id: row.get("id"),
@@ -230,7 +256,12 @@ pub async fn prune_tasks(pool: &SqlitePool, now: i64) -> Result<Vec<PrunedTask>>
             name: row.get("name"),
             reason: row.get("reason"),
         })
-        .collect())
+        .collect();
+    for task in &pruned {
+        crate::sync::events::delete(&mut tx, task.id).await?;
+    }
+    tx.commit().await.context("Failed to commit transaction")?;
+    Ok(pruned)
 }
 
 /// Allocate the smallest free positive short id (>= 1) — the first gap in
@@ -241,11 +272,11 @@ pub async fn prune_tasks(pool: &SqlitePool, now: i64) -> Result<Vec<PrunedTask>>
 /// time, and the `short_id` column is `UNIQUE`, so a concurrent
 /// double-allocation fails loudly rather than silently sharing an id. In
 /// practice the CLI is single-threaded per invocation.
-pub async fn allocate_short_id(pool: &SqlitePool) -> Result<i64> {
+pub async fn allocate_short_id(conn: &mut sqlx::SqliteConnection) -> Result<i64> {
     let taken: Vec<i64> = sqlx::query_scalar(
         "SELECT short_id FROM todos WHERE short_id IS NOT NULL ORDER BY short_id ASC",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("Failed to fetch short ids for allocation")?;
     let mut expected = 1i64;
@@ -269,14 +300,16 @@ pub async fn allocate_short_id(pool: &SqlitePool) -> Result<i64> {
 ///   id across intervals — their "done" state is interval-scoped and
 ///   transient, so clearing/reassigning per interval would churn ids.
 ///
+/// `short_id` is a local projection and never syncs, so this writes no event.
 /// Completion state is evaluated with completions scoped to the current
 /// interval for recurring tasks (matching [`update_task`]).
 pub async fn sync_short_id(pool: &SqlitePool, todo_id: Id) -> Result<()> {
+    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
     let row = sqlx::query(
         "SELECT start_time, interval_secs, target_count, short_id FROM todos WHERE id = ?",
     )
     .bind(todo_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .context("Failed to fetch task for short-id sync")?;
     let Some(row) = row else { return Ok(()) };
@@ -300,14 +333,14 @@ pub async fn sync_short_id(pool: &SqlitePool, todo_id: Id) -> Result<()> {
         )
         .bind(todo_id)
         .bind(b)
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await?,
         None => {
             sqlx::query_scalar(
                 "SELECT COALESCE(SUM(count), 0) FROM todo_completions WHERE todo_id = ?",
             )
             .bind(todo_id)
-            .fetch_one(pool)
+            .fetch_one(&mut *tx)
             .await?
         }
     };
@@ -315,14 +348,15 @@ pub async fn sync_short_id(pool: &SqlitePool, todo_id: Id) -> Result<()> {
     // Recurring tasks never lose their short id; only oneshot tasks do.
     if interval_secs.is_some() {
         if short_id.is_none() {
-            let new_id = allocate_short_id(pool).await?;
+            let new_id = allocate_short_id(&mut tx).await?;
             sqlx::query("UPDATE todos SET short_id = ? WHERE id = ?")
                 .bind(new_id)
                 .bind(todo_id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await
                 .context("Failed to assign short id")?;
         }
+        tx.commit().await.context("Failed to commit transaction")?;
         return Ok(());
     }
 
@@ -331,21 +365,22 @@ pub async fn sync_short_id(pool: &SqlitePool, todo_id: Id) -> Result<()> {
         (true, Some(_)) => {
             sqlx::query("UPDATE todos SET short_id = NULL WHERE id = ?")
                 .bind(todo_id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await
                 .context("Failed to clear short id")?;
         }
         (false, None) => {
-            let new_id = allocate_short_id(pool).await?;
+            let new_id = allocate_short_id(&mut tx).await?;
             sqlx::query("UPDATE todos SET short_id = ? WHERE id = ?")
                 .bind(new_id)
                 .bind(todo_id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await
                 .context("Failed to assign short id")?;
         }
         _ => {}
     }
+    tx.commit().await.context("Failed to commit transaction")?;
     Ok(())
 }
 
@@ -676,12 +711,17 @@ pub async fn fetch_task_matching_words(
 
 /// Update a todo's body. Returns the number of affected rows.
 pub async fn update_todo_body(pool: &SqlitePool, id: Id, body: &str) -> Result<u64> {
+    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
     let res = sqlx::query("UPDATE todos SET body = ? WHERE id = ?")
         .bind(body)
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .context("Failed to update task body")?;
+    if res.rows_affected() > 0 {
+        crate::sync::events::task(&mut tx, id).await?;
+    }
+    tx.commit().await.context("Failed to commit transaction")?;
     Ok(res.rows_affected())
 }
 
@@ -691,37 +731,53 @@ pub async fn update_todo_body(pool: &SqlitePool, id: Id, body: &str) -> Result<u
 /// by the task-tree load, and a nonexistent parent just leaves an orphan
 /// link; callers log the result.
 pub async fn set_task_parent(pool: &SqlitePool, task_id: Id, parent_id: Id) -> Result<u64> {
+    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
     let res = sqlx::query("UPDATE todos SET parent = ? WHERE id = ?")
         .bind(parent_id)
         .bind(task_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .context("Failed to set task parent")?;
+    if res.rows_affected() > 0 {
+        crate::sync::events::task(&mut tx, task_id).await?;
+    }
+    tx.commit().await.context("Failed to commit transaction")?;
     Ok(res.rows_affected())
 }
 
 /// Set a scheduled task's completion entry, replacing any existing one.
 /// Scheduled tasks keep at most one completion row: `value` 1 = completed
 /// (early, or auto-completed by window elapse), 0 = failed (marked as
-/// missed). Runs in a transaction so the replace is atomic, then syncs the
-/// short id (a completed task loses its short id; a failed one keeps it).
+/// missed). Runs in a transaction so the replace and its sync events are
+/// atomic, then syncs the short id (a completed task loses its short id; a
+/// failed one keeps it).
 pub async fn set_scheduled_completion(pool: &SqlitePool, todo_id: Id, value: i32) -> Result<()> {
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
 
+    let replaced: Vec<Id> = sqlx::query_scalar("SELECT id FROM todo_completions WHERE todo_id = ?")
+        .bind(todo_id)
+        .fetch_all(&mut *tx)
+        .await
+        .context("Failed to read the replaced scheduled completion")?;
     sqlx::query("DELETE FROM todo_completions WHERE todo_id = ?")
         .bind(todo_id)
         .execute(&mut *tx)
         .await
         .context("Failed to clear scheduled task completion")?;
+    for id in &replaced {
+        crate::sync::events::delete(&mut tx, *id).await?;
+    }
 
+    let completion_id = Id::new();
     sqlx::query("INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, ?)")
-        .bind(Id::new())
+        .bind(completion_id)
         .bind(todo_id)
         .bind(crate::date::now())
         .bind(value)
         .execute(&mut *tx)
         .await
         .context("Failed to insert scheduled task completion")?;
+    crate::sync::events::completion(&mut tx, completion_id).await?;
 
     tx.commit().await.context("Failed to commit transaction")?;
 
@@ -731,25 +787,52 @@ pub async fn set_scheduled_completion(pool: &SqlitePool, todo_id: Id, value: i32
 
 /// Clear a task's completion progress. For recurring tasks only completions
 /// at/after `floor` (the current interval start) are removed, preserving
-/// history from earlier intervals. Returns affected rows.
+/// history from earlier intervals. Returns affected rows; every removed row
+/// gets a delete event.
 pub async fn reset_task_completions(pool: &SqlitePool, id: Id, floor: Option<i64>) -> Result<u64> {
-    let res = match floor {
-        Some(floor) => sqlx::query("DELETE FROM todo_completions WHERE todo_id = ? AND time >= ?")
+    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+    let (removed, affected): (Vec<Id>, u64) = match floor {
+        Some(floor) => {
+            let removed: Vec<Id> = sqlx::query_scalar(
+                "SELECT id FROM todo_completions WHERE todo_id = ? AND time >= ?",
+            )
             .bind(id)
             .bind(floor)
-            .execute(pool)
+            .fetch_all(&mut *tx)
             .await
-            .context("Failed to reset task progress")?,
-        None => sqlx::query("DELETE FROM todo_completions WHERE todo_id = ?")
-            .bind(id)
-            .execute(pool)
-            .await
-            .context("Failed to reset task progress")?,
+            .context("Failed to read the reset completions")?;
+            let res = sqlx::query("DELETE FROM todo_completions WHERE todo_id = ? AND time >= ?")
+                .bind(id)
+                .bind(floor)
+                .execute(&mut *tx)
+                .await
+                .context("Failed to reset task progress")?;
+            (removed, res.rows_affected())
+        }
+        None => {
+            let removed: Vec<Id> =
+                sqlx::query_scalar("SELECT id FROM todo_completions WHERE todo_id = ?")
+                    .bind(id)
+                    .fetch_all(&mut *tx)
+                    .await
+                    .context("Failed to read the reset completions")?;
+            let res = sqlx::query("DELETE FROM todo_completions WHERE todo_id = ?")
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .context("Failed to reset task progress")?;
+            (removed, res.rows_affected())
+        }
     };
+    for completion in &removed {
+        crate::sync::events::delete(&mut tx, *completion).await?;
+    }
+    tx.commit().await.context("Failed to commit transaction")?;
+
     // Removing completion rows may untoggle a completed task — sync its
     // short id (a not-done task is reassigned the smallest free id).
     sync_short_id(pool, id).await?;
-    Ok(res.rows_affected())
+    Ok(affected)
 }
 
 #[cfg(test)]
