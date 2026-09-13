@@ -48,7 +48,7 @@ pub async fn create_task(pool: &SqlitePool, task: &TaskObject) -> Result<(Id, i6
     .await
     .context("Failed to create task")?;
 
-    crate::sync::events::task(&mut tx, id).await?;
+    crate::sync::events::task_create(&mut tx, id).await?;
     tx.commit().await.context("Failed to commit transaction")?;
     Ok((id, short_id))
 }
@@ -61,6 +61,7 @@ pub async fn edit_task(pool: &SqlitePool, update: &UpdateTaskObject) -> Result<u
         update.interval_secs
     );
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+    let before = fetch_edit_preimage(&mut tx, update.id).await?;
     let res = sqlx::query(
         r#"UPDATE todos SET name = ?, body = ?, priority = ?, short_id = ?, start_time = ?,
                    available_duration_secs = ?, interval_secs = ?, target_count = ?,
@@ -81,11 +82,71 @@ pub async fn edit_task(pool: &SqlitePool, update: &UpdateTaskObject) -> Result<u
     .execute(&mut *tx)
     .await
     .context("Failed to update task")?;
-    if res.rows_affected() > 0 {
-        crate::sync::events::task(&mut tx, update.id).await?;
+    if res.rows_affected() > 0
+        && let Some(before) = before
+    {
+        crate::sync::events::task_update(&mut tx, update.id, edit_diff(&before, update)).await?;
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(res.rows_affected())
+}
+
+/// The columns an edit can rewrite, read before the update so the emitted
+/// event carries only the fields the edit actually changed (§3).
+async fn fetch_edit_preimage(
+    conn: &mut sqlx::SqliteConnection,
+    id: Id,
+) -> Result<Option<sqlx::sqlite::SqliteRow>> {
+    sqlx::query(
+        "SELECT name, body, priority, start_time, available_duration_secs, interval_secs,
+                target_count, optional, end_time, parent
+         FROM todos WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await
+    .context("Failed to read the task before its edit")
+}
+
+/// The diff between a task's stored columns and the edit applied to them.
+/// `None` fields mean *unchanged*; a nullable field wrapped twice marks a
+/// clear (`Some(None)`) apart from an absent one (§3).
+fn edit_diff(
+    before: &sqlx::sqlite::SqliteRow,
+    update: &UpdateTaskObject,
+) -> crate::sync::TaskUpdateData {
+    let mut diff = crate::sync::TaskUpdateData::default();
+    if before.get::<String, _>("name") != update.name {
+        diff.name = Some(update.name.clone());
+    }
+    if before.get::<String, _>("body") != update.body {
+        diff.body = Some(update.body.clone());
+    }
+    if before.get::<i32, _>("priority") != update.priority {
+        diff.priority = Some(update.priority);
+    }
+    if before.get::<Option<i64>, _>("start_time") != update.start_time {
+        diff.start_time = update.start_time;
+    }
+    if before.get::<Option<i64>, _>("available_duration_secs") != update.available_duration_secs {
+        diff.available_duration_secs = Some(update.available_duration_secs);
+    }
+    if before.get::<Option<i64>, _>("interval_secs") != update.interval_secs {
+        diff.interval_secs = update.interval_secs;
+    }
+    if before.get::<i32, _>("target_count") != update.target_count {
+        diff.target_count = Some(update.target_count);
+    }
+    if (before.get::<i32, _>("optional") != 0) != update.optional {
+        diff.optional = Some(update.optional);
+    }
+    if before.get::<Option<i64>, _>("end_time") != update.end_time {
+        diff.end_time = update.end_time;
+    }
+    if before.get::<Option<Id>, _>("parent") != update.parent {
+        diff.parent_id = Some(update.parent);
+    }
+    diff
 }
 
 /// Delete a task row; `todo_completions` rows cascade via `ON DELETE CASCADE`
@@ -98,7 +159,7 @@ pub async fn delete_task(pool: &SqlitePool, id: Id) -> Result<u64> {
         .await
         .context("Failed to delete task")?;
     if res.rows_affected() > 0 {
-        crate::sync::events::delete(&mut tx, id).await?;
+        crate::sync::events::delete(&mut tx, id, "task").await?;
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(res.rows_affected())
@@ -183,7 +244,7 @@ pub async fn update_task(pool: &SqlitePool, todo_id: Id, delta: i32) -> Result<i
             }
             q.execute(&mut *tx).await?;
             for id in to_delete {
-                crate::sync::events::delete(&mut tx, *id).await?;
+                crate::sync::events::delete(&mut tx, *id, "completion").await?;
             }
         }
         // The last surviving entry may have been partially reduced. A
@@ -200,7 +261,7 @@ pub async fn update_task(pool: &SqlitePool, todo_id: Id, delta: i32) -> Result<i
                     .execute(&mut *tx)
                     .await
                     .context("Failed to replace the reduced completion")?;
-                crate::sync::events::delete(&mut tx, reduced).await?;
+                crate::sync::events::delete(&mut tx, reduced, "completion").await?;
                 let replacement = Id::new();
                 sqlx::query(
                     "INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, ?)",
@@ -275,7 +336,7 @@ pub async fn prune_tasks(pool: &SqlitePool, now: i64) -> Result<Vec<PrunedTask>>
         })
         .collect();
     for task in &pruned {
-        crate::sync::events::delete(&mut tx, task.id).await?;
+        crate::sync::events::delete(&mut tx, task.id, "task").await?;
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(pruned)
@@ -736,7 +797,11 @@ pub async fn update_todo_body(pool: &SqlitePool, id: Id, body: &str) -> Result<u
         .await
         .context("Failed to update task body")?;
     if res.rows_affected() > 0 {
-        crate::sync::events::task(&mut tx, id).await?;
+        let diff = crate::sync::TaskUpdateData {
+            body: Some(body.to_string()),
+            ..Default::default()
+        };
+        crate::sync::events::task_update(&mut tx, id, diff).await?;
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(res.rows_affected())
@@ -756,7 +821,11 @@ pub async fn set_task_parent(pool: &SqlitePool, task_id: Id, parent_id: Id) -> R
         .await
         .context("Failed to set task parent")?;
     if res.rows_affected() > 0 {
-        crate::sync::events::task(&mut tx, task_id).await?;
+        let diff = crate::sync::TaskUpdateData {
+            parent_id: Some(Some(parent_id)),
+            ..Default::default()
+        };
+        crate::sync::events::task_update(&mut tx, task_id, diff).await?;
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(res.rows_affected())
@@ -782,7 +851,7 @@ pub async fn set_scheduled_completion(pool: &SqlitePool, todo_id: Id, value: i32
         .await
         .context("Failed to clear scheduled task completion")?;
     for id in &replaced {
-        crate::sync::events::delete(&mut tx, *id).await?;
+        crate::sync::events::delete(&mut tx, *id, "completion").await?;
     }
 
     let completion_id = Id::new();
@@ -842,7 +911,7 @@ pub async fn reset_task_completions(pool: &SqlitePool, id: Id, floor: Option<i64
         }
     };
     for completion in &removed {
-        crate::sync::events::delete(&mut tx, *completion).await?;
+        crate::sync::events::delete(&mut tx, *completion, "completion").await?;
     }
     // Removing completion rows may untoggle a completed task — sync its
     // short id (a not-done task is reassigned the smallest free id).

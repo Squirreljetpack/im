@@ -101,6 +101,17 @@ pub enum TrackerValue {
     Float(f64),
 }
 
+/// Rebuild a tracker value from its storage class and text form: the column
+/// is dynamically typed, so `typeof(score)` plus `CAST(score AS TEXT)` is the
+/// only lossless way to read it back.
+pub fn tracker_value(storage_class: &str, text: &str) -> TrackerValue {
+    match storage_class {
+        "integer" => TrackerValue::Integer(text.parse().unwrap_or_default()),
+        "real" => TrackerValue::Float(text.parse().unwrap_or_default()),
+        _ => TrackerValue::Text(text.to_string()),
+    }
+}
+
 impl std::fmt::Display for TrackerValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

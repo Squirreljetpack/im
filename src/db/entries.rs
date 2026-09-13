@@ -52,7 +52,7 @@ pub async fn create_entry(pool: &SqlitePool, entry: &EntryObject) -> Result<Opti
             .await
             .context("Failed to insert mood")?;
         }
-        crate::sync::events::mood(&mut tx, id).await?;
+        crate::sync::events::mood_create(&mut tx, id).await?;
         Some(id)
     } else {
         None
@@ -87,7 +87,7 @@ pub async fn create_entry(pool: &SqlitePool, entry: &EntryObject) -> Result<Opti
                     )
                 })?;
             for id in &replaced {
-                crate::sync::events::delete(&mut tx, *id).await?;
+                crate::sync::events::delete(&mut tx, *id, "tracker").await?;
             }
         }
 
@@ -106,7 +106,7 @@ pub async fn create_entry(pool: &SqlitePool, entry: &EntryObject) -> Result<Opti
             .execute(&mut *tx)
             .await
             .with_context(|| format!("Failed to insert tracker '{}'", tracker.tracker_type))?;
-        crate::sync::events::tracker(&mut tx, tracker_id).await?;
+        crate::sync::events::tracker_create(&mut tx, tracker_id).await?;
     }
 
     tx.commit().await.context("Failed to commit transaction")?;
@@ -152,7 +152,7 @@ pub async fn clear_moods(
     .await
     .context("Failed to delete linked tracker entries")?;
     for id in &removed_trackers {
-        crate::sync::events::delete(&mut tx, *id).await?;
+        crate::sync::events::delete(&mut tx, *id, "tracker").await?;
     }
 
     let removed_moods: Vec<Id> =
@@ -169,7 +169,7 @@ pub async fn clear_moods(
         .await
         .context("Failed to delete mood entries")?;
     for id in &removed_moods {
-        crate::sync::events::delete(&mut tx, *id).await?;
+        crate::sync::events::delete(&mut tx, *id, "mood").await?;
     }
 
     tx.commit().await.context("Failed to commit transaction")?;
@@ -360,7 +360,11 @@ pub async fn link_mood_to_tasks(pool: &SqlitePool, mood_id: Id, task_ids: &[Id])
         .await
         .context("Failed to link mood to task")?;
     if res.rows_affected() > 0 {
-        crate::sync::events::mood(&mut tx, mood_id).await?;
+        let diff = crate::sync::MoodUpdateData {
+            todo_id: Some(task_id),
+            ..Default::default()
+        };
+        crate::sync::events::mood_update(&mut tx, mood_id, diff).await?;
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(())
@@ -378,7 +382,11 @@ pub async fn link_mood_to_task(pool: &SqlitePool, mood_id: Id, task_id: Id) -> R
         .await
         .context("Failed to link mood to task")?;
     if result.rows_affected() > 0 {
-        crate::sync::events::mood(&mut tx, mood_id).await?;
+        let diff = crate::sync::MoodUpdateData {
+            todo_id: Some(Some(task_id)),
+            ..Default::default()
+        };
+        crate::sync::events::mood_update(&mut tx, mood_id, diff).await?;
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(result.rows_affected())
@@ -396,7 +404,7 @@ pub async fn link_tracker_to_mood(pool: &SqlitePool, tracker_id: Id, mood_id: Id
         .await
         .context("Failed to link tracker entry to mood")?;
     if result.rows_affected() > 0 {
-        crate::sync::events::tracker(&mut tx, tracker_id).await?;
+        crate::sync::events::tracker_create(&mut tx, tracker_id).await?;
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(result.rows_affected())
@@ -585,7 +593,7 @@ pub async fn delete_tracker_entry(pool: &SqlitePool, id: Id) -> Result<u64> {
         .await
         .context("Failed to delete tracker row")?;
     if result.rows_affected() > 0 {
-        crate::sync::events::delete(&mut tx, id).await?;
+        crate::sync::events::delete(&mut tx, id, "tracker").await?;
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(result.rows_affected())
@@ -678,7 +686,7 @@ pub async fn prune_tracker_rules(pool: &SqlitePool, rules: &[TrackerPruneRule]) 
             .await
             .with_context(|| format!("Failed to prune entries for rule '{rule:?}'"))?;
         for id in &removed {
-            crate::sync::events::delete(&mut tx, *id).await?;
+            crate::sync::events::delete(&mut tx, *id, "tracker").await?;
         }
         deleted += res.rows_affected();
     }
@@ -696,7 +704,7 @@ pub async fn update_mood_body(pool: &SqlitePool, id: Id, body: &str) -> Result<u
         .await
         .context("Failed to update mood body")?;
     if res.rows_affected() > 0 {
-        crate::sync::events::mood(&mut tx, id).await?;
+        crate::sync::events::mood_create(&mut tx, id).await?;
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(res.rows_affected())
@@ -721,7 +729,11 @@ pub async fn update_tracker_score(pool: &SqlitePool, id: Id, value: &TrackerValu
         .await
         .context("Failed to update tracker score")?;
     if res.rows_affected() > 0 {
-        crate::sync::events::tracker(&mut tx, id).await?;
+        let diff = crate::sync::TrackerUpdateData {
+            score: Some(crate::sync::TrackerScore::from(value)),
+            ..Default::default()
+        };
+        crate::sync::events::tracker_update(&mut tx, id, diff).await?;
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(res.rows_affected())
@@ -750,7 +762,11 @@ pub async fn update_tracker_time(pool: &SqlitePool, id: Id, time: i64) -> Result
         .await
         .context("Failed to update tracker entry time")?;
     if res.rows_affected() > 0 {
-        crate::sync::events::tracker(&mut tx, id).await?;
+        let diff = crate::sync::TrackerUpdateData {
+            time: Some(time),
+            ..Default::default()
+        };
+        crate::sync::events::tracker_update(&mut tx, id, diff).await?;
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(res.rows_affected())
@@ -772,7 +788,7 @@ pub async fn delete_mood(pool: &SqlitePool, id: Id) -> Result<()> {
         .await
         .context("Failed to delete linked tracker rows")?;
     for tracker in &linked {
-        crate::sync::events::delete(&mut tx, *tracker).await?;
+        crate::sync::events::delete(&mut tx, *tracker, "tracker").await?;
     }
 
     sqlx::query("DELETE FROM mood WHERE id = ?")
@@ -780,7 +796,7 @@ pub async fn delete_mood(pool: &SqlitePool, id: Id) -> Result<()> {
         .execute(&mut *tx)
         .await
         .context("Failed to delete mood row")?;
-    crate::sync::events::delete(&mut tx, id).await?;
+    crate::sync::events::delete(&mut tx, id, "mood").await?;
 
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(())

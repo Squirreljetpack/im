@@ -303,21 +303,39 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
-    // Sync engine: the last event applied per entity — the (timestamp,
-    // device_id) watermark that makes last-write-wins replay order-independent.
-    // `last_payload` keeps the newest upsert snapshot seen for the entity so a
-    // deleted entity can be resurrected (§4.3).
+    // Sync engine: which event last won each *field* of an entity. LWW is
+    // decided per field, so two devices that edited different fields of one row
+    // keep both edits (§4.1) while a shared field still converges. `field = ''`
+    // is the entity itself: the stamp of the last event that changed anything,
+    // which delete comparisons and the tracker slot cleanup read. `value` is the
+    // JSON of the winning value (`NULL` for a cleared column); together the rows
+    // rebuild the snapshot a resurrection needs (§4.2.2).
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS _sync_watermark (
-            entity_id    TEXT PRIMARY KEY,
-            timestamp    INTEGER NOT NULL,
-            device_id    TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            field     TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
+            device_id TEXT NOT NULL,
             -- The applied event's id: the final LWW tie-breaker, so two
             -- machines sharing a copied device id still converge.
-            event_id     TEXT NOT NULL,
-            deleted      INTEGER NOT NULL DEFAULT 0,
-            last_payload TEXT
+            event_id  TEXT NOT NULL,
+            value     TEXT,
+            PRIMARY KEY (entity_id, field)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Sync engine: every entity this device has seen, its kind and whether it
+    // is deleted here. The kind identifies an id whose row is gone.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS _sync_entities (
+            entity_id TEXT PRIMARY KEY,
+            kind      TEXT NOT NULL,
+            deleted   INTEGER NOT NULL DEFAULT 0
         )
         "#,
     )

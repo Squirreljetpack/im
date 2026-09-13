@@ -1,76 +1,197 @@
-//! Event emission: every mutation appends one `_sync_events` row (the outbox)
-//! and advances the entity's LWW watermark, inside the mutation's own
-//! transaction so a crash can never leave a row change without its event.
+//! Event emission: a mutation appends its outbox row and records the field
+//! watermarks its event won (`@@SYNC.md` §2.1, §4.1).
 //!
-//! The emits take a snapshot of the row *after* the mutation, so an event
-//! always carries the entity's full current state (§3's `Option<Upsert>`).
+//! Every mutation of the domain tables goes through here inside the same
+//! transaction as the row it describes, so the event stream and the
+//! materialized tables never disagree.
 
 use anyhow::{Context, Result};
 use sqlx::{Row, SqliteConnection};
 
 use crate::db::{EventId, Id};
 
-use super::state;
+use super::state::{self, Stamp};
 use super::types::{
-    CompletionData, EntityPayload, MoodData, SyncEvent, TaskData, TrackerData, TrackerScore,
+    Change, CompletionData, EntityPayload, MoodCreateData, MoodUpdateData, TaskCreateData,
+    TaskUpdateData, TrackerData, TrackerScore, TrackerUpdateData,
 };
 
-/// Append an upsert event for a task.
-pub(crate) async fn task(conn: &mut SqliteConnection, id: Id) -> Result<()> {
-    let Some(data) = task_data(conn, id).await? else {
+/// Emit the creation snapshot of a task.
+pub async fn task_create(conn: &mut SqliteConnection, id: Id) -> Result<()> {
+    let row = sqlx::query(
+        "SELECT name, body, priority, start_time, available_duration_secs, interval_secs,
+                target_count, optional, end_time, parent
+         FROM todos WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await
+    .context("Failed to read the task for its sync event")?;
+    let Some(row) = row else { return Ok(()) };
+    emit_mutation(
+        conn,
+        id,
+        EntityPayload::TaskCreate(TaskCreateData {
+            name: row.get("name"),
+            body: row.get("body"),
+            priority: row.get("priority"),
+            start_time: row.get("start_time"),
+            available_duration_secs: row.get("available_duration_secs"),
+            interval_secs: row.get("interval_secs"),
+            target_count: row.get("target_count"),
+            optional: row.get::<i32, _>("optional") != 0,
+            end_time: row.get("end_time"),
+            parent_id: row.get("parent"),
+        }),
+    )
+    .await
+}
+
+/// Emit an edit of a task: only the fields the edit changed.
+pub async fn task_update(conn: &mut SqliteConnection, id: Id, diff: TaskUpdateData) -> Result<()> {
+    if diff.is_empty() {
         return Ok(());
-    };
-    emit(conn, id, Some(EntityPayload::Task(data))).await
+    }
+    emit_mutation(conn, id, EntityPayload::TaskUpdate(diff)).await
 }
 
-/// Append an upsert event for a mood.
-pub(crate) async fn mood(conn: &mut SqliteConnection, id: Id) -> Result<()> {
-    let Some(data) = mood_data(conn, id).await? else {
+/// Emit the creation snapshot of a mood entry.
+pub async fn mood_create(conn: &mut SqliteConnection, id: Id) -> Result<()> {
+    let row =
+        sqlx::query("SELECT mood, body, time, score, duration, todo_id FROM mood WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *conn)
+            .await
+            .context("Failed to read the mood for its sync event")?;
+    let Some(row) = row else { return Ok(()) };
+    emit_mutation(
+        conn,
+        id,
+        EntityPayload::MoodCreate(MoodCreateData {
+            mood: row.get("mood"),
+            body: row.get("body"),
+            time: row.get("time"),
+            score: row.get("score"),
+            duration: row.get("duration"),
+            todo_id: row.get("todo_id"),
+        }),
+    )
+    .await
+}
+
+/// Emit an edit of a mood entry: only the fields the edit changed.
+pub async fn mood_update(conn: &mut SqliteConnection, id: Id, diff: MoodUpdateData) -> Result<()> {
+    if diff.is_empty() {
         return Ok(());
-    };
-    emit(conn, id, Some(EntityPayload::Mood(data))).await
+    }
+    emit_mutation(conn, id, EntityPayload::MoodUpdate(diff)).await
 }
 
-/// Append an upsert event for a tracker entry.
-pub(crate) async fn tracker(conn: &mut SqliteConnection, id: Id) -> Result<()> {
-    let Some(data) = tracker_data(conn, id).await? else {
+/// Emit the creation snapshot of a tracker entry.
+pub async fn tracker_create(conn: &mut SqliteConnection, id: Id) -> Result<()> {
+    let row = sqlx::query(
+        "SELECT type, typeof(score) AS score_kind, CAST(score AS TEXT) AS score_text, time, mood
+         FROM tracker WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await
+    .context("Failed to read the tracker for its sync event")?;
+    let Some(row) = row else { return Ok(()) };
+    let score =
+        crate::db::tracker_value(row.get("score_kind"), &row.get::<String, _>("score_text"));
+    emit_mutation(
+        conn,
+        id,
+        EntityPayload::TrackerCreate(TrackerData {
+            tracker_type: row.get("type"),
+            score: TrackerScore::from(&score),
+            time: row.get("time"),
+            mood_id: row.get("mood"),
+        }),
+    )
+    .await
+}
+
+/// Emit an edit of a tracker entry: only the fields the edit changed.
+pub async fn tracker_update(
+    conn: &mut SqliteConnection,
+    id: Id,
+    diff: TrackerUpdateData,
+) -> Result<()> {
+    if diff.is_empty() {
         return Ok(());
-    };
-    emit(conn, id, Some(EntityPayload::Tracker(data))).await
+    }
+    emit_mutation(conn, id, EntityPayload::TrackerUpdate(diff)).await
 }
 
-/// Append an upsert event for a completion entry.
-pub(crate) async fn completion(conn: &mut SqliteConnection, id: Id) -> Result<()> {
-    let Some(data) = completion_data(conn, id).await? else {
-        return Ok(());
-    };
-    emit(conn, id, Some(EntityPayload::Completion(data))).await
+/// Emit a logged completion (append-only, never edited — §3).
+pub async fn completion(conn: &mut SqliteConnection, id: Id) -> Result<()> {
+    let row = sqlx::query("SELECT todo_id, time, count FROM todo_completions WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await
+        .context("Failed to read the completion for its sync event")?;
+    let Some(row) = row else { return Ok(()) };
+    emit_mutation(
+        conn,
+        id,
+        EntityPayload::Completion(CompletionData {
+            todo_id: row.get("todo_id"),
+            time: row.get("time"),
+            count: row.get("count"),
+        }),
+    )
+    .await
 }
 
-/// Append a delete event for an entity of any kind.
-pub(crate) async fn delete(conn: &mut SqliteConnection, entity_id: Id) -> Result<()> {
-    emit(conn, entity_id, None).await
+/// Emit a delete: the entity loses every field, so a later mutation has to
+/// outrank the deletion to resurrect it (§4.2.2).
+pub async fn delete(conn: &mut SqliteConnection, id: Id, kind: &str) -> Result<()> {
+    let stamp = append(conn, id, &None).await?;
+    for field in super::types::fields(kind) {
+        state::record_stamp_keep_value(&mut *conn, id, field, &stamp).await?;
+    }
+    state::record(&mut *conn, id, state::ENTITY, &stamp, None).await?;
+    state::set_entity(&mut *conn, id, kind, true).await?;
+    Ok(())
 }
 
-/// Append an upsert event for an entity that already has its payload at hand
-/// (the replayer uses this to re-publish a resurrected entity).
-pub(crate) async fn upsert_payload(
+/// Publish one field with a fresh stamp: the compensating event of a conflict
+/// the user settled in this field's favour (§4.2).
+pub async fn republish_field(
+    conn: &mut SqliteConnection,
+    id: Id,
+    kind: &str,
+    change: &Change,
+) -> Result<()> {
+    let payload = super::types::payload_of_change(kind, change)?;
+    emit_mutation(conn, id, payload).await
+}
+
+/// Re-publish an entity's current values: the compensating event of a
+/// resurrection (§4.2.2), which has to outrank the deletion it overrules.
+pub async fn republish(conn: &mut SqliteConnection, id: Id, kind: &str) -> Result<()> {
+    match kind {
+        "task" => task_create(conn, id).await,
+        "mood" => mood_create(conn, id).await,
+        "tracker" => tracker_create(conn, id).await,
+        "completion" => completion(conn, id).await,
+        other => anyhow::bail!("cannot re-publish an entity of kind '{other}'"),
+    }
+}
+
+/// Append one event to the outbox: the device id, the monotonic timestamp and
+/// the id the LWW order ties on.
+async fn append(
     conn: &mut SqliteConnection,
     entity_id: Id,
-    payload: EntityPayload,
-) -> Result<()> {
-    emit(conn, entity_id, Some(payload)).await
-}
-
-async fn emit(
-    conn: &mut SqliteConnection,
-    entity_id: Id,
-    payload: Option<EntityPayload>,
-) -> Result<()> {
+    payload: &Option<EntityPayload>,
+) -> Result<Stamp> {
     let device = state::device_id(&mut *conn).await?;
     let timestamp = state::next_event_timestamp(&mut *conn).await?;
     let event_id = EventId::new();
-    let json = serde_json::to_string(&payload).context("Failed to serialize a sync event")?;
+    let json = serde_json::to_string(payload).context("Failed to serialize a sync event")?;
     sqlx::query(
         "INSERT INTO _sync_events (event_id, device_id, entity_id, timestamp, payload, synced)
          VALUES (?, ?, ?, ?, ?, 0)",
@@ -83,99 +204,33 @@ async fn emit(
     .execute(&mut *conn)
     .await
     .context("Failed to append a sync event")?;
-    // A delete records no snapshot: the watermark keeps the newest upsert.
-    let snapshot = payload.is_some().then_some(json.as_str());
-    state::record_watermark(
-        &mut *conn,
-        entity_id,
-        event_id,
+    Ok(Stamp::new(
         timestamp,
         &device.to_string(),
-        snapshot,
-    )
-    .await
+        &event_id.to_string(),
+    ))
 }
 
-/// Serialize an event for the outbox (`None` payload = "null").
-pub fn to_json(event: &SyncEvent) -> Result<String> {
-    serde_json::to_string(event).context("Failed to serialize a sync event")
-}
-
-async fn task_data(conn: &mut SqliteConnection, id: Id) -> Result<Option<TaskData>> {
-    let row = sqlx::query(
-        "SELECT name, body, priority, start_time, available_duration_secs, interval_secs,
-                target_count, optional, end_time, parent
-         FROM todos WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_optional(&mut *conn)
-    .await
-    .context("Failed to snapshot a task for sync")?;
-    Ok(row.map(|row| TaskData {
-        name: row.get("name"),
-        body: row.get("body"),
-        priority: row.get("priority"),
-        start_time: row.get("start_time"),
-        available_duration_secs: row.get("available_duration_secs"),
-        interval_secs: row.get("interval_secs"),
-        target_count: row.get("target_count"),
-        optional: row.get::<i32, _>("optional") != 0,
-        end_time: row.get("end_time"),
-        parent_id: row.get("parent"),
-    }))
-}
-
-async fn mood_data(conn: &mut SqliteConnection, id: Id) -> Result<Option<MoodData>> {
-    let row =
-        sqlx::query("SELECT mood, body, time, score, duration, todo_id FROM mood WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&mut *conn)
-            .await
-            .context("Failed to snapshot a mood for sync")?;
-    Ok(row.map(|row| MoodData {
-        mood: row.get("mood"),
-        body: row.get("body"),
-        time: row.get("time"),
-        score: row.get("score"),
-        duration: row.get("duration"),
-        todo_id: row.get("todo_id"),
-    }))
-}
-
-async fn tracker_data(conn: &mut SqliteConnection, id: Id) -> Result<Option<TrackerData>> {
-    let row = sqlx::query(
-        "SELECT type, typeof(score) AS storage, score, time, mood FROM tracker WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_optional(&mut *conn)
-    .await
-    .context("Failed to snapshot a tracker for sync")?;
-    Ok(row.map(|row| TrackerData {
-        tracker_type: row.get("type"),
-        score: tracker_score(&row),
-        time: row.get("time"),
-        mood_id: row.get("mood"),
-    }))
-}
-
-/// Decode the dynamically typed `tracker.score` column by its storage class.
-fn tracker_score(row: &sqlx::sqlite::SqliteRow) -> TrackerScore {
-    match row.get::<String, _>("storage").as_str() {
-        "integer" => TrackerScore::Integer(row.get("score")),
-        "real" => TrackerScore::Float(row.get("score")),
-        _ => TrackerScore::Text(row.get("score")),
+/// Append a mutation and record the fields it won for this device.
+async fn emit_mutation(
+    conn: &mut SqliteConnection,
+    entity_id: Id,
+    payload: EntityPayload,
+) -> Result<()> {
+    let changes = payload.changes();
+    let kind = payload.kind();
+    let stamp = append(conn, entity_id, &Some(payload)).await?;
+    for change in changes {
+        state::record(
+            &mut *conn,
+            entity_id,
+            change.field,
+            &stamp,
+            change.value.as_ref(),
+        )
+        .await?;
     }
-}
-
-async fn completion_data(conn: &mut SqliteConnection, id: Id) -> Result<Option<CompletionData>> {
-    let row = sqlx::query("SELECT todo_id, time, count FROM todo_completions WHERE id = ?")
-        .bind(id)
-        .fetch_optional(&mut *conn)
-        .await
-        .context("Failed to snapshot a completion for sync")?;
-    Ok(row.map(|row| CompletionData {
-        todo_id: row.get("todo_id"),
-        time: row.get("time"),
-        count: row.get("count"),
-    }))
+    state::record(&mut *conn, entity_id, state::ENTITY, &stamp, None).await?;
+    state::set_entity(&mut *conn, entity_id, kind, false).await?;
+    Ok(())
 }
