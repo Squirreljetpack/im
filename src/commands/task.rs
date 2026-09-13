@@ -21,31 +21,6 @@ async fn resolve_parent_named(pool: &SqlitePool, short_id: i64) -> Result<(Id, S
         })
 }
 
-/// Resolve a TaskRef to its stable row id plus the task name.
-pub(crate) async fn resolve_task_ref_named(
-    pool: &SqlitePool,
-    task_ref: &TaskRef,
-) -> Result<(Id, String)> {
-    match task_ref {
-        TaskRef::Id(short_id) => resolve_parent_named(pool, *short_id).await,
-        TaskRef::Words(words) => {
-            let matches = crate::db::fetch_task_matching_words(pool, words).await?;
-            match matches.len() {
-                0 => anyhow::bail!("No task found matching query '{}'", words.join(" ")),
-                1 => Ok((matches[0].id, matches[0].name.clone())),
-                n => anyhow::bail!(
-                    "Multiple tasks match query '{}' (found {})",
-                    words.join(" "),
-                    n
-                ),
-            }
-        }
-        TaskRef::Pick => {
-            anyhow::bail!("Cannot resolve Pick task_ref without interactive TUI");
-        }
-    }
-}
-
 /// Resolve a TaskRef to a stable row id.
 pub(crate) async fn resolve_parent(
     pool: &SqlitePool,
