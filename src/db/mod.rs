@@ -33,6 +33,11 @@ pub async fn init_database(db_path: &Path) -> Result<SqlitePool> {
 
 /// Open, probe and migrate the database file.
 async fn open_database(db_path: &Path) -> Result<SqlitePool> {
+    // A file from an older version still has integer primary keys, and the
+    // schema below is created with `IF NOT EXISTS`: a legacy table would
+    // silently survive with the wrong key type. Copy it aside and start empty.
+    back_up_legacy_database(db_path).await?;
+
     probe_database(db_path).await?;
 
     let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
@@ -73,6 +78,71 @@ async fn open_database(db_path: &Path) -> Result<SqlitePool> {
 
     log::debug!("Database initialized at {:?}", db_path);
     Ok(pool)
+}
+
+/// Backup path for a legacy database: `<file>.legacy-<unix-seconds>.bak`.
+fn legacy_backup_path(db_path: &Path) -> PathBuf {
+    let mut name = db_path.as_os_str().to_os_string();
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    name.push(format!(".legacy-{secs}.bak"));
+    PathBuf::from(name)
+}
+
+/// Whether an existing database file uses the pre-sync integer-key schema
+/// (`todos.id` declared `INTEGER`). A file without a `todos` table is not
+/// legacy — it is either fresh or half-built.
+async fn has_legacy_schema(db_path: &Path) -> Result<bool> {
+    let db_url = format!("sqlite:{}?mode=rw", db_path.display());
+    let mut conn = SqliteConnection::connect(&db_url)
+        .await
+        .with_context(|| format!("Failed to open {} for inspection", db_path.display()))?;
+    let declared: Option<String> =
+        sqlx::query_scalar("SELECT type FROM pragma_table_info('todos') WHERE name = 'id'")
+            .fetch_optional(&mut conn)
+            .await
+            .with_context(|| format!("Failed to inspect the schema of {}", db_path.display()))?;
+    conn.close()
+        .await
+        .with_context(|| format!("Failed to close {} after inspection", db_path.display()))?;
+    Ok(declared.is_some_and(|decl_type| decl_type.eq_ignore_ascii_case("INTEGER")))
+}
+
+/// Copy a legacy (integer-key) database aside with `VACUUM INTO` — a single
+/// consistent file, WAL contents included — then delete it so the caller
+/// starts from the current schema with no rows. Returns the backup path, or
+/// `None` when the file is absent or already uses UUID keys.
+async fn back_up_legacy_database(db_path: &Path) -> Result<Option<PathBuf>> {
+    if !db_path.is_file() || !has_legacy_schema(db_path).await? {
+        return Ok(None);
+    }
+
+    let backup = legacy_backup_path(db_path);
+    let escaped = backup.display().to_string().replace('\'', "''");
+    let db_url = format!("sqlite:{}?mode=rw", db_path.display());
+    let mut conn = SqliteConnection::connect(&db_url)
+        .await
+        .with_context(|| format!("Failed to open {} for backup", db_path.display()))?;
+    sqlx::query(sqlx::AssertSqlSafe(format!("VACUUM INTO '{escaped}'")))
+        .execute(&mut conn)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to back up {} to {}",
+                db_path.display(),
+                backup.display()
+            )
+        })?;
+    conn.close().await?;
+
+    delete_database(db_path)?;
+    log::warn!(
+        "Recreated the database without the rows of the pre-sync schema; the old file was copied to {}",
+        backup.display()
+    );
+    Ok(Some(backup))
 }
 
 /// Read the schema over a plain connection: a file that is not a SQLite
