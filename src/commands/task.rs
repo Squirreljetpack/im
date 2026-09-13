@@ -6,14 +6,14 @@ use sqlx::SqlitePool;
 use crate::cli::CliOpts;
 use crate::config::Config;
 use crate::date::format_duration;
-use crate::db::TaskObject;
+use crate::db::{Id, TaskObject};
 use crate::editor::open_editor_for_body;
 use crate::types::{Task, TaskKind, TaskRef};
 
 /// Resolve a `-<parent_id>` short id to its stable row id plus the parent's
 /// name; errors when no task holds that short id (a completed oneshot holds
 /// `NULL` and is never resolvable).
-async fn resolve_parent_named(pool: &SqlitePool, short_id: i64) -> Result<(i64, String)> {
+async fn resolve_parent_named(pool: &SqlitePool, short_id: i64) -> Result<(Id, String)> {
     crate::db::fetch_task_id_by_short_id(pool, short_id)
         .await?
         .ok_or_else(|| {
@@ -25,7 +25,7 @@ async fn resolve_parent_named(pool: &SqlitePool, short_id: i64) -> Result<(i64, 
 pub(crate) async fn resolve_task_ref_named(
     pool: &SqlitePool,
     task_ref: &TaskRef,
-) -> Result<(i64, String)> {
+) -> Result<(Id, String)> {
     match task_ref {
         TaskRef::Id(short_id) => resolve_parent_named(pool, *short_id).await,
         TaskRef::Words(words) => {
@@ -52,7 +52,7 @@ pub(crate) async fn resolve_parent(
     config: &Config,
     opts: &CliOpts,
     parent_ref: &TaskRef,
-) -> Result<Option<i64>> {
+) -> Result<Option<Id>> {
     match parent_ref {
         TaskRef::Id(short_id) => Ok(Some(resolve_parent_named(pool, *short_id).await?.0)),
         TaskRef::Words(words) => {
@@ -145,7 +145,7 @@ pub(super) async fn create_task_command(
                 let name_val = prompt_unique_name(pool, None, Some(TaskKind::Oneshot)).await?;
                 let mut body_val = resolve_body(body, &config.editor.task_template)?;
                 let mut priority_val = config.tasks.default_priority;
-                let mut parent_id: Option<i64> = if let Some(ref p_ref) = parent {
+                let mut parent_id: Option<Id> = if let Some(ref p_ref) = parent {
                     resolve_parent(pool, config, opts, p_ref).await?
                 } else {
                     None

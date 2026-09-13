@@ -20,7 +20,7 @@ use ratatui::{
 use std::sync::{Arc, Mutex};
 
 use crate::config::{Config, TrackerKind};
-use crate::db::{TaskRow, TrackerValue};
+use crate::db::{Id, TaskRow, TrackerValue};
 use crate::global::{GLOBAL_CONFIG, config, pool};
 use crate::task::{
     AcceptAction, accept_action, apply_accept_action, apply_completion_delta, reset_task_progress,
@@ -405,15 +405,15 @@ struct TodayCtx {
 /// handler while the TUI is suspended.
 enum EditPayload {
     TaskBody {
-        id: i64,
+        id: Id,
         body: String,
     },
     MoodBody {
-        id: i64,
+        id: Id,
         body: String,
     },
     TrackerValue {
-        id: i64,
+        id: Id,
         kind: TrackerKind,
         tracker_type: String,
         value: String,
@@ -698,7 +698,7 @@ async fn accept_entry(ctx: &TodayCtx, entry: TodayEntry) {
 /// Accept on a tracker row: null trackers re-log in place (time → now,
 /// and in count mode the count increments too, mirroring the CLI);
 /// value-bearing kinds open the "Update:" prompt.
-async fn tracker_accept(ctx: &TodayCtx, kind: TrackerKind, tracker_id: Option<i64>, label: &str) {
+async fn tracker_accept(ctx: &TodayCtx, kind: TrackerKind, tracker_id: Option<Id>, label: &str) {
     let Some(tracker_id) = tracker_id else {
         return;
     };
@@ -771,7 +771,7 @@ fn tracker_measure(parsed: &TrackerValue) -> f64 {
 async fn submit_tracker_update(
     ctx: &TodayCtx,
     tracker_type: &str,
-    id: i64,
+    id: Id,
     kind: TrackerKind,
     raw: &str,
 ) {
@@ -799,7 +799,7 @@ async fn submit_tracker_update(
 /// by Edit on Integer/Float/Duration trackers.
 fn update_tracker_prompt(
     ctx: &TodayCtx,
-    tracker_id: i64,
+    tracker_id: Id,
     tracker_type: &str,
     kind: TrackerKind,
 ) -> InputPrompt {
@@ -1032,22 +1032,27 @@ fn open_link(ctx: TodayCtx, entry: &TodayEntry) {
         placeholder: None,
         input: String::new(),
         error: None,
-        allowed: Some(Box::new(|c: char| c.is_ascii_digit())),
+        allowed: Some(Box::new(|c: char| c.is_ascii_alphanumeric() || c == '-')),
         validator: None,
         on_submit: Some(Box::new(move |val| {
-            let Some(id) = val.trim().parse::<i64>().ok() else {
+            let typed = val.trim().to_string();
+            if typed.is_empty() {
                 return;
-            };
+            }
             tokio::spawn(async move {
+                let Some(target) = resolve_link_target(kind, &typed).await else {
+                    log::error!("No link target '{typed}'");
+                    return;
+                };
                 let result = match kind {
                     LinkKind::MoodToTask => {
-                        crate::db::link_mood_to_task(&pool(), target_id, id).await
+                        crate::db::link_mood_to_task(&pool(), target_id, target).await
                     }
                     LinkKind::TrackerToMood => {
-                        crate::db::link_tracker_to_mood(&pool(), target_id, id).await
+                        crate::db::link_tracker_to_mood(&pool(), target_id, target).await
                     }
                     LinkKind::TaskToParent => {
-                        crate::db::set_task_parent(&pool(), target_id, id).await
+                        crate::db::set_task_parent(&pool(), target_id, target).await
                     }
                 };
                 let _ = result.elog();
@@ -1056,6 +1061,24 @@ fn open_link(ctx: TodayCtx, entry: &TodayEntry) {
         })),
     };
     open_input(ctx, prompt);
+}
+
+/// Resolve the value typed into the Link prompt. Task targets (`MoodToTask`,
+/// `TaskToParent`) take a task short id — the `id:` shown in task previews —
+/// or a raw entity uuid; mood targets (`TrackerToMood`) take a raw uuid only.
+async fn resolve_link_target(kind: LinkKind, typed: &str) -> Option<Id> {
+    if let Ok(id) = Id::parse(typed) {
+        return Some(id);
+    }
+    if kind == LinkKind::TrackerToMood {
+        return None;
+    }
+    let short_id = typed.parse::<i64>().ok()?;
+    crate::db::fetch_task_id_by_short_id(&pool(), short_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|(id, _)| id)
 }
 
 /// Edit the selected entry: task/mood bodies and text-tracker payloads

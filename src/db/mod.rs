@@ -1,13 +1,30 @@
 use anyhow::{Context, Result};
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use sqlx::Connection;
+use sqlx::sqlite::{SqliteConnection, SqlitePool, SqlitePoolOptions};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub async fn init_database(db_path: &Path) -> anyhow::Result<SqlitePool> {
+/// An opened database: the pool plus, when the file still held the pre-sync
+/// integer-key schema, the backup taken before the schema was recreated.
+pub struct OpenedDatabase {
+    pub pool: SqlitePool,
+    /// Path of the `VACUUM INTO` copy of a legacy database (see
+    /// [`back_up_legacy_database`]); `None` for a fresh or current-schema
+    /// file.
+    pub legacy_backup: Option<PathBuf>,
+}
+
+pub async fn init_database(db_path: &Path) -> anyhow::Result<OpenedDatabase> {
     // Ensure parent directory exists
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+
+    // A file from an older version still has integer primary keys. Copy it
+    // aside and remove it before opening: the schema below is created with
+    // `IF NOT EXISTS`, so an existing legacy table would silently survive
+    // with the wrong key type.
+    let legacy_backup = back_up_legacy_database(db_path).await?;
 
     let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
     let pool = SqlitePoolOptions::new()
@@ -46,7 +63,75 @@ pub async fn init_database(db_path: &Path) -> anyhow::Result<SqlitePool> {
     run_migrations(&pool).await?;
 
     log::debug!("Database initialized at {:?}", db_path);
-    Ok(pool)
+    Ok(OpenedDatabase {
+        pool,
+        legacy_backup,
+    })
+}
+
+/// Backup path for a legacy database: `<file>.legacy-<unix-seconds>.bak`.
+fn legacy_backup_path(db_path: &Path) -> PathBuf {
+    let mut name = db_path.as_os_str().to_os_string();
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    name.push(format!(".legacy-{secs}.bak"));
+    PathBuf::from(name)
+}
+
+/// Whether an existing database file uses the pre-sync integer-key schema
+/// (`todos.id` declared `INTEGER`). A file without a `todos` table is not
+/// legacy — it is either fresh or half-built.
+async fn has_legacy_schema(db_path: &Path) -> Result<bool> {
+    let db_url = format!("sqlite:{}?mode=rw", db_path.display());
+    let mut conn = SqliteConnection::connect(&db_url)
+        .await
+        .with_context(|| format!("Failed to open {} for inspection", db_path.display()))?;
+    let declared: Option<String> =
+        sqlx::query_scalar("SELECT type FROM pragma_table_info('todos') WHERE name = 'id'")
+            .fetch_optional(&mut conn)
+            .await
+            .with_context(|| format!("Failed to inspect the schema of {}", db_path.display()))?;
+    conn.close()
+        .await
+        .with_context(|| format!("Failed to close {} after inspection", db_path.display()))?;
+    Ok(declared.is_some_and(|decl_type| decl_type.eq_ignore_ascii_case("INTEGER")))
+}
+
+/// Copy a legacy (integer-key) database aside with `VACUUM INTO` — a single
+/// consistent file, WAL contents included — then delete it so the caller
+/// starts from the current schema with no rows. Returns the backup path, or
+/// `None` when the file is absent or already uses UUID keys.
+async fn back_up_legacy_database(db_path: &Path) -> Result<Option<PathBuf>> {
+    if !db_path.is_file() || !has_legacy_schema(db_path).await? {
+        return Ok(None);
+    }
+
+    let backup = legacy_backup_path(db_path);
+    let escaped = backup.display().to_string().replace('\'', "''");
+    let db_url = format!("sqlite:{}?mode=rw", db_path.display());
+    let mut conn = SqliteConnection::connect(&db_url)
+        .await
+        .with_context(|| format!("Failed to open {} for backup", db_path.display()))?;
+    sqlx::query(sqlx::AssertSqlSafe(format!("VACUUM INTO '{escaped}'")))
+        .execute(&mut conn)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to back up {} to {}",
+                db_path.display(),
+                backup.display()
+            )
+        })?;
+    conn.close().await?;
+
+    delete_database(db_path)?;
+    log::warn!(
+        "Recreated the database without the rows of the pre-sync schema; the old file was copied to {}",
+        backup.display()
+    );
+    Ok(Some(backup))
 }
 
 /// Delete the database file and its `-wal`/`-shm` sidecar files (if any).
@@ -92,24 +177,23 @@ pub async fn test_pool() -> anyhow::Result<SqlitePool> {
 
     Ok(pool)
 }
-
 pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     // Create tables if they don't exist
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS mood (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            mood TEXT NOT NULL,
-            body TEXT NOT NULL DEFAULT '',
-            time INTEGER NOT NULL DEFAULT (unixepoch()),
+            id        TEXT PRIMARY KEY,
+            mood      TEXT NOT NULL,
+            body      TEXT NOT NULL DEFAULT '',
+            time      INTEGER NOT NULL DEFAULT (unixepoch()),
+            -- Local cache only: the ONNX embedding is never synced.
             embedding BLOB,
             -- Cached emotional-saliency score for the mood text (nullable;
-            -- backfilled by mood_color_cached). No migration: an existing
-            -- DB without the column is deleted by the user.
+            -- backfilled by mood_color_cached).
             score REAL,
             duration INTEGER,
             -- Optional link to a single task (1 task per mood).
-            todo_id INTEGER REFERENCES todos(id) ON DELETE SET NULL
+            todo_id   TEXT REFERENCES todos(id) ON DELETE SET NULL
         )
         "#,
     )
@@ -119,14 +203,13 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS tracker (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            type TEXT NOT NULL,
+            id    TEXT PRIMARY KEY,
+            type  TEXT NOT NULL,
             -- BLOB decltype = no type affinity: storage class is preserved
             -- exactly (integer/text/real) so sqlx can decode by value type.
             score BLOB NOT NULL CHECK (typeof(score) IN ('integer', 'text', 'real')),
-            time INTEGER NOT NULL DEFAULT (unixepoch()),
-            mood INTEGER,
-            FOREIGN KEY (mood) REFERENCES mood(id)
+            time  INTEGER NOT NULL DEFAULT (unixepoch()),
+            mood  TEXT REFERENCES mood(id) ON DELETE SET NULL
         )
         "#,
     )
@@ -136,26 +219,27 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS todos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            body TEXT NOT NULL DEFAULT '',
-            priority INTEGER NOT NULL DEFAULT 5,
-            -- User-facing short id: allocated by the db layer (first free
-            -- gap); NULL once the task is completed (oneshot) or for
-            -- recurring tasks done in the current interval.
-            short_id INTEGER UNIQUE,
-            -- Reserved for a name-derived embedding; never populated.
-            name_embedding BLOB,
-            start_time INTEGER,
+            id                      TEXT PRIMARY KEY,
+            name                    TEXT NOT NULL,
+            body                    TEXT NOT NULL DEFAULT '',
+            priority                INTEGER NOT NULL DEFAULT 5,
+            -- User-facing short id: local presentation only (never synced),
+            -- allocated by the db layer (first free gap); NULL once the task
+            -- is completed (oneshot) or for recurring tasks done in the
+            -- current interval.
+            short_id                INTEGER UNIQUE,
+            -- Reserved for a name-derived embedding; local only.
+            name_embedding          BLOB,
+            start_time              INTEGER,
             available_duration_secs INTEGER,
-            interval_secs INTEGER,
-            target_count INTEGER NOT NULL DEFAULT 0,
-            optional INTEGER NOT NULL DEFAULT 0,
-            end_time INTEGER,
+            interval_secs           INTEGER,
+            target_count            INTEGER NOT NULL DEFAULT 0,
+            optional                INTEGER NOT NULL DEFAULT 0,
+            end_time                INTEGER,
             -- Parent task id for the task tree (NULL = root-level task).
             -- Deleting a parent re-parents its children to root level
             -- (ON DELETE SET NULL) rather than cascading or failing.
-            parent INTEGER REFERENCES todos(id) ON DELETE SET NULL
+            parent                  TEXT REFERENCES todos(id) ON DELETE SET NULL
         )
         "#,
     )
@@ -165,11 +249,10 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS todo_completions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            todo_id INTEGER NOT NULL,
-            time INTEGER NOT NULL DEFAULT (unixepoch()),
-            count INTEGER NOT NULL DEFAULT 1,
-            FOREIGN KEY (todo_id) REFERENCES todos(id) ON DELETE CASCADE
+            id      TEXT PRIMARY KEY,
+            todo_id TEXT NOT NULL REFERENCES todos(id) ON DELETE CASCADE,
+            time    INTEGER NOT NULL DEFAULT (unixepoch()),
+            count   INTEGER NOT NULL DEFAULT 1
         )
         "#,
     )
@@ -181,6 +264,37 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         CREATE TABLE IF NOT EXISTS embedding_cache (
             text TEXT PRIMARY KEY,
             embedding BLOB NOT NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Sync engine: credentials and cursors ('user_id', 'device_id',
+    // 'auth_token', 'last_server_version').
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS _sync_state (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Sync engine: append-only local event history. `synced = 0` rows are the
+    // outbox awaiting push; `payload` is the serialized `Option<EntityPayload>`
+    // (SQL NULL serialized as JSON `null` = delete).
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS _sync_events (
+            version    INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id   TEXT NOT NULL UNIQUE,
+            entity_id  TEXT NOT NULL,
+            timestamp  INTEGER NOT NULL,
+            payload    TEXT NOT NULL,
+            synced     INTEGER NOT NULL DEFAULT 0
         )
         "#,
     )
@@ -234,6 +348,10 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
 
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_sync_events_synced ON _sync_events(synced)")
+        .execute(pool)
+        .await?;
+
     log::debug!("Database migrations completed");
     Ok(())
 }
@@ -241,6 +359,59 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A db still holding the pre-sync integer-key schema is copied aside
+    /// with its rows and recreated empty with TEXT UUID keys.
+    #[tokio::test]
+    async fn legacy_db_is_backed_up_and_recreated() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("im.db");
+        {
+            let url = format!("sqlite:{}?mode=rwc", db_path.display());
+            let mut conn = SqliteConnection::connect(&url).await.unwrap();
+            sqlx::query(
+                "CREATE TABLE todos (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+            )
+            .execute(&mut conn)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO todos (name) VALUES ('old task')")
+                .execute(&mut conn)
+                .await
+                .unwrap();
+            conn.close().await.unwrap();
+        }
+
+        let opened = init_database(&db_path).await.unwrap();
+        let backup = opened
+            .legacy_backup
+            .expect("a pre-sync schema must be backed up");
+        assert!(backup.is_file(), "backup {} must exist", backup.display());
+
+        // The backup kept the old rows...
+        let url = format!("sqlite:{}?mode=rw", backup.display());
+        let mut conn = SqliteConnection::connect(&url).await.unwrap();
+        let name: String = sqlx::query_scalar("SELECT name FROM todos")
+            .fetch_one(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(name, "old task");
+        conn.close().await.unwrap();
+
+        // ...and the reopened database starts empty with TEXT keys.
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM todos")
+            .fetch_one(&opened.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        let declared: String =
+            sqlx::query_scalar("SELECT type FROM pragma_table_info('todos') WHERE name = 'id'")
+                .fetch_one(&opened.pool)
+                .await
+                .unwrap();
+        assert_eq!(declared, "TEXT");
+        opened.pool.close().await;
+    }
 
     /// A garbage db file must fail initialization quickly — the pool's
     /// acquire timeout caps it instead of the 30s default hang.
@@ -265,7 +436,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("nested").join("fresh.db");
 
-        let pool = init_database(&db_path).await.unwrap();
+        let pool = init_database(&db_path).await.unwrap().pool;
         pool.close().await;
         assert!(db_path.exists(), "db file must be created");
     }
@@ -295,12 +466,14 @@ mod tests {
 
 mod embeddings;
 mod entries;
+mod ids;
 mod models;
 mod tasks;
 mod views;
 
 pub use embeddings::*;
 pub use entries::*;
+pub use ids::*;
 pub use models::*;
 pub use tasks::*;
 pub use views::*;

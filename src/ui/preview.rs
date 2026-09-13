@@ -522,9 +522,14 @@ pub(crate) fn build_today_preview(
 mod tests {
     use super::*;
 
+    /// A fixed id for fixture rows (fixtures only need distinct, stable ids).
+    fn test_id(n: u128) -> crate::db::Id {
+        crate::db::Id(uuid::Uuid::from_u128(n))
+    }
+
     fn recurring_row() -> crate::db::TaskRow {
         crate::db::TaskRow {
-            id: 1,
+            id: test_id(1),
             short_id: Some(7),
             name: "water plants".to_string(),
             body: String::new(),
@@ -621,7 +626,7 @@ mod tests {
     #[test]
     fn test_build_today_preview_prev() {
         let mk = |tracker_prev: Option<i64>| TodayEntry {
-            id: Some(1),
+            id: Some(test_id(1)),
             time: 1_700_000_000,
             time_label: "18:00".to_string(),
             kind: EntryKind::Tracker(crate::config::TrackerKind::Float),
@@ -671,7 +676,7 @@ mod tests {
     #[test]
     fn test_build_today_preview_total() {
         let mk = |tracker_total: Option<f64>| TodayEntry {
-            id: Some(1),
+            id: Some(test_id(1)),
             time: 1_700_000_000,
             time_label: "18:00".to_string(),
             kind: EntryKind::Tracker(crate::config::TrackerKind::Integer),
@@ -719,7 +724,7 @@ mod tests {
     fn test_build_today_preview_linked() {
         use crate::today::{LinkedTask, LinkedTracker};
         let entry = TodayEntry {
-            id: Some(1),
+            id: Some(test_id(1)),
             time: 1_700_000_000,
             time_label: "18:00".to_string(),
             kind: EntryKind::Mood,
@@ -787,7 +792,7 @@ mod tests {
     #[test]
     fn test_build_today_preview_linked_mood() {
         let mk = |linked_mood: Option<String>| TodayEntry {
-            id: Some(1),
+            id: Some(test_id(1)),
             time: 1_700_000_000,
             time_label: "18:00".to_string(),
             kind: EntryKind::Tracker(crate::config::TrackerKind::Float),
@@ -839,7 +844,7 @@ mod tests {
     #[test]
     fn test_build_today_preview_blank_line_after_date() {
         let mk = |kind: EntryKind| TodayEntry {
-            id: Some(1),
+            id: Some(test_id(1)),
             time: 1_700_000_000,
             time_label: "18:00".to_string(),
             kind,
@@ -921,7 +926,7 @@ mod tests {
         task.interval_secs = None;
         task.body = "parent body".to_string();
         let child = crate::db::TaskRow {
-            id: 2,
+            id: test_id(2),
             short_id: Some(2),
             name: "child task".to_string(),
             body: String::new(),
@@ -932,7 +937,7 @@ mod tests {
             target_count: 0,
             optional: 0,
             end_time: None,
-            parent: Some(1),
+            parent: Some(test_id(1)),
             completions: None,
             last_time: None,
         };
@@ -1009,9 +1014,9 @@ mod tests {
     fn test_build_preview_parent_field() {
         let mut task = recurring_row();
         task.interval_secs = None;
-        task.parent = Some(1);
+        task.parent = Some(test_id(1));
         let parent = crate::db::TaskRow {
-            id: 1,
+            id: test_id(1),
             short_id: Some(42),
             name: "a very long parent task name that will not fit".to_string(),
             body: String::new(),
@@ -1070,7 +1075,7 @@ mod tests {
     fn test_build_preview_linked_moods() {
         let task = recurring_row();
         let mood = crate::db::MoodRow {
-            id: 1,
+            id: test_id(1),
             mood: "good".to_string(),
             body: String::new(),
             time: 1_700_000_000,

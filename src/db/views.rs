@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use sqlx::{FromRow, Row, SqlitePool};
 
+use super::Id;
 use super::entries::fetch_completions_between;
 use super::models::{CompletionRow, RecurringWindow, TaskRow};
 use crate::types::{TasksFilter, ViewMode, ViewVariant};
@@ -210,14 +211,14 @@ pub async fn fetch_completion_events_in_range(
     }
 
     let mut events = Vec::with_capacity(rows.len());
-    let mut task_map: std::collections::HashMap<i64, TaskRow> = std::collections::HashMap::new();
+    let mut task_map: std::collections::HashMap<Id, TaskRow> = std::collections::HashMap::new();
 
     for row in rows {
         let comp = CompletionRow {
             time: row.get("completion_time"),
             count: row.get("completion_count"),
         };
-        let task_id: i64 = row.get("id");
+        let task_id: Id = row.get("id");
         task_map.entry(task_id).or_insert_with(|| TaskRow {
             id: task_id,
             short_id: row.get("short_id"),
@@ -445,12 +446,12 @@ pub async fn fetch_recurring_windows_for_period(
 pub async fn fetch_completions_for_tasks(
     pool: &SqlitePool,
     tasks: &[TaskRow],
-) -> Result<std::collections::HashMap<i64, Vec<CompletionRow>>> {
+) -> Result<std::collections::HashMap<Id, Vec<CompletionRow>>> {
     let mut map = std::collections::HashMap::new();
     if tasks.is_empty() {
         return Ok(map);
     }
-    let ids: Vec<i64> = tasks.iter().map(|t| t.id).collect();
+    let ids: Vec<Id> = tasks.iter().map(|t| t.id).collect();
     let sql = format!(
         "SELECT todo_id, time, count FROM todo_completions WHERE todo_id IN ({}) ORDER BY time ASC",
         ids.iter().map(|_| "?").collect::<Vec<_>>().join(",")
@@ -464,7 +465,7 @@ pub async fn fetch_completions_for_tasks(
         .await
         .context("Failed to fetch task completions")?;
     for row in rows {
-        map.entry(row.get::<i64, _>("todo_id"))
+        map.entry(row.get::<Id, _>("todo_id"))
             .or_insert_with(Vec::new)
             .push(CompletionRow {
                 time: row.get("time"),
@@ -481,12 +482,12 @@ async fn fetch_completions_in_window(
     tasks: &[TaskRow],
     start: i64,
     end: i64,
-) -> Result<std::collections::HashMap<i64, Vec<CompletionRow>>> {
+) -> Result<std::collections::HashMap<Id, Vec<CompletionRow>>> {
     let mut map = std::collections::HashMap::new();
     if tasks.is_empty() {
         return Ok(map);
     }
-    let ids: Vec<i64> = tasks.iter().map(|t| t.id).collect();
+    let ids: Vec<Id> = tasks.iter().map(|t| t.id).collect();
     let sql = format!(
         "SELECT todo_id, time, count FROM todo_completions \
          WHERE todo_id IN ({}) AND time >= ? AND time < ? ORDER BY time ASC",
@@ -503,7 +504,7 @@ async fn fetch_completions_in_window(
         .await
         .context("Failed to fetch task completions")?;
     for row in rows {
-        map.entry(row.get::<i64, _>("todo_id"))
+        map.entry(row.get::<Id, _>("todo_id"))
             .or_insert_with(Vec::new)
             .push(CompletionRow {
                 time: row.get("time"),
@@ -722,7 +723,7 @@ pub async fn fetch_tasks_for_view(
 
     let completions = fetch_completions_for_tasks(pool, &tasks).await?;
     // D9: task ids with a completion entry in the persist window.
-    let recent_ids: std::collections::HashSet<i64> = if persist_pending_seconds > 0 {
+    let recent_ids: std::collections::HashSet<Id> = if persist_pending_seconds > 0 {
         let rows = sqlx::query(
             "SELECT DISTINCT todo_id FROM todo_completions WHERE time >= ? AND time <= ?",
         )
@@ -731,7 +732,7 @@ pub async fn fetch_tasks_for_view(
         .fetch_all(pool)
         .await
         .context("Failed to fetch recent completions")?;
-        rows.iter().map(|r| r.get::<i64, _>("todo_id")).collect()
+        rows.iter().map(|r| r.get::<Id, _>("todo_id")).collect()
     } else {
         std::collections::HashSet::new()
     };

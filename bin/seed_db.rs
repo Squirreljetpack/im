@@ -44,7 +44,8 @@ fn main() -> Result<()> {
     rt.block_on(async {
         let pool = im::db::init_database(&PathBuf::from(&db_path))
             .await
-            .context("Failed to open DB")?;
+            .context("Failed to open DB")?
+            .pool;
 
         populate(&pool, &config).await?;
 
@@ -689,9 +690,9 @@ async fn seed_task(
     target_count: i32,
     optional: bool,
     end_time: Option<i64>,
-) -> Result<i64> {
+) -> Result<im::db::Id> {
     let task = TaskObject {
-        id: None,       // row id auto-assigned by the db layer
+        id: None,       // row id assigned by the db layer
         short_id: None, // short id allocated by the db layer
         name: name.to_string(),
         body: body.to_string(),

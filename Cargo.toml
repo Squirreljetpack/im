@@ -33,12 +33,16 @@ path = "bin/seed_db.rs"
 cli_boilerplate_automation = { version = "0.*", features = ["serde", "bring"] }
 matchmaker-lib = { version = "0.*", features = ["partial", "bracketed-paste"] }
 # Stack
-sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "migrate"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "migrate", "uuid"] }
 tokio = { version = "1", features = ["full"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "1.1"
+
+# Entity ids: UUIDv7 (time-sortable, globally unique across devices)
+uuid = { version = "1", features = ["v7", "serde"] }
 
 # Date/time
 humantime = "2"

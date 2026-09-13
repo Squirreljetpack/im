@@ -22,7 +22,7 @@ use sqlx::SqlitePool;
 use std::sync::{Arc, Mutex};
 
 use crate::config::Config;
-use crate::db::TaskRow;
+use crate::db::{Id, TaskRow};
 use crate::global::{GLOBAL_CONFIG, config, pool};
 use crate::task::{
     AcceptAction, accept_action, apply_accept_action, apply_completion_delta, availability_passed,
@@ -324,7 +324,7 @@ pub(crate) fn task_columns(view: &Arc<Mutex<TasksApp>>) -> [Column<TaskRow, ()>;
 
 /// The accept hook for the tasks view and the oneshot parent picker:
 /// reports the selected task's (stable id, short id).
-pub(crate) fn tasks_accept_hook(state: &mut MMState<'_, TaskRow, ()>) -> Vec<(i64, Option<i64>)> {
+pub(crate) fn tasks_accept_hook(state: &mut MMState<'_, TaskRow, ()>) -> Vec<(Id, Option<i64>)> {
     state
         .current_raw()
         .map(|task| (task.id, task.short_id))
@@ -345,7 +345,7 @@ pub(crate) struct TaskCtx {
 /// Payload staged by the Edit action and consumed by the editor interrupt
 /// handler while the TUI is suspended.
 pub(crate) enum EditPayload {
-    TaskBody { id: i64, body: String },
+    TaskBody { id: Id, body: String },
 }
 
 /// Dispatch a custom action on the render thread.

@@ -6,7 +6,7 @@ use std::io::Write;
 use crate::cli::CliOpts;
 use crate::config::{Config, TrackerKind};
 use crate::date::{self, Epoch};
-use crate::db::TaskRow;
+use crate::db::{Id, TaskRow};
 use crate::task::pending_sort_time;
 use crate::types::{TaskKind, TasksFilter, TodayHorizon, ViewVariant};
 
@@ -69,7 +69,7 @@ pub struct LinkedTask {
 #[derive(Debug, Clone)]
 
 pub struct TodayEntry {
-    pub id: Option<i64>,
+    pub id: Option<Id>,
     pub time: i64,
     /// Rendered time-cell text: "HH:MM", "Tu HH:MM" (two-letter weekday
     /// prefix for entries outside the anchored day), or empty for entries
@@ -79,7 +79,7 @@ pub struct TodayEntry {
     pub kind: EntryKind,
     pub label: String,
     pub body: String,
-    pub task_id: Option<i64>,
+    pub task_id: Option<Id>,
     pub priority: i32,
     /// Task entries only: the task row the badge rules are derived from
     /// at render time (window-scoped for recurring windows). `None` for
@@ -332,7 +332,7 @@ pub async fn fetch_today_entries(
 
         // Tracker entries and tasks attached to these moods (the mood
         // preview's `linked:` section).
-        let mood_ids: Vec<i64> = moods.iter().map(|f| f.id).collect();
+        let mood_ids: Vec<Id> = moods.iter().map(|f| f.id).collect();
         let linked_trackers = crate::db::fetch_mood_trackers(pool, &mood_ids).await?;
         let linked_tasks = crate::db::fetch_mood_tasks(pool, &mood_ids).await?;
 
@@ -440,42 +440,38 @@ pub async fn fetch_today_entries(
         > = std::collections::HashMap::new();
 
         for row in &trackers {
-            if let Some(tracker) = config.tracker.get(&row.tracker_type) {
-                if tracker.interval.is_some_and(|iv| iv.cumulative) {
-                    cumulative_rows_by_type
-                        .entry(row.tracker_type.clone())
-                        .or_default();
-                }
+            if let Some(tracker) = config.tracker.get(&row.tracker_type)
+                && tracker.interval.is_some_and(|iv| iv.cumulative)
+            {
+                cumulative_rows_by_type
+                    .entry(row.tracker_type.clone())
+                    .or_default();
             }
         }
 
         for (ttype, rows) in cumulative_rows_by_type.iter_mut() {
-            if let Some(tracker) = config.tracker.get(ttype) {
-                if let Some(iv) = tracker.interval {
-                    let min_slot_start = trackers
+            if let Some(tracker) = config.tracker.get(ttype)
+                && let Some(iv) = tracker.interval
+            {
+                let min_slot_start = trackers
+                    .iter()
+                    .filter(|t| &t.tracker_type == ttype)
+                    .filter_map(|t| {
+                        crate::date::interval_start_unix_secs(iv.anchor, iv.span, t.time)
+                    })
+                    .min()
+                    .unwrap_or(day_start_epoch);
+
+                if min_slot_start < day_start_epoch {
+                    *rows =
+                        crate::db::fetch_tracker_entries(pool, ttype, min_slot_start, horizon_end)
+                            .await?;
+                } else {
+                    *rows = trackers
                         .iter()
                         .filter(|t| &t.tracker_type == ttype)
-                        .filter_map(|t| {
-                            crate::date::interval_start_unix_secs(iv.anchor, iv.span, t.time)
-                        })
-                        .min()
-                        .unwrap_or(day_start_epoch);
-
-                    if min_slot_start < day_start_epoch {
-                        *rows = crate::db::fetch_tracker_entries(
-                            pool,
-                            ttype,
-                            min_slot_start,
-                            horizon_end,
-                        )
-                        .await?;
-                    } else {
-                        *rows = trackers
-                            .iter()
-                            .filter(|t| &t.tracker_type == ttype)
-                            .cloned()
-                            .collect();
-                    }
+                        .cloned()
+                        .collect();
                 }
             }
         }
@@ -829,6 +825,11 @@ pub async fn write_today_view<W: Write>(
 mod tests {
     use super::*;
 
+    /// A fixed id for fixture rows (fixtures only need distinct, stable ids).
+    fn test_id(n: u128) -> Id {
+        Id(uuid::Uuid::from_u128(n))
+    }
+
     #[test]
     fn test_today_time_label() {
         // 2024-03-15 is a Friday; 2024-03-16 a Saturday.
@@ -869,7 +870,7 @@ mod tests {
         // The row stores the packed DbSpan.
         let interval_secs = interval.map(|s| crate::date::span_to_db(&s));
         TaskRow {
-            id: 1,
+            id: test_id(1),
             short_id: Some(1),
             name: "t".to_string(),
             body: String::new(),

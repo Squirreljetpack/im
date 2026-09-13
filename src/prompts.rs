@@ -7,6 +7,8 @@
 use anyhow::Result;
 use std::path::Path;
 
+use crate::db::Id;
+
 /// Maximum allowed task priority. Anything higher is rejected at ingestion
 /// time (cliclack validation in `prompt_priority`). Lower bound is 1 — zero
 /// and negative priorities are not meaningful.
@@ -148,7 +150,7 @@ pub fn prompt_parent_id() -> Result<Option<crate::types::TaskRef>> {
 /// Prompt for a task's user-facing short id in the editor.
 pub async fn prompt_short_id(
     pool: &sqlx::SqlitePool,
-    current_id: i64,
+    current_id: Id,
     current_short: Option<i64>,
 ) -> Result<Option<i64>> {
     use cliclack::input;

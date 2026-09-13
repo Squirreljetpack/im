@@ -160,11 +160,16 @@ mod tests {
 
     use super::*;
 
+    /// A fixed id for fixture rows (fixtures only need distinct, stable ids).
+    fn test_id(n: u128) -> crate::db::Id {
+        crate::db::Id(uuid::Uuid::from_u128(n))
+    }
+
     #[test]
     fn test_task_rows() {
         // Threshold type for a oneshot with a target; Target row present.
         let task = TaskObject {
-            id: Some(1),
+            id: Some(test_id(1)),
             short_id: Some(1),
             name: "pushups".to_string(),
             body: String::new(),

@@ -44,7 +44,7 @@ pub async fn run_app() {
     // non-interactive runs just fail with the error below.
     let db_path = paths::database_path();
     let pool = match db::init_database(db_path).await {
-        Ok(pool) => pool,
+        Ok(opened) => opened,
         Err(source) => {
             let source = source.context(format!(
                 "Database at {} could not be opened (corrupt, or from an older version); \
@@ -56,14 +56,21 @@ pub async fn run_app() {
                 && crate::prompts::prompt_delete_invalid_db(db_path).__ebog()
             {
                 db::delete_database(db_path).__ebog();
-                let pool = db::init_database(db_path).await.__ebog();
+                let opened = db::init_database(db_path).await.__ebog();
                 cba::ibog!("Reinitialized db");
-                pool
+                opened
             } else {
                 Err(source).__ebog()
             }
         }
     };
+    if let Some(backup) = &pool.legacy_backup {
+        cba::ibog!(
+            "Recreated the database empty for the synced schema; the previous file was copied to {}",
+            backup.display()
+        );
+    }
+    let pool = pool.pool;
     crate::global::set_pool(pool.clone());
 
     _dbg!(

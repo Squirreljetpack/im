@@ -23,7 +23,7 @@ use matchmaker::{
 use std::sync::{Arc, Mutex};
 
 use crate::config::Config;
-use crate::db::TaskRow;
+use crate::db::{Id, TaskRow};
 use crate::global::GLOBAL_CONFIG;
 use crate::types::{ViewMode, ViewVariant};
 use crate::ui::action::ImAction;
@@ -54,7 +54,7 @@ impl OneshotPickerApp {
 
     /// Run the picker. Returns the accepted task's (stable id, short id),
     /// or `None` when the pick is cancelled (Esc / ctrl-c).
-    pub async fn run(self) -> Result<Option<(i64, Option<i64>)>> {
+    pub async fn run(self) -> Result<Option<(Id, Option<i64>)>> {
         let (mut render_cfg, mut binds, mut tui_cfg, overlay_cfg) = get_mm_cfg();
         // The date-shift actions are today-view only; prune them so they
         // neither fire nor appear in the picker's help.

@@ -13,6 +13,11 @@ pub use scheduling::*;
 mod tests {
     use super::*;
 
+    /// A fixed id for fixture rows (fixtures only need distinct, stable ids).
+    fn test_id(n: u128) -> crate::db::Id {
+        crate::db::Id(uuid::Uuid::from_u128(n))
+    }
+
     #[test]
     fn test_apply_delta_positive_appends() {
         assert_eq!(apply_delta_to_counts(&[], 3), vec![3]);
@@ -56,7 +61,7 @@ mod tests {
         let st = 1_000_000i64;
         let hour = 3600;
         let row = |interval: Option<jiff::Span>, dur: Option<i64>| crate::db::TaskRow {
-            id: 1,
+            id: test_id(1),
             short_id: Some(1),
             name: "t".to_string(),
             body: String::new(),

@@ -11,7 +11,7 @@ use im::{
 use sqlx::{Row, SqlitePool};
 
 /// Helper: create a oneshot task and return its id
-async fn create_oneshot_task(pool: &SqlitePool, name: &str) -> i64 {
+async fn create_oneshot_task(pool: &SqlitePool, name: &str) -> im::db::Id {
     let cmd = parse_from(vec!["!".to_string(), name.to_string()]).unwrap();
     let config = Config::default();
     execute_command(
@@ -25,7 +25,17 @@ async fn create_oneshot_task(pool: &SqlitePool, name: &str) -> i64 {
     .await
     .unwrap();
 
-    sqlx::query_scalar::<_, i64>("SELECT id FROM todos WHERE name = ?")
+    sqlx::query_scalar::<_, im::db::Id>("SELECT id FROM todos WHERE name = ?")
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Helper: the user-facing short id of the task with the given name — the
+/// number the `+<id>` CLI form takes.
+async fn short_id_of(pool: &SqlitePool, name: &str) -> i64 {
+    sqlx::query_scalar("SELECT short_id FROM todos WHERE name = ?")
         .bind(name)
         .fetch_one(pool)
         .await
@@ -35,8 +45,9 @@ async fn create_oneshot_task(pool: &SqlitePool, name: &str) -> i64 {
 /// Helper: insert a completion entry with an explicit time and count.
 /// Unlike `im::db::update_task` (which stamps `now()` and applies
 /// interval logic), this writes the row directly.
-async fn update_task(pool: &SqlitePool, todo_id: i64, time: i64, count: i32) {
-    sqlx::query("INSERT INTO todo_completions (todo_id, time, count) VALUES (?, ?, ?)")
+async fn update_task(pool: &SqlitePool, todo_id: im::db::Id, time: i64, count: i32) {
+    sqlx::query("INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, ?)")
+        .bind(im::db::Id::new())
         .bind(todo_id)
         .bind(time)
         .bind(count)
@@ -132,7 +143,7 @@ async fn test_create_mood_with_trackers() {
         .await
         .unwrap();
 
-    let mood_id: i64 = mood.get("id");
+    let mood_id: im::db::Id = mood.get("id");
     assert_eq!(mood.get::<String, _>("mood"), "good");
 
     // Verify tracker trackers were inserted and linked
@@ -144,10 +155,10 @@ async fn test_create_mood_with_trackers() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].get::<String, _>("type"), "sleep");
     assert_eq!(rows[0].get::<f64, _>("score"), 8.0);
-    assert_eq!(rows[0].get::<Option<i64>, _>("mood"), Some(mood_id));
+    assert_eq!(rows[0].get::<Option<im::db::Id>, _>("mood"), Some(mood_id));
     assert_eq!(rows[1].get::<String, _>("type"), "water");
     assert_eq!(rows[1].get::<f64, _>("score"), 5.0);
-    assert_eq!(rows[1].get::<Option<i64>, _>("mood"), Some(mood_id));
+    assert_eq!(rows[1].get::<Option<im::db::Id>, _>("mood"), Some(mood_id));
 }
 
 #[tokio::test]
@@ -193,7 +204,7 @@ async fn test_create_tracker_only() {
 
     assert_eq!(tracker.get::<String, _>("type"), "sleep");
     assert_eq!(tracker.get::<f64, _>("score"), 10.0);
-    assert_eq!(tracker.get::<Option<i64>, _>("mood"), None);
+    assert_eq!(tracker.get::<Option<im::db::Id>, _>("mood"), None);
 }
 
 #[tokio::test]
@@ -448,7 +459,10 @@ async fn test_create_oneshot_task_with_parent() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(child.get::<Option<i64>, _>("parent"), Some(parent_id));
+    assert_eq!(
+        child.get::<Option<im::db::Id>, _>("parent"),
+        Some(parent_id)
+    );
 
     // Without the flag the task stays root-level.
     let cmd = parse_from(vec!["!".to_string(), "root task".to_string()]).unwrap();
@@ -467,7 +481,7 @@ async fn test_create_oneshot_task_with_parent() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(root.get::<Option<i64>, _>("parent"), None);
+    assert_eq!(root.get::<Option<im::db::Id>, _>("parent"), None);
 }
 
 #[tokio::test]
@@ -909,9 +923,9 @@ async fn test_update_oneshot_task_simple() {
 
     let task_id = create_oneshot_task(&pool, "test task").await;
 
-    // Mark as done: - <short id>. On a fresh pool the row id equals the
-    // short id, so `create_oneshot_task`'s return value works directly.
-    let cmd = parse_from(vec![format!("+{task_id}"), "1".to_string()]).unwrap();
+    // Mark as done: +<short id>.
+    let short_id = short_id_of(&pool, "test task").await;
+    let cmd = parse_from(vec![format!("+{short_id}"), "1".to_string()]).unwrap();
     execute_command(
         cmd,
         &pool,
@@ -956,7 +970,8 @@ async fn test_update_oneshot_task_with_plus_syntax() {
     let task_id = create_oneshot_task(&pool, "clean room").await;
 
     // Direct update: +<short_id> 2
-    let cmd = parse_from(vec![format!("+{task_id}"), "2".to_string()]).unwrap();
+    let short_id = short_id_of(&pool, "clean room").await;
+    let cmd = parse_from(vec![format!("+{short_id}"), "2".to_string()]).unwrap();
     execute_command(
         cmd,
         &pool,
@@ -1234,7 +1249,7 @@ async fn test_create_mood_tracker_in_final_position() {
     .await
     .unwrap();
 
-    let mood_id: i64 = sqlx::query_scalar("SELECT id FROM mood WHERE mood = 'good'")
+    let mood_id: im::db::Id = sqlx::query_scalar("SELECT id FROM mood WHERE mood = 'good'")
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -1246,10 +1261,10 @@ async fn test_create_mood_tracker_in_final_position() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].get::<String, _>("type"), "sleep");
     assert_eq!(rows[0].get::<f64, _>("score"), 8.0);
-    assert_eq!(rows[0].get::<Option<i64>, _>("mood"), Some(mood_id));
+    assert_eq!(rows[0].get::<Option<im::db::Id>, _>("mood"), Some(mood_id));
     assert_eq!(rows[1].get::<String, _>("type"), "water");
     assert_eq!(rows[1].get::<f64, _>("score"), 5.0);
-    assert_eq!(rows[1].get::<Option<i64>, _>("mood"), Some(mood_id));
+    assert_eq!(rows[1].get::<Option<im::db::Id>, _>("mood"), Some(mood_id));
 }
 
 #[tokio::test]
@@ -1728,7 +1743,8 @@ async fn test_today_view_with_date() {
 
     // Seed a mood on a fixed past date directly.
     let target = im::date::parse_datetime("2024-03-15 09:00", im::date::DATE_DIALECT).unwrap();
-    sqlx::query("INSERT INTO mood (mood, body, time) VALUES ('ancient', '', ?)")
+    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (?, 'ancient', '', ?)")
+        .bind(im::db::Id::new())
         .bind(target)
         .execute(&pool)
         .await
@@ -1781,26 +1797,34 @@ async fn test_today_view_horizon_includes_moods_and_trackers() {
 
     // A mood + tracker entry on the anchored day, and one of each on
     // the next day (inside the +tomorrow horizon, outside the day one).
-    sqlx::query("INSERT INTO mood (mood, body, time) VALUES ('today mood', '', ?)")
+    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (?, 'today mood', '', ?)")
+        .bind(im::db::Id::new())
         .bind(anchored_day + 9 * 3600)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO mood (mood, body, time) VALUES ('tomorrow mood', '', ?)")
+    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (?, 'tomorrow mood', '', ?)")
+        .bind(im::db::Id::new())
         .bind(tomorrow + 9 * 3600)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO tracker (type, score, time, mood) VALUES ('sleep', 7, ?, NULL)")
-        .bind(anchored_day + 10 * 3600)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO tracker (type, score, time, mood) VALUES ('sleep', 8, ?, NULL)")
-        .bind(tomorrow + 10 * 3600)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO tracker (id, type, score, time, mood) VALUES (?, 'sleep', 7, ?, NULL)",
+    )
+    .bind(im::db::Id::new())
+    .bind(anchored_day + 10 * 3600)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tracker (id, type, score, time, mood) VALUES (?, 'sleep', 8, ?, NULL)",
+    )
+    .bind(im::db::Id::new())
+    .bind(tomorrow + 10 * 3600)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     macro_rules! labels {
         ($horizon:expr) => {{
@@ -1919,7 +1943,7 @@ async fn test_today_view_backfills_mood_score() {
     )
     .await
     .unwrap();
-    let glum_id: i64 = sqlx::query_scalar("SELECT id FROM mood WHERE mood = 'glum'")
+    let glum_id: im::db::Id = sqlx::query_scalar("SELECT id FROM mood WHERE mood = 'glum'")
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -1930,7 +1954,8 @@ async fn test_today_view_backfills_mood_score() {
     // A directly-inserted row (no score) exercises the no-backfill path:
     // rendering must NOT write the score anymore (`mood_color_cached` is
     // sync and backfill-free; `:db backfill` persists it).
-    sqlx::query("INSERT INTO mood (mood, body, time) VALUES ('dull', '', ?)")
+    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (?, 'dull', '', ?)")
+        .bind(im::db::Id::new())
         .bind(im::date::now())
         .execute(&pool)
         .await
@@ -2043,8 +2068,9 @@ async fn test_view_done_tasks() {
     let config = Config::default();
 
     // Create a oneshot task, then complete it
-    let task_id = create_oneshot_task(&pool, "finished task").await;
-    let update_cmd = parse_from(vec![format!("+{task_id}"), "1".to_string()]).unwrap();
+    let _ = create_oneshot_task(&pool, "finished task").await;
+    let short_id = short_id_of(&pool, "finished task").await;
+    let update_cmd = parse_from(vec![format!("+{short_id}"), "1".to_string()]).unwrap();
     execute_command(
         update_cmd,
         &pool,
@@ -2149,11 +2175,11 @@ async fn insert_recurring_task(
     available_duration: Option<i64>,
     target_count: i32,
     end_time: Option<i64>,
-) -> i64 {
+) -> im::db::Id {
     sqlx::query(
-        "INSERT INTO todos (name, body, priority, interval_secs, available_duration_secs, target_count, optional, start_time, end_time) \
-         VALUES (?, '', 5, ?, ?, ?, 0, ?, ?)",
-    )
+        "INSERT INTO todos (id, name, body, priority, interval_secs, available_duration_secs, target_count, optional, start_time, end_time) \
+         VALUES (?, ?, '', 5, ?, ?, ?, 0, ?, ?)",
+    ).bind(im::db::Id::new())
     .bind(name)
     .bind(pack_interval(interval))
     .bind(available_duration)
@@ -2163,7 +2189,7 @@ async fn insert_recurring_task(
     .execute(pool)
     .await
     .unwrap();
-    sqlx::query_scalar::<_, i64>("SELECT id FROM todos WHERE name = ?")
+    sqlx::query_scalar::<_, im::db::Id>("SELECT id FROM todos WHERE name = ?")
         .bind(name)
         .fetch_one(pool)
         .await
@@ -2201,9 +2227,9 @@ async fn test_task_mood_links() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO todos (name, body, priority, start_time, interval_secs, target_count, optional, short_id) \
-         VALUES ('recur link', '', 5, ?, ?, 0, 0, 2)",
-    )
+        "INSERT INTO todos (id, name, body, priority, start_time, interval_secs, target_count, optional, short_id) \
+         VALUES (?, 'recur link', '', 5, ?, ?, 0, 0, 2)",
+    ).bind(im::db::Id::new())
     .bind(im::date::now())
     .bind(im::date::span_to_db(&jiff::Span::new().days(1)))
     .execute(&pool)
@@ -2240,22 +2266,31 @@ async fn test_task_mood_links() {
     .await
     .unwrap();
 
-    let felt_id: i64 = sqlx::query_scalar("SELECT id FROM mood WHERE mood = 'felt good'")
+    let felt_id: im::db::Id = sqlx::query_scalar("SELECT id FROM mood WHERE mood = 'felt good'")
         .fetch_one(&pool)
         .await
         .unwrap();
-    let tired_id: i64 = sqlx::query_scalar("SELECT id FROM mood WHERE mood = 'tired'")
+    let tired_id: im::db::Id = sqlx::query_scalar("SELECT id FROM mood WHERE mood = 'tired'")
         .fetch_one(&pool)
         .await
         .unwrap();
-    let links: Vec<(i64, i64)> =
+    let links: Vec<(im::db::Id, im::db::Id)> =
         sqlx::query_as("SELECT todo_id, id FROM mood WHERE todo_id IS NOT NULL")
             .fetch_all(&pool)
             .await
             .unwrap();
+    let oneshot_id: im::db::Id = sqlx::query_scalar("SELECT id FROM todos WHERE name = 'link me'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let recurring_id: im::db::Id =
+        sqlx::query_scalar("SELECT id FROM todos WHERE name = 'recur link'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(links.len(), 2, "both links recorded");
-    assert!(links.contains(&(1, felt_id)));
-    assert!(links.contains(&(2, tired_id)));
+    assert!(links.contains(&(oneshot_id, felt_id)));
+    assert!(links.contains(&(recurring_id, tired_id)));
 
     // A link with an unknown short id errors and records nothing.
     let cmd = parse_from(vec!["ok".to_string(), "+99".to_string()]).unwrap();
@@ -2281,7 +2316,7 @@ async fn test_task_mood_links() {
     assert!(parse_from(vec!["-sleep".to_string(), "+1".to_string()]).is_err());
 
     // The task preview data source lists the linked moods.
-    let moods = im::db::fetch_linked_moods(&pool, 1).await.unwrap();
+    let moods = im::db::fetch_linked_moods(&pool, oneshot_id).await.unwrap();
     assert_eq!(moods.len(), 1);
     assert_eq!(moods[0].mood, "felt good");
 }
@@ -2388,7 +2423,7 @@ async fn test_null_tracker_semantics() {
     .await
     .unwrap();
 
-    let prouds_rows: Vec<(i64, String, i64)> = sqlx::query_as(
+    let prouds_rows: Vec<(im::db::Id, String, i64)> = sqlx::query_as(
         "SELECT id, CAST(score AS TEXT), time FROM tracker WHERE type = 'prouds' ORDER BY id",
     )
     .fetch_all(&pool)
@@ -2860,8 +2895,9 @@ async fn test_persist_pending_seconds() {
     assert_eq!(config.tasks_view.persist_pending_seconds, 5 * 60);
 
     // Create + complete a oneshot task.
-    let task_id = create_oneshot_task(&pool, "just finished").await;
-    let update_cmd = parse_from(vec![format!("+{task_id}"), "1".to_string()]).unwrap();
+    let _ = create_oneshot_task(&pool, "just finished").await;
+    let short_id = short_id_of(&pool, "just finished").await;
+    let update_cmd = parse_from(vec![format!("+{short_id}"), "1".to_string()]).unwrap();
     execute_command(
         update_cmd,
         &pool,
@@ -2897,8 +2933,9 @@ async fn test_persist_pending_variant_scoping() {
     let pool = test_pool().await.unwrap();
     let config = Config::default();
 
-    let oneshot = create_oneshot_task(&pool, "just finished oneshot").await;
-    let cmd = parse_from(vec![format!("+{oneshot}"), "1".to_string()]).unwrap();
+    let _ = create_oneshot_task(&pool, "just finished oneshot").await;
+    let short_id = short_id_of(&pool, "just finished oneshot").await;
+    let cmd = parse_from(vec![format!("+{short_id}"), "1".to_string()]).unwrap();
     execute_command(
         cmd,
         &pool,
@@ -3145,11 +3182,11 @@ async fn insert_scheduled(
     start_time: i64,
     duration: i64,
     end_time: Option<i64>,
-) -> i64 {
+) -> im::db::Id {
     sqlx::query(
-        "INSERT INTO todos (name, body, priority, interval_secs, available_duration_secs, target_count, optional, start_time, end_time) \
-         VALUES (?, '', 5, NULL, ?, 0, 0, ?, ?)",
-    )
+        "INSERT INTO todos (id, name, body, priority, interval_secs, available_duration_secs, target_count, optional, start_time, end_time) \
+         VALUES (?, ?, '', 5, NULL, ?, 0, 0, ?, ?)",
+    ).bind(im::db::Id::new())
     .bind(name)
     .bind(duration)
     .bind(start_time)
@@ -3157,7 +3194,7 @@ async fn insert_scheduled(
     .execute(pool)
     .await
     .unwrap();
-    sqlx::query_scalar::<_, i64>("SELECT id FROM todos WHERE name = ?")
+    sqlx::query_scalar::<_, im::db::Id>("SELECT id FROM todos WHERE name = ?")
         .bind(name)
         .fetch_one(pool)
         .await
@@ -3166,18 +3203,23 @@ async fn insert_scheduled(
 
 /// Insert a plain oneshot task (no interval, no availability window).
 /// `target_count` 1 + one completion entry marks it done; 0 leaves it open.
-async fn insert_oneshot(pool: &SqlitePool, name: &str, start_time: i64, target_count: i32) -> i64 {
+async fn insert_oneshot(
+    pool: &SqlitePool,
+    name: &str,
+    start_time: i64,
+    target_count: i32,
+) -> im::db::Id {
     sqlx::query(
-        "INSERT INTO todos (name, body, priority, interval_secs, available_duration_secs, target_count, optional, start_time, end_time) \
-         VALUES (?, '', 5, NULL, NULL, ?, 0, ?, NULL)",
-    )
+        "INSERT INTO todos (id, name, body, priority, interval_secs, available_duration_secs, target_count, optional, start_time, end_time) \
+         VALUES (?, ?, '', 5, NULL, NULL, ?, 0, ?, NULL)",
+    ).bind(im::db::Id::new())
     .bind(name)
     .bind(target_count)
     .bind(start_time)
     .execute(pool)
     .await
     .unwrap();
-    sqlx::query_scalar::<_, i64>("SELECT id FROM todos WHERE name = ?")
+    sqlx::query_scalar::<_, im::db::Id>("SELECT id FROM todos WHERE name = ?")
         .bind(name)
         .fetch_one(pool)
         .await
@@ -3349,8 +3391,8 @@ async fn test_tracker_recurring_dots() {
     // for the task itself, then mark completion via update)
     let name = "exercise";
     sqlx::query(
-        "INSERT INTO todos (name, body, priority, interval_secs, available_duration_secs, target_count, optional, start_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-    )
+        "INSERT INTO todos (id, name, body, priority, interval_secs, available_duration_secs, target_count, optional, start_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).bind(im::db::Id::new())
     .bind(name)
     .bind("")
     .bind(5)
@@ -3365,7 +3407,7 @@ async fn test_tracker_recurring_dots() {
 
     // Mark it complete via the sql API (the CLI `- @name` form was removed).
     let config = Config::default();
-    let task_id: i64 = sqlx::query_scalar("SELECT id FROM todos WHERE name = ?")
+    let task_id: im::db::Id = sqlx::query_scalar("SELECT id FROM todos WHERE name = ?")
         .bind(name)
         .fetch_one(&pool)
         .await
@@ -3409,8 +3451,8 @@ async fn test_tracker_recurring_year_uses_middle_dot() {
     // A recurring task with no completions: every interval slot is 0%.
     let name = "brush teeth";
     sqlx::query(
-        "INSERT INTO todos (name, body, priority, interval_secs, available_duration_secs, target_count, optional, start_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-    )
+        "INSERT INTO todos (id, name, body, priority, interval_secs, available_duration_secs, target_count, optional, start_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).bind(im::db::Id::new())
     .bind(name)
     .bind("")
     .bind(5)
@@ -3479,8 +3521,8 @@ async fn test_recurring_negative_delta_does_not_touch_previous_intervals() {
     let start_time = now - 3 * interval - 500;
     let name = "water plants";
     sqlx::query(
-        "INSERT INTO todos (name, body, priority, interval_secs, available_duration_secs, target_count, optional, start_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-    )
+        "INSERT INTO todos (id, name, body, priority, interval_secs, available_duration_secs, target_count, optional, start_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).bind(im::db::Id::new())
     .bind(name)
     .bind("")
     .bind(5)
@@ -3493,7 +3535,7 @@ async fn test_recurring_negative_delta_does_not_touch_previous_intervals() {
     .await
     .unwrap();
 
-    let task_id: i64 = sqlx::query_scalar("SELECT id FROM todos WHERE name = ?")
+    let task_id: im::db::Id = sqlx::query_scalar("SELECT id FROM todos WHERE name = ?")
         .bind(name)
         .fetch_one(&pool)
         .await
@@ -3554,8 +3596,8 @@ async fn test_recurring_previous_interval_completions_still_shown() {
     let start_time = now - 2 * interval - 500;
     let name = "brush teeth";
     sqlx::query(
-        "INSERT INTO todos (name, body, priority, interval_secs, available_duration_secs, target_count, optional, start_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-    )
+        "INSERT INTO todos (id, name, body, priority, interval_secs, available_duration_secs, target_count, optional, start_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).bind(im::db::Id::new())
     .bind(name)
     .bind("")
     .bind(5)
@@ -3568,7 +3610,7 @@ async fn test_recurring_previous_interval_completions_still_shown() {
     .await
     .unwrap();
 
-    let task_id: i64 = sqlx::query_scalar("SELECT id FROM todos WHERE name = ?")
+    let task_id: im::db::Id = sqlx::query_scalar("SELECT id FROM todos WHERE name = ?")
         .bind(name)
         .fetch_one(&pool)
         .await
@@ -4025,9 +4067,10 @@ async fn test_today_view_tasks_filters() {
     //  - dated future: deadline tomorrow
     let insert = |name: &str, start: i64, end: Option<i64>| {
         sqlx::query(
-            "INSERT INTO todos (name, body, priority, start_time, end_time) \
-             VALUES (?, '', 5, ?, ?)",
+            "INSERT INTO todos (id, name, body, priority, start_time, end_time) \
+             VALUES (?, ?, '', 5, ?, ?)",
         )
+        .bind(im::db::Id::new())
         .bind(name)
         .bind(start)
         .bind(end)
@@ -4099,7 +4142,8 @@ async fn test_today_view_variant_bound_filter_cli() {
     let config = Config::default();
 
     let name = "stale undated chore";
-    sqlx::query("INSERT INTO todos (name, body, priority, start_time) VALUES (?, '', 5, ?)")
+    sqlx::query("INSERT INTO todos (id, name, body, priority, start_time) VALUES (?, ?, '', 5, ?)")
+        .bind(im::db::Id::new())
         .bind(name)
         .bind(im::date::now() - 2 * 86400)
         .execute(&pool)
@@ -4581,8 +4625,9 @@ async fn test_short_id_allocator_smallest_free_positive() {
         "first three get short ids 1..3: {ids:?}"
     );
 
-    // Delete the middle row directly so the allocator must recycle the gap.
-    sqlx::query("DELETE FROM todos WHERE id = 2")
+    // Delete the row holding short id 2 directly so the allocator must
+    // recycle the gap.
+    sqlx::query("DELETE FROM todos WHERE short_id = 2")
         .execute(&pool)
         .await
         .unwrap();
@@ -4599,7 +4644,7 @@ async fn test_short_id_allocator_smallest_free_positive() {
     .unwrap();
     let mut ids = fetch_all_short_ids(&pool).await;
     ids.sort();
-    // After deleting id=2 (short id 2) the remaining short ids are {1, 3};
+    // After deleting short id 2 the remaining short ids are {1, 3};
     // the smallest free is 2, so task d gets short id 2 (the _set_ becomes
     // {1, 2, 3}, not {1, 2, 4}).
     assert_eq!(
@@ -4630,12 +4675,12 @@ async fn test_completions_clear_short_ids_active_keeps_its() {
     // Complete third first, then first. Both lose their short id; "second"
     // stays active and keeps short id 2.
     for s in ["third", "first"] {
-        let id: i64 = sqlx::query_scalar("SELECT id FROM todos WHERE name = ?")
+        let short_id: i64 = sqlx::query_scalar("SELECT short_id FROM todos WHERE name = ?")
             .bind(s)
             .fetch_one(&pool)
             .await
             .unwrap();
-        let cmd = parse_from(vec![format!("+{id}"), "1".to_string()]).unwrap();
+        let cmd = parse_from(vec![format!("+{short_id}"), "1".to_string()]).unwrap();
         execute_command(
             cmd,
             &pool,
@@ -4772,7 +4817,7 @@ async fn test_reset_reassigns_short_id_to_completed_task() {
     assert!(short_id.is_none(), "after complete: {short_id:?}");
 
     // Remove the completion rows directly (what the TUI reset does).
-    let row_id: i64 = sqlx::query_scalar("SELECT id FROM todos WHERE name = 'restore me'")
+    let row_id: im::db::Id = sqlx::query_scalar("SELECT id FROM todos WHERE name = 'restore me'")
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -4813,12 +4858,14 @@ async fn test_db_backfill_persists_scores_and_embeddings() {
     .await
     .unwrap();
     let now = im::date::now();
-    sqlx::query("INSERT INTO mood (mood, body, time) VALUES ('dull', '', ?)")
+    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (?, 'dull', '', ?)")
+        .bind(im::db::Id::new())
         .bind(now)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO mood (mood, body, time) VALUES ('', 'journal only', ?)")
+    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (?, '', 'journal only', ?)")
+        .bind(im::db::Id::new())
         .bind(now)
         .execute(&pool)
         .await
@@ -4854,7 +4901,7 @@ async fn test_db_backfill_persists_scores_and_embeddings() {
 
 /// Helper: count completions for a given task id (using its post-reassign id).
 async fn completion_count(pool: &SqlitePool, name: &str) -> i64 {
-    let id: i64 = sqlx::query_scalar("SELECT id FROM todos WHERE name = ?")
+    let id: im::db::Id = sqlx::query_scalar("SELECT id FROM todos WHERE name = ?")
         .bind(name)
         .fetch_one(pool)
         .await
@@ -4949,9 +4996,9 @@ async fn test_prune_deletes_expired_recurring_task() {
 
     let past = im::date::now() - 3600;
     sqlx::query(
-        "INSERT INTO todos (name, body, priority, start_time, interval_secs, target_count, optional, end_time) \
-         VALUES ('expired', '', 5, ?, ?, 1, 0, ?)",
-    )
+        "INSERT INTO todos (id, name, body, priority, start_time, interval_secs, target_count, optional, end_time) \
+         VALUES (?, 'expired', '', 5, ?, ?, 1, 0, ?)",
+    ).bind(im::db::Id::new())
     .bind(past - 86_400)
     .bind(pack_interval(86_400))
     .bind(past)
@@ -4959,18 +5006,18 @@ async fn test_prune_deletes_expired_recurring_task() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO todos (name, body, priority, start_time, interval_secs, target_count, optional, end_time) \
-         VALUES ('still going', '', 5, ?, ?, 1, 0, ?)",
-    )
+        "INSERT INTO todos (id, name, body, priority, start_time, interval_secs, target_count, optional, end_time) \
+         VALUES (?, 'still going', '', 5, ?, ?, 1, 0, ?)",
+    ).bind(im::db::Id::new())
     .bind(past)
     .bind(past + 86_400)
     .execute(&pool)
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO todos (name, body, priority, start_time, interval_secs, target_count, optional, end_time) \
-         VALUES ('forever', '', 5, ?, ?, 1, 0, NULL)",
-    )
+        "INSERT INTO todos (id, name, body, priority, start_time, interval_secs, target_count, optional, end_time) \
+         VALUES (?, 'forever', '', 5, ?, ?, 1, 0, NULL)",
+    ).bind(im::db::Id::new())
     .bind(pack_interval(86_400))
     .execute(&pool)
     .await
@@ -5191,7 +5238,7 @@ async fn test_delete_mood_removes_linked_tracker_rows() {
     .await
     .unwrap();
 
-    let mood_id: i64 = sqlx::query_scalar("SELECT id FROM mood WHERE mood = 'ok'")
+    let mood_id: im::db::Id = sqlx::query_scalar("SELECT id FROM mood WHERE mood = 'ok'")
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -5276,7 +5323,7 @@ async fn test_delete_tracker_row() {
     .await
     .unwrap();
 
-    let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM tracker ORDER BY id")
+    let ids: Vec<im::db::Id> = sqlx::query_scalar("SELECT id FROM tracker ORDER BY id")
         .fetch_all(&pool)
         .await
         .unwrap();
@@ -5298,7 +5345,7 @@ async fn test_delete_tracker_row() {
 }
 
 #[tokio::test]
-async fn test_delete_mood_without_cascade_fails_with_fk_enforced() {
+async fn test_delete_mood_nulls_linked_tracker_mood() {
     // The tracker.mood FK has no ON DELETE CASCADE, so deleting a mood
     // row while linked tracker rows still exist must fail under PRAGMA
     // foreign_keys = ON. This is why the today delete path deletes tracker
@@ -5333,7 +5380,7 @@ async fn test_delete_mood_without_cascade_fails_with_fk_enforced() {
     )
     .await
     .unwrap();
-    let mood_id: i64 = sqlx::query_scalar("SELECT id FROM mood WHERE mood = 'ok'")
+    let mood_id: im::db::Id = sqlx::query_scalar("SELECT id FROM mood WHERE mood = 'ok'")
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -5343,9 +5390,20 @@ async fn test_delete_mood_without_cascade_fails_with_fk_enforced() {
         .execute(&pool)
         .await;
     assert!(
-        r.is_err(),
-        "FK must block deleting a mood with linked trackers"
+        r.is_ok(),
+        "tracker.mood is ON DELETE SET NULL, so the mood row deletes"
     );
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracker WHERE type = 'sleep'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(remaining, 1, "the linked tracker row survives");
+    let mood: Option<im::db::Id> =
+        sqlx::query_scalar("SELECT mood FROM tracker WHERE type = 'sleep'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(mood, None, "the tracker's mood link is cleared");
 }
 
 #[tokio::test]
@@ -5371,7 +5429,7 @@ async fn test_edit_todo_body_updates_in_place() {
     )
     .await
     .unwrap();
-    let task_id: i64 = sqlx::query_scalar("SELECT id FROM todos WHERE name = 'ship it'")
+    let task_id: im::db::Id = sqlx::query_scalar("SELECT id FROM todos WHERE name = 'ship it'")
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -5426,7 +5484,7 @@ async fn test_edit_tracker_text_payload() {
     )
     .await
     .unwrap();
-    let tracker_id: i64 = sqlx::query_scalar("SELECT id FROM tracker WHERE type = 'note'")
+    let tracker_id: im::db::Id = sqlx::query_scalar("SELECT id FROM tracker WHERE type = 'note'")
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -5473,7 +5531,7 @@ async fn test_edit_tracker_float_payload() {
     )
     .await
     .unwrap();
-    let tracker_id: i64 = sqlx::query_scalar("SELECT id FROM tracker WHERE type = 'sleep'")
+    let tracker_id: im::db::Id = sqlx::query_scalar("SELECT id FROM tracker WHERE type = 'sleep'")
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -5515,7 +5573,7 @@ async fn test_edit_mood_body() {
     )
     .await
     .unwrap();
-    let mood_id: i64 = sqlx::query_scalar("SELECT id FROM mood WHERE mood = 'calm'")
+    let mood_id: im::db::Id = sqlx::query_scalar("SELECT id FROM mood WHERE mood = 'calm'")
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -5568,8 +5626,8 @@ async fn test_reset_progress_recurring_only_current_interval() {
     let start_time = now - 3 * interval - 500;
     let name = "daily reset";
     sqlx::query(
-        "INSERT INTO todos (name, body, priority, interval_secs, available_duration_secs, target_count, optional, start_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-    )
+        "INSERT INTO todos (id, name, body, priority, interval_secs, available_duration_secs, target_count, optional, start_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).bind(im::db::Id::new())
     .bind(name)
     .bind("")
     .bind(5)
@@ -5581,7 +5639,7 @@ async fn test_reset_progress_recurring_only_current_interval() {
     .execute(&pool)
     .await
     .unwrap();
-    let task_id: i64 = sqlx::query_scalar("SELECT id FROM todos WHERE name = ?")
+    let task_id: im::db::Id = sqlx::query_scalar("SELECT id FROM todos WHERE name = ?")
         .bind(name)
         .fetch_one(&pool)
         .await
@@ -5666,7 +5724,7 @@ async fn test_fetch_today_entries_carries_tracker_ids() {
     assert!(tracker.id.is_some(), "tracker entry must carry its row id");
 
     // And the id must match the DB row.
-    let db_id: i64 = sqlx::query_scalar("SELECT id FROM tracker WHERE type = 'sleep'")
+    let db_id: im::db::Id = sqlx::query_scalar("SELECT id FROM tracker WHERE type = 'sleep'")
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -5698,11 +5756,13 @@ async fn test_fetch_today_entries_completed_task_has_check_badge() {
     )
     .await
     .unwrap();
-    let task_id: i64 = sqlx::query_scalar("SELECT id FROM todos WHERE name = 'completed task'")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    let update_cmd = parse_from(vec![format!("+{task_id}"), "1".to_string()]).unwrap();
+    let task_id: im::db::Id =
+        sqlx::query_scalar("SELECT id FROM todos WHERE name = 'completed task'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let short_id = short_id_of(&pool, "completed task").await;
+    let update_cmd = parse_from(vec![format!("+{short_id}"), "1".to_string()]).unwrap();
     execute_command(
         update_cmd,
         &pool,
@@ -5992,22 +6052,26 @@ async fn test_db_doctor_noninteractive_reports_only() {
             colors: Err("default".to_string()),
         },
     );
-    sqlx::query("INSERT INTO tracker (type, score, time) VALUES ('sleep', ?, 100)")
+    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'sleep', ?, 100)")
+        .bind(im::db::Id::new())
         .bind(3.5f64)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO tracker (type, score, time) VALUES ('sleep', ?, 100)")
+    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'sleep', ?, 100)")
+        .bind(im::db::Id::new())
         .bind(3i64)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO tracker (type, score, time) VALUES ('sleep', ?, 100)")
+    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'sleep', ?, 100)")
+        .bind(im::db::Id::new())
         .bind("deep")
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO tracker (type, score, time) VALUES ('old', ?, 100)")
+    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'old', ?, 100)")
+        .bind(im::db::Id::new())
         .bind(1i64)
         .execute(&pool)
         .await
@@ -6066,42 +6130,50 @@ async fn test_db_doctor_buckets_and_prune() {
     // sleep: 2 zero integers (keep) + 1 nonzero integer (stale count-mode
     // leftover) + 1 text (mismatch); water: 2 integers (keep) + 1 real
     // (mismatch); "old": orphan.
-    sqlx::query("INSERT INTO tracker (type, score, time) VALUES ('sleep', ?, 100)")
+    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'sleep', ?, 100)")
+        .bind(im::db::Id::new())
         .bind(0i64)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO tracker (type, score, time) VALUES ('sleep', ?, 100)")
+    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'sleep', ?, 100)")
+        .bind(im::db::Id::new())
         .bind(0i64)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO tracker (type, score, time) VALUES ('sleep', ?, 100)")
+    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'sleep', ?, 100)")
+        .bind(im::db::Id::new())
         .bind(2i64)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO tracker (type, score, time) VALUES ('sleep', ?, 100)")
+    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'sleep', ?, 100)")
+        .bind(im::db::Id::new())
         .bind("deep")
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO tracker (type, score, time) VALUES ('water', ?, 100)")
+    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'water', ?, 100)")
+        .bind(im::db::Id::new())
         .bind(5i64)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO tracker (type, score, time) VALUES ('water', ?, 100)")
+    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'water', ?, 100)")
+        .bind(im::db::Id::new())
         .bind(4i64)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO tracker (type, score, time) VALUES ('water', ?, 100)")
+    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'water', ?, 100)")
+        .bind(im::db::Id::new())
         .bind(3.5f64)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO tracker (type, score, time) VALUES ('old', ?, 100)")
+    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'old', ?, 100)")
+        .bind(im::db::Id::new())
         .bind(1i64)
         .execute(&pool)
         .await
@@ -6174,7 +6246,8 @@ async fn test_today_view_journal_shows_oneshot_completions_with_progress_and_pre
     let t = insert_oneshot(&pool, "water plants", today_start - 2 * 86400, 5).await;
 
     // 1 completion yesterday (count 1): cumulative = 1.
-    sqlx::query("INSERT INTO todo_completions (todo_id, time, count) VALUES (?, ?, 1)")
+    sqlx::query("INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, 1)")
+        .bind(im::db::Id::new())
         .bind(t)
         .bind(yesterday + 15 * 3600)
         .execute(&pool)
@@ -6186,21 +6259,24 @@ async fn test_today_view_journal_shows_oneshot_completions_with_progress_and_pre
     let t2 = today_start + 12 * 3600;
     let t3 = today_start + 15 * 3600;
 
-    sqlx::query("INSERT INTO todo_completions (todo_id, time, count) VALUES (?, ?, 1)")
+    sqlx::query("INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, 1)")
+        .bind(im::db::Id::new())
         .bind(t)
         .bind(t1)
         .execute(&pool)
         .await
         .unwrap();
 
-    sqlx::query("INSERT INTO todo_completions (todo_id, time, count) VALUES (?, ?, 1)")
+    sqlx::query("INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, 1)")
+        .bind(im::db::Id::new())
         .bind(t)
         .bind(t2)
         .execute(&pool)
         .await
         .unwrap();
 
-    sqlx::query("INSERT INTO todo_completions (todo_id, time, count) VALUES (?, ?, 1)")
+    sqlx::query("INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, 1)")
+        .bind(im::db::Id::new())
         .bind(t)
         .bind(t3)
         .execute(&pool)
@@ -6308,9 +6384,9 @@ async fn test_today_view_tasks_variant_omits_completed_today() {
 
     // Open overdue task.
     sqlx::query(
-        "INSERT INTO todos (name, body, priority, interval_secs, available_duration_secs, target_count, optional, start_time, end_time) \
-         VALUES ('overdue chore', '', 5, NULL, NULL, 1, 0, ?, ?)",
-    )
+        "INSERT INTO todos (id, name, body, priority, interval_secs, available_duration_secs, target_count, optional, start_time, end_time) \
+         VALUES (?, 'overdue chore', '', 5, NULL, NULL, 1, 0, ?, ?)",
+    ).bind(im::db::Id::new())
     .bind(today_start - 7200)
     .bind(today_start - 3600)
     .execute(&pool)
@@ -6366,37 +6442,42 @@ async fn test_mood_links_at_most_one_task() {
     let t2 = insert_oneshot(&pool, "task 2", 1_700_000_000, 1).await;
 
     // Create a mood entry.
-    sqlx::query(
-        "INSERT INTO mood (id, mood, body, time) VALUES (100, 'focused', '', 1_700_000_000)",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
+    let mood_id = im::db::Id::new();
+    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (?, 'focused', '', 1_700_000_000)")
+        .bind(mood_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
-    // Link mood 100 to task 1.
-    im::db::link_mood_to_task(&pool, 100, t1).await.unwrap();
-    let links: Vec<(Option<i64>, i64)> =
-        sqlx::query_as("SELECT todo_id, id FROM mood WHERE id = 100")
+    // Link the mood to task 1.
+    im::db::link_mood_to_task(&pool, mood_id, t1).await.unwrap();
+    let links: Vec<(Option<im::db::Id>, im::db::Id)> =
+        sqlx::query_as("SELECT todo_id, id FROM mood WHERE id = ?")
+            .bind(mood_id)
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(links, vec![(Some(t1), 100)]);
+    assert_eq!(links, vec![(Some(t1), mood_id)]);
 
-    // Link mood 100 to task 2 (replaces link to task 1).
-    im::db::link_mood_to_task(&pool, 100, t2).await.unwrap();
-    let links: Vec<(Option<i64>, i64)> =
-        sqlx::query_as("SELECT todo_id, id FROM mood WHERE id = 100")
+    // Link the mood to task 2 (replaces the link to task 1).
+    im::db::link_mood_to_task(&pool, mood_id, t2).await.unwrap();
+    let links: Vec<(Option<im::db::Id>, im::db::Id)> =
+        sqlx::query_as("SELECT todo_id, id FROM mood WHERE id = ?")
+            .bind(mood_id)
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(links, vec![(Some(t2), 100)]);
+    assert_eq!(links, vec![(Some(t2), mood_id)]);
 
     // Link via link_mood_to_tasks replaces as well.
-    im::db::link_mood_to_tasks(&pool, 100, &[t1]).await.unwrap();
-    let links: Vec<(Option<i64>, i64)> =
-        sqlx::query_as("SELECT todo_id, id FROM mood WHERE id = 100")
+    im::db::link_mood_to_tasks(&pool, mood_id, &[t1])
+        .await
+        .unwrap();
+    let links: Vec<(Option<im::db::Id>, im::db::Id)> =
+        sqlx::query_as("SELECT todo_id, id FROM mood WHERE id = ?")
+            .bind(mood_id)
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(links, vec![(Some(t1), 100)]);
+    assert_eq!(links, vec![(Some(t1), mood_id)]);
 }

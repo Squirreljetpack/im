@@ -28,7 +28,8 @@ static TUI_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Seed a mood row "today" (within `TodayHorizon::Today`).
 async fn seed_mood(pool: &SqlitePool, mood: &str, body: &str) {
-    sqlx::query("INSERT INTO mood (mood, body, time) VALUES (?, ?, ?)")
+    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (?, ?, ?, ?)")
+        .bind(im::db::Id::new())
         .bind(mood)
         .bind(body)
         .bind(im::date::today_start() + 3600)
