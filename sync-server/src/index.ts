@@ -24,7 +24,6 @@ export default {
       case "/api/v1/auth/status":
         return status(request, env);
       case "/api/v1/sync":
-      case "/api/v1/sync/ws":
         return forwardToUser(request, env);
       default:
         return error("not found", 404);

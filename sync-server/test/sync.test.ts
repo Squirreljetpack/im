@@ -1,6 +1,7 @@
 import { exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 
+import { PAGE_LIMIT } from "../src/user_sync_do";
 import type { AuthResponse, SyncResponse } from "../src/types";
 
 const BASE = "https://sync.test";
@@ -34,8 +35,14 @@ async function register(email: string): Promise<AuthResponse> {
   return (await response.json()) as AuthResponse;
 }
 
-function event(eventId: string, entityId: string, timestamp: number, payload: unknown = null) {
-  return { event_id: eventId, id: entityId, timestamp, payload };
+function event(
+  eventId: string,
+  entityId: string,
+  timestamp: number,
+  payload: unknown = null,
+  device = "device-a",
+) {
+  return { event_id: eventId, entity_id: entityId, device_id: device, timestamp, payload };
 }
 
 async function sync(
@@ -129,7 +136,7 @@ describe("event log", () => {
       version: 1,
       event_id: "evt-1",
       device_id: "device-a",
-      id: entity,
+      entity_id: entity,
       timestamp: 1_000,
       payload: { type: "Task", data: { name: "write it" } },
     });
@@ -189,51 +196,38 @@ describe("event log", () => {
   });
 });
 
-describe("websocket hub", () => {
-  async function connect(token: string, device: string): Promise<WebSocket> {
-    const response = await exports.default.fetch(
-      new Request(`${BASE}/api/v1/sync/ws?device_id=${device}`, {
-        headers: { authorization: `Bearer ${token}`, upgrade: "websocket" },
-      }),
-    );
-    expect(response.status).toBe(101);
-    const socket = response.webSocket;
-    expect(socket).toBeDefined();
-    socket!.accept();
-    return socket!;
-  }
-
-  function nextMessage(socket: WebSocket): Promise<unknown> {
-    return new Promise((resolve) => {
-      socket.addEventListener("message", (message) => {
-        resolve(JSON.parse(String(message.data)));
-      });
-    });
-  }
-
-  it("pushes a version notification to the other devices", async () => {
+describe("pagination", () => {
+  it("pages a backlog and reports when more is waiting", async () => {
     const account = await register("heidi@example.com");
-    const listener = await connect(account.token, "device-b");
-    const notified = nextMessage(listener);
+    const entity = "0193f000-0000-7000-8000-000000000005";
+    const backlog = Array.from({ length: PAGE_LIMIT + 1 }, (_, index) =>
+      event(`evt-${index}`, entity, index, null, "device-a"),
+    );
+    await sync(account.token, "device-a", 0, backlog);
 
-    await sync(account.token, "device-a", 0, [
-      event("evt-ws", "0193f000-0000-7000-8000-000000000005", 1_000, null),
-    ]);
+    const first = await sync(account.token, "device-b", 0);
+    expect(first.remote_events).toHaveLength(PAGE_LIMIT);
+    expect(first.has_more).toBe(true);
+    expect(first.new_server_version).toBe(PAGE_LIMIT);
 
-    expect(await notified).toEqual({ type: "new_version", version: 1 });
-    listener.close();
+    const second = await sync(account.token, "device-b", first.new_server_version);
+    expect(second.remote_events).toHaveLength(1);
+    expect(second.has_more).toBe(false);
+    expect(second.new_server_version).toBe(PAGE_LIMIT + 1);
+  });
 
-    // A push from the device itself is not broadcast back to it.
-    const self = await connect(account.token, "device-a");
-    let echoed = false;
-    self.addEventListener("message", () => {
-      echoed = true;
-    });
-    await sync(account.token, "device-a", 0, [
-      event("evt-ws-2", "0193f000-0000-7000-8000-000000000006", 2_000, null),
-    ]);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(echoed).toBe(false);
-    self.close();
+  it("drains a short page and jumps the cursor to the log head", async () => {
+    const account = await register("ivan@example.com");
+    const foreign = "0193f000-0000-7000-8000-000000000006";
+    const own = "0193f000-0000-7000-8000-000000000007";
+    await sync(account.token, "device-a", 0, [event("evt-foreign", foreign, 1_000, null)]);
+    // This device's own event is never echoed back, but the cursor still
+    // advances past it.
+    await sync(account.token, "device-b", 0, [event("evt-own", own, 2_000, null, "device-b")]);
+
+    const page = await sync(account.token, "device-b", 0);
+    expect(page.remote_events.map((row) => row.event_id)).toEqual(["evt-foreign"]);
+    expect(page.has_more).toBe(false);
+    expect(page.new_server_version).toBe(2);
   });
 });

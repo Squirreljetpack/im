@@ -14,15 +14,17 @@ export interface LogRow {
   entity_id: string;
   timestamp: number;
   payload: string;
+  created_at: number;
 }
 
 /**
  * One entity event: `payload` is the client's opaque `Option<EntityPayload>`
  * (`null` = delete). The server never interprets it.
  */
-export interface ClientEvent {
+export interface SyncEvent {
   event_id: string;
-  id: string;
+  entity_id: string;
+  device_id: string;
   timestamp: number;
   payload: unknown;
 }
@@ -31,21 +33,23 @@ export interface ClientEvent {
 export interface SyncRequest {
   device_id: string;
   since_version: number;
-  client_events: ClientEvent[];
+  client_events: SyncEvent[];
 }
 
 /** One event handed back to the client, with the position it occupies. */
 export interface RemoteEvent {
   version: number;
   event_id: string;
+  entity_id: string;
   device_id: string;
-  id: string;
   timestamp: number;
   payload: unknown;
 }
 
 export interface SyncResponse {
   new_server_version: number;
+  /** The log held more events than the page the client just received. */
+  has_more: boolean;
   remote_events: RemoteEvent[];
 }
 

@@ -1,25 +1,24 @@
 /**
- * The per-user Durable Object: an append-only event log plus a WebSocket hub.
+ * The per-user Durable Object: an append-only event log.
  *
  * A sync request appends the client's events and returns everything the client
- * has not seen yet — including events from the client's own device, which the
- * caller filters out by `device_id` (§5.1). `event_id` is UNIQUE, so a retried
- * push is a no-op instead of a duplicate.
+ * has not seen yet, in pages — events from the client's own device are
+ * excluded, so a device never reads back its own echo (§5.1). `event_id` is
+ * UNIQUE, so a retried push is a no-op instead of a duplicate.
  */
 
 import type {
-  ClientEvent,
   Env,
   LogRow,
   RemoteEvent,
+  SyncEvent,
   SyncRequest,
   SyncResponse,
 } from "./types";
 import { error, json } from "./types";
 
-interface Attachment {
-  device_id: string;
-}
+/** How many events one pull returns before the client has to ask again. */
+export const PAGE_LIMIT = 1000;
 
 export class UserSyncDO implements DurableObject {
   private readonly ctx: DurableObjectState;
@@ -48,9 +47,6 @@ export class UserSyncDO implements DurableObject {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname.endsWith("/sync/ws")) {
-      return this.openSocket(request);
-    }
     if (url.pathname.endsWith("/sync") && request.method === "POST") {
       return this.sync(request);
     }
@@ -73,109 +69,73 @@ export class UserSyncDO implements DurableObject {
     const now = Math.floor(Date.now() / 1000);
     const response = this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
-      let appended = 0;
       for (const event of events) {
-        if (!isClientEvent(event)) {
+        if (!isSyncEvent(event)) {
           continue;
         }
-        const cursor = sql.exec(
+        sql.exec(
           `INSERT OR IGNORE INTO sync_log
              (device_id, event_id, entity_id, timestamp, payload, created_at)
            VALUES (?, ?, ?, ?, ?, ?)`,
-          body.device_id,
+          event.device_id,
           event.event_id,
-          event.id,
+          event.entity_id,
           event.timestamp,
           JSON.stringify(event.payload ?? null),
           now,
         );
-        appended += Number(cursor.rowsWritten ?? 0);
       }
 
+      // SAFETY: the SELECT lists exactly the columns of `LogRow`.
       const rows = sql
         .exec(
-          `SELECT version, event_id, device_id, entity_id, timestamp, payload
+          `SELECT version, event_id, device_id, entity_id, timestamp, payload, created_at
              FROM sync_log
             WHERE version > ? AND device_id != ?
-            ORDER BY version ASC`,
+            ORDER BY version ASC
+            LIMIT ?`,
           since,
           body.device_id,
+          PAGE_LIMIT,
         )
         .toArray() as unknown as LogRow[];
-      const head = sql
-        .exec(
-          `SELECT COALESCE(MAX(version), ?) AS version FROM sync_log`,
-          since,
-        )
-        .one() as unknown as { version: number };
+      const hasMore = rows.length === PAGE_LIMIT;
+      // A full page stops at its last row; a short one means the log is
+      // drained for this device, so the cursor can jump to its head.
+      const last = rows[rows.length - 1];
+      const newVersion = hasMore && last !== undefined ? last.version : headVersion(sql, since);
 
       return {
-        appended,
-        new_server_version: Number(head.version),
+        new_server_version: newVersion,
+        has_more: hasMore,
         remote_events: rows.map(toRemoteEvent),
       };
     });
 
-    if (response.appended > 0) {
-      this.broadcast(body.device_id, response.new_server_version);
-    }
-    const payload: SyncResponse = {
-      new_server_version: response.new_server_version,
-      remote_events: response.remote_events,
-    };
+    const payload: SyncResponse = response;
     return json(payload);
   }
 
-  private openSocket(request: Request): Response {
-    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
-      return error("expected a websocket upgrade", 426);
-    }
-    const device = new URL(request.url).searchParams.get("device_id") ?? "";
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const server = pair[1];
-    this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ device_id: device } satisfies Attachment);
-    return new Response(null, { status: 101, webSocket: client });
-  }
-
-  /** Tell every other connected device that the log moved on. */
-  private broadcast(originDevice: string, version: number): void {
-    const message = JSON.stringify({ type: "new_version", version });
-    for (const socket of this.ctx.getWebSockets()) {
-      const attachment = socket.deserializeAttachment() as Attachment | null;
-      if (attachment?.device_id === originDevice) {
-        continue;
-      }
-      try {
-        socket.send(message);
-      } catch {
-        // A socket that died mid-send is dropped by the runtime.
-      }
-    }
-  }
-
-  async webSocketMessage(_socket: WebSocket, _message: string | ArrayBuffer) {
-    // The hub is push-only: clients push through POST /api/v1/sync.
-  }
-
-  async webSocketClose(socket: WebSocket) {
-    socket.close();
-  }
-
-  async webSocketError(socket: WebSocket) {
-    socket.close();
-  }
 }
 
-function isClientEvent(event: unknown): event is ClientEvent {
+/** The log's newest version, never below the client's own cursor. */
+function headVersion(sql: SqlStorage, since: number): number {
+  // SAFETY: the query selects one column, aliased `version`.
+  const row = sql
+    .exec(`SELECT COALESCE(MAX(version), ?) AS version FROM sync_log`, since)
+    .one() as { version: number };
+  return Number(row.version);
+}
+
+function isSyncEvent(event: unknown): event is SyncEvent {
   if (typeof event !== "object" || event === null) {
     return false;
   }
-  const candidate = event as Partial<ClientEvent>;
+  const candidate = event as Partial<SyncEvent>;
   return (
     typeof candidate.event_id === "string" &&
-    typeof candidate.id === "string" &&
+    typeof candidate.entity_id === "string" &&
+    typeof candidate.device_id === "string" &&
     typeof candidate.timestamp === "number"
   );
 }
@@ -184,8 +144,8 @@ function toRemoteEvent(row: LogRow): RemoteEvent {
   return {
     version: Number(row.version),
     event_id: row.event_id,
+    entity_id: row.entity_id,
     device_id: row.device_id,
-    id: row.entity_id,
     timestamp: Number(row.timestamp),
     payload: JSON.parse(row.payload),
   };
