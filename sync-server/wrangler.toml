@@ -1,0 +1,26 @@
+name = "im-sync"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+# One Durable Object per user (`env.USER_DO.idFromName(user_id)`); its SQLite
+# storage holds that user's append-only sync log.
+[[durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserSyncDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserSyncDO"]
+
+# User accounts. The id below is a placeholder for local development: run
+# `wrangler d1 create im-sync-auth` and paste the real id before deploying.
+[[d1_databases]]
+binding = "AUTH_DB"
+database_name = "im-sync-auth"
+database_id = "local-placeholder-im-sync-auth"
+migrations_dir = "migrations"
+
+# Local development only. Production sets the real signing key with
+# `wrangler secret put JWT_SECRET`.
+[vars]
+JWT_SECRET = "dev-only-secret-change-me"
