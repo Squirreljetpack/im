@@ -4,7 +4,7 @@ use super::parse::{
     parse_entry_command, parse_special_command, parse_task_command, parse_task_edit_command,
     parse_view_command,
 };
-use super::{Cli, CliOpts, Command, FLAG_CHARACTERS};
+use super::{AuthSubcommand, Cli, CliOpts, Command, FLAG_CHARACTERS};
 use crate::types::{TodayHorizon, ViewVariant};
 
 /// Parse the full command line from `env::args` (skipping argv[0]) into a
@@ -116,8 +116,39 @@ pub fn parse_from(args: Vec<String>) -> anyhow::Result<Command> {
         return parse_entry_command(&args);
     }
 
+    // `im auth <sub>` / `im sync`: the sync account and the event stream.
+    if first == "auth" {
+        return parse_auth_command(&args[1..]);
+    }
+    if first == "sync" {
+        if args.len() > 1 {
+            anyhow::bail!("`im sync` takes no arguments");
+        }
+        return Ok(Command::Sync);
+    }
+
     // Otherwise, it's an entry command
     parse_entry_command(&args)
+}
+
+/// `im auth <register|login|status|logout>`.
+fn parse_auth_command(args: &[String]) -> anyhow::Result<Command> {
+    let Some(name) = args.first() else {
+        anyhow::bail!("`im auth` needs a subcommand: register, login, status or logout");
+    };
+    let sub = match name.as_str() {
+        "register" => AuthSubcommand::Register,
+        "login" => AuthSubcommand::Login,
+        "status" => AuthSubcommand::Status,
+        "logout" => AuthSubcommand::Logout,
+        other => anyhow::bail!(
+            "unknown auth subcommand '{other}' (expected register, login, status or logout)"
+        ),
+    };
+    if args.len() > 1 {
+        anyhow::bail!("`im auth {name}` takes no further arguments");
+    }
+    Ok(Command::Auth { sub })
 }
 
 #[cfg(test)]

@@ -37,6 +37,13 @@ Other:
   im :db backfill                                compute and persist missing mood embeddings
   im :db doctor                                  check tracker entries vs kinds; prune mismatches
 
+Sync:
+  im auth register|login                         create an account / sign this device in
+  im auth status|logout                          show the signed-in account / forget it
+  im sync                                        push local events and apply the other
+                                                        devices' events (asks about
+                                                        conflicting deletions)
+
 ---
 
 Flags:

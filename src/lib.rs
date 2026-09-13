@@ -74,16 +74,14 @@ pub async fn run_app() {
     let pool = pool.pool;
     crate::global::set_pool(pool.clone());
 
-    _dbg!(
-        commands::execute_command(
-            cli.cmd,
-            &pool,
-            &config,
-            &cli.opts,
-            &mut std::io::stdout(),
-            tui
-        )
-        .await
+    let result = commands::execute_command(
+        cli.cmd,
+        &pool,
+        &config,
+        &cli.opts,
+        &mut std::io::stdout(),
+        tui,
     )
-    .__ebog()
+    .await;
+    _dbg!(result).__ebog()
 }

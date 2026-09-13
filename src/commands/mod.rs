@@ -6,10 +6,12 @@ use std::io::Write;
 use crate::cli::{CliOpts, Command};
 use crate::config::Config;
 
+mod auth;
 mod diagnostics;
 mod edit_task;
 mod entry;
 mod maintenance;
+mod sync;
 mod task;
 mod update;
 
@@ -117,5 +119,9 @@ pub async fn execute_command<W: Write>(
         }
 
         Command::Clear { date } => maintenance::clear_moods(pool, config, date, tui).await,
+
+        Command::Auth { sub } => auth::auth_command(pool, sub).await,
+
+        Command::Sync => sync::sync_command(pool, config).await,
     }
 }

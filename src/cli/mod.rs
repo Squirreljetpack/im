@@ -130,6 +130,26 @@ pub enum Command {
     Clear {
         date: Option<String>,
     },
+    /// `im auth <sub>` — the sync account this device is signed in as.
+    Auth {
+        sub: AuthSubcommand,
+    },
+    /// `im sync` — push the queued events and apply everything the other
+    /// devices wrote, asking about conflicting deletions.
+    Sync,
+}
+
+/// Subcommands of `im auth`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthSubcommand {
+    /// `auth register` — create an account and sign this device in.
+    Register,
+    /// `auth login` — sign this device in to an existing account.
+    Login,
+    /// `auth status` — show the account this device is signed in as.
+    Status,
+    /// `auth logout` — forget the account on this device (local data stays).
+    Logout,
 }
 
 /// Subcommands of `im :db`.

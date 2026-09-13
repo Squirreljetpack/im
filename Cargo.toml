@@ -70,7 +70,7 @@ ort = { version = "2.0.0-rc.13", default-features = false, features = [
   "tracing",
 ] }
 tokenizers = { version = "0.*", default-features = false, features = ["onig"] }
-ureq = { version = "3.*", default-features = false, features = ["rustls"] }
+ureq = { version = "3.*", default-features = false, features = ["rustls", "json"] }
 oklab = "1.1"
 
 # Utilities
