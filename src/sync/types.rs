@@ -7,17 +7,30 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::{Id, TrackerValue};
+use crate::db::{EventId, Id, TrackerValue};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SyncEvent {
-    /// The entity's id.
-    pub id: Id,
+    /// Globally unique per mutation.
+    pub event_id: EventId,
+    /// The entity's stable id.
+    pub entity_id: Id,
+    /// The device that authored the event.
+    pub device_id: Id,
     /// Unix epoch **milliseconds**, strictly increasing per device (see
     /// [`super::state::next_event_timestamp`]).
     pub timestamp: i64,
     /// `Some` = upsert snapshot, `None` = delete.
     pub payload: Option<EntityPayload>,
+}
+
+/// One row of the server's log: an [`SyncEvent`] plus its arrival `version`,
+/// which orders the pull (`@@SYNC.md` §4.5, §5.1).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RemoteEvent {
+    pub version: i64,
+    #[serde(flatten)]
+    pub event: SyncEvent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

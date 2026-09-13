@@ -5,7 +5,7 @@ use std::io::Write;
 
 use crate::badge::completion_badge;
 use crate::cli::{CliOpts, TrackerItem, TrackerPeriod};
-use crate::config::{Config, TrackerKind, TrackerSetting};
+use crate::config::{Config, TrackerInterval, TrackerKind, TrackerSetting};
 use crate::date;
 use crate::db::TrackerValue;
 use crate::global;
@@ -816,6 +816,48 @@ async fn display_recurring_tracker<W: Write>(
     }
 
     Ok(())
+}
+
+/// The `[start, end)` replacement slot containing `time_epoch` for a calendar
+/// interval (anchor + span): `[anchor + span*k, anchor + span*(k+1))`.
+/// Slots tile the timeline in both directions from the anchor.
+pub fn interval_slot(interval: TrackerInterval, time_epoch: i64) -> Option<(i64, i64)> {
+    crate::date::interval_slot_unix_secs(interval.anchor, interval.span, time_epoch)
+}
+
+/// The replacement-slot rules of the configured trackers, used when replaying
+/// tracker events (`@@SYNC.md` §4.3).
+///
+/// Trackers that are not cumulative keep one entry per slot: logging again in
+/// the same slot replaces the previous entry. Two devices logging the same
+/// slot while offline therefore meet as several rows after a replay, and the
+/// slot's winner has to be picked locally — with no event, because every
+/// device runs the same idempotent cleanup.
+#[derive(Debug, Clone, Default)]
+pub struct TrackerSlots {
+    intervals: std::collections::HashMap<String, TrackerInterval>,
+}
+
+impl TrackerSlots {
+    /// Collect the non-cumulative interval trackers: the ones whose entries
+    /// replace each other in a slot.
+    pub fn from_config(config: &Config) -> Self {
+        let intervals = config
+            .tracker
+            .iter()
+            .filter_map(|(name, setting)| {
+                let interval = setting.interval?;
+                (!interval.cumulative).then(|| (name.clone(), interval))
+            })
+            .collect();
+        Self { intervals }
+    }
+
+    /// The slot an entry of `tracker_type` logged at `time_epoch` replaces,
+    /// or `None` when that tracker appends every entry.
+    pub fn slot(&self, tracker_type: &str, time_epoch: i64) -> Option<(i64, i64)> {
+        interval_slot(*self.intervals.get(tracker_type)?, time_epoch)
+    }
 }
 
 #[cfg(test)]

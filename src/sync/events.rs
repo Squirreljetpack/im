@@ -69,12 +69,14 @@ async fn emit(
 ) -> Result<()> {
     let device = state::device_id(&mut *conn).await?;
     let timestamp = state::next_event_timestamp(&mut *conn).await?;
+    let event_id = EventId::new();
     let json = serde_json::to_string(&payload).context("Failed to serialize a sync event")?;
     sqlx::query(
-        "INSERT INTO _sync_events (event_id, entity_id, timestamp, payload, synced)
-         VALUES (?, ?, ?, ?, 0)",
+        "INSERT INTO _sync_events (event_id, device_id, entity_id, timestamp, payload, synced)
+         VALUES (?, ?, ?, ?, ?, 0)",
     )
-    .bind(EventId::new())
+    .bind(event_id)
+    .bind(device)
     .bind(entity_id)
     .bind(timestamp)
     .bind(&json)
@@ -86,6 +88,7 @@ async fn emit(
     state::record_watermark(
         &mut *conn,
         entity_id,
+        event_id,
         timestamp,
         &device.to_string(),
         snapshot,

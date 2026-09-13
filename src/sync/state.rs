@@ -95,6 +95,8 @@ pub async fn next_event_timestamp(conn: &mut SqliteConnection) -> Result<i64> {
 pub struct Watermark {
     pub timestamp: i64,
     pub device_id: String,
+    /// The applied event's id — the last tie-breaker of the LWW order.
+    pub event_id: String,
     /// The newest event applied for the entity was a delete.
     pub deleted: bool,
     /// The newest upsert snapshot seen for the entity, kept across deletes so
@@ -105,7 +107,7 @@ pub struct Watermark {
 /// The watermark of one entity, if any event was ever applied for it.
 pub async fn watermark(conn: &mut SqliteConnection, entity_id: Id) -> Result<Option<Watermark>> {
     let row = sqlx::query(
-        "SELECT timestamp, device_id, deleted, last_payload FROM _sync_watermark WHERE entity_id = ?",
+        "SELECT timestamp, device_id, event_id, deleted, last_payload FROM _sync_watermark WHERE entity_id = ?",
     )
     .bind(entity_id)
     .fetch_optional(&mut *conn)
@@ -116,18 +118,26 @@ pub async fn watermark(conn: &mut SqliteConnection, entity_id: Id) -> Result<Opt
         Watermark {
             timestamp: row.get("timestamp"),
             device_id: row.get("device_id"),
+            event_id: row.get("event_id"),
             deleted: row.get::<i32, _>("deleted") != 0,
             last_payload: row.get("last_payload"),
         }
     }))
 }
 
-/// Whether an event authored by `device` at `timestamp` wins over `current`.
+/// Whether an event wins over the watermark recorded for its entity.
 ///
-/// LWW on `(timestamp, device_id)`: the device id breaks ties so two events
-/// stamped in the same millisecond still resolve identically on every device.
-pub fn wins(timestamp: i64, device: &str, current: &Watermark) -> bool {
-    (timestamp, device) > (current.timestamp, current.device_id.as_str())
+/// LWW on `(timestamp, device_id, event_id)`: the device id breaks same-
+/// millisecond ties between devices, and the event id breaks what is left, so
+/// two machines that share a device id (a copied database) still converge on
+/// the same winner.
+pub fn wins(timestamp: i64, device: &str, event: &str, current: &Watermark) -> bool {
+    (timestamp, device, event)
+        > (
+            current.timestamp,
+            current.device_id.as_str(),
+            current.event_id.as_str(),
+        )
 }
 
 /// Record the event that just won for an entity. `payload` is the serialized
@@ -135,13 +145,15 @@ pub fn wins(timestamp: i64, device: &str, current: &Watermark) -> bool {
 pub async fn record_watermark(
     conn: &mut SqliteConnection,
     entity_id: Id,
+    event_id: crate::db::EventId,
     timestamp: i64,
     device: &str,
     payload: Option<&str>,
 ) -> Result<()> {
+    let event = event_id.to_string();
     let current = watermark(&mut *conn, entity_id).await?;
     if let Some(current) = &current
-        && !wins(timestamp, device, current)
+        && !wins(timestamp, device, &event, current)
     {
         return Ok(());
     }
@@ -150,17 +162,19 @@ pub async fn record_watermark(
         .map(str::to_string)
         .or_else(|| current.and_then(|w| w.last_payload));
     sqlx::query(
-        "INSERT INTO _sync_watermark (entity_id, timestamp, device_id, deleted, last_payload)
-         VALUES (?, ?, ?, ?, ?)
+        "INSERT INTO _sync_watermark (entity_id, timestamp, device_id, event_id, deleted, last_payload)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(entity_id) DO UPDATE SET
              timestamp = excluded.timestamp,
              device_id = excluded.device_id,
+             event_id = excluded.event_id,
              deleted = excluded.deleted,
              last_payload = excluded.last_payload",
     )
     .bind(entity_id)
     .bind(timestamp)
     .bind(device)
+    .bind(&event)
     .bind(payload.is_none() as i32)
     .bind(last_payload)
     .execute(&mut *conn)

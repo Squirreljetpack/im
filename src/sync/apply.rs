@@ -1,5 +1,4 @@
-//! Replay of incoming events, with the two promptable delete conflicts of
-//! §4.3.
+//! Replay of incoming events, with the promptable delete conflicts of §4.4.
 //!
 //! An event is applied only when it beats the entity's watermark, so replay is
 //! order-independent (§4.1). A *delete* that contradicts a local decision still
@@ -7,25 +6,17 @@
 //! [`Conflict`] and decides via [`resolve_conflict`], whose result is itself an
 //! event — so every device converges and prompt loops terminate.
 
+use std::collections::HashSet;
+
 use anyhow::{Context, Result};
 use sqlx::{Row, SqlitePool};
 
 use crate::db::Id;
+use crate::tracker::TrackerSlots;
 
 use super::events;
 use super::state::{self, Watermark};
-use super::types::{EntityPayload, SyncEvent};
-
-/// An event pulled from the server: the log position and the authoring device
-/// (the author is the LWW tie-breaker, so it has to travel with the event).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-pub struct RemoteEvent {
-    pub version: i64,
-    pub event_id: crate::db::EventId,
-    pub device_id: Id,
-    #[serde(flatten)]
-    pub event: SyncEvent,
-}
+use super::types::{EntityPayload, RemoteEvent, SyncEvent};
 
 /// Why an incoming event needs the user's decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,32 +98,179 @@ const TABLES: [&str; 4] = ["mood", "tracker", "todos", "todo_completions"];
 /// Apply one pulled event.
 pub async fn apply_event(pool: &SqlitePool, remote: &RemoteEvent) -> Result<ApplyOutcome> {
     let mut tx = pool.begin().await.context("Failed to begin a sync apply")?;
-    let entity_id = remote.event.id;
-    let watermark = state::watermark(&mut tx, entity_id).await?;
+    let outcome = apply_one(&mut tx, remote).await?;
+    if matches!(outcome, ApplyOutcome::Applied) {
+        // A task that arrived without a local short id gets one (short ids are
+        // a local projection and never travel).
+        if let Some(EntityPayload::Task(_)) = &remote.event.payload {
+            crate::db::sync_short_id(&mut tx, remote.event.entity_id).await?;
+        }
+        tx.commit().await.context("Failed to commit a sync apply")?;
+    }
+    Ok(outcome)
+}
+
+/// What applying one pulled page did.
+#[derive(Debug, Clone, Default)]
+pub struct PageOutcome {
+    /// Events written.
+    pub applied: usize,
+    /// Events that lost to an entity watermark.
+    pub stale: usize,
+    /// Events the user still has to decide on (see [`resolve_conflict`]).
+    pub conflicts: Vec<Conflict>,
+}
+
+/// Apply one pulled page: every event in dependency order, the tracker slot
+/// cleanup, and the pull cursor — all in a single transaction (`@@SYNC.md`
+/// §4.5). A page that fails halfway therefore replays nothing twice.
+pub async fn apply_page(
+    pool: &SqlitePool,
+    events: &[RemoteEvent],
+    cursor: i64,
+    slots: &TrackerSlots,
+) -> Result<PageOutcome> {
+    let mut tx = pool.begin().await.context("Failed to begin a sync apply")?;
+    let mut outcome = PageOutcome::default();
+    // The slots that received a tracker entry, for the cleanup below.
+    let mut touched: HashSet<(String, (i64, i64))> = HashSet::new();
+    let mut tasks: Vec<Id> = Vec::new();
+
+    for remote in replay_order(events) {
+        match apply_one(&mut tx, remote).await? {
+            ApplyOutcome::Applied => {
+                outcome.applied += 1;
+                match &remote.event.payload {
+                    Some(EntityPayload::Task(_)) => tasks.push(remote.event.entity_id),
+                    Some(EntityPayload::Tracker(data)) => {
+                        if let Some(slot) = slots.slot(&data.tracker_type, data.time) {
+                            touched.insert((data.tracker_type.clone(), slot));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            ApplyOutcome::Stale => outcome.stale += 1,
+            ApplyOutcome::Conflict(conflict) => outcome.conflicts.push(*conflict),
+        }
+    }
+
+    dedup_tracker_slots(&mut tx, &touched).await?;
+    for entity_id in tasks {
+        crate::db::sync_short_id(&mut tx, entity_id).await?;
+    }
+    state::set(&mut tx, state::KEY_LAST_SERVER_VERSION, &cursor.to_string()).await?;
+    tx.commit().await.context("Failed to commit a sync apply")?;
+    Ok(outcome)
+}
+
+/// Apply one event to an open transaction: the watermark decides whether it
+/// wins, and a contradiction with an unsynced local decision is handed back
+/// to the caller instead of being applied.
+async fn apply_one(
+    conn: &mut sqlx::SqliteConnection,
+    remote: &RemoteEvent,
+) -> Result<ApplyOutcome> {
+    let entity_id = remote.event.entity_id;
+    let watermark = state::watermark(&mut *conn, entity_id).await?;
 
     if let Some(watermark) = &watermark
         && !state::wins(
             remote.event.timestamp,
-            &remote.device_id.to_string(),
+            &remote.event.device_id.to_string(),
+            &remote.event.event_id.to_string(),
             watermark,
         )
     {
         return Ok(ApplyOutcome::Stale);
     }
 
-    let outcome = match &remote.event.payload {
-        None => apply_delete(&mut tx, remote, watermark.as_ref()).await?,
-        Some(payload) => apply_upsert(&mut tx, remote, payload, watermark.as_ref()).await?,
-    };
-    if matches!(outcome, ApplyOutcome::Applied) {
-        tx.commit().await.context("Failed to commit a sync apply")?;
-        // A task that arrived without a local short id gets one (short ids are
-        // a local projection and never travel).
-        if matches!(remote.event.payload, Some(EntityPayload::Task(_))) {
-            crate::db::sync_short_id(pool, entity_id).await?;
+    match &remote.event.payload {
+        None => apply_delete(conn, remote, watermark.as_ref()).await,
+        Some(payload) => apply_upsert(conn, remote, payload, watermark.as_ref()).await,
+    }
+}
+
+/// The order a page is applied in: upserts by dependency (a task before the
+/// moods, trackers and completions that reference it), then deletes. Deletes
+/// stay in log order — removing a row cascades or nulls its references, so a
+/// delete cannot break a foreign key whatever the order.
+fn replay_order(events: &[RemoteEvent]) -> Vec<&RemoteEvent> {
+    fn rank(payload: &Option<EntityPayload>) -> u8 {
+        match payload {
+            Some(EntityPayload::Task(_)) => 0,
+            Some(EntityPayload::Mood(_)) => 1,
+            Some(EntityPayload::Tracker(_)) => 2,
+            Some(EntityPayload::Completion(_)) => 3,
+            None => 4,
         }
     }
-    Ok(outcome)
+    let mut ordered: Vec<&RemoteEvent> = events.iter().collect();
+    ordered.sort_by_key(|remote| (rank(&remote.event.payload), remote.version));
+    ordered
+}
+
+/// Keep one entry per tracker slot: the last-write-wins winner of the rows
+/// that landed in it (`@@SYNC.md` §4.3).
+///
+/// Two devices logging the same slot while offline produce several rows once
+/// they sync. Every device runs this cleanup over the same events, so it is
+/// idempotent and emits no cleanup event of its own.
+async fn dedup_tracker_slots(
+    conn: &mut sqlx::SqliteConnection,
+    touched: &HashSet<(String, (i64, i64))>,
+) -> Result<()> {
+    for (tracker_type, (start, end)) in touched {
+        let rows: Vec<Id> =
+            sqlx::query_scalar("SELECT id FROM tracker WHERE type = ? AND time >= ? AND time < ?")
+                .bind(tracker_type)
+                .bind(start)
+                .bind(end)
+                .fetch_all(&mut *conn)
+                .await
+                .with_context(|| {
+                    format!("Failed to read the '{tracker_type}' entries in slot {start}..{end}")
+                })?;
+        if rows.len() < 2 {
+            continue;
+        }
+        // A row without a watermark cannot be ranked: leave the slot alone.
+        let mut ranked: Vec<(Id, Watermark)> = Vec::with_capacity(rows.len());
+        for id in &rows {
+            match state::watermark(&mut *conn, *id).await? {
+                Some(watermark) => ranked.push((*id, watermark)),
+                None => {
+                    ranked.clear();
+                    break;
+                }
+            }
+        }
+        let mut ranked = ranked.into_iter();
+        let Some((mut winner, mut best)) = ranked.next() else {
+            continue;
+        };
+        for (id, watermark) in ranked {
+            if state::wins(
+                watermark.timestamp,
+                &watermark.device_id,
+                &watermark.event_id,
+                &best,
+            ) {
+                winner = id;
+                best = watermark;
+            }
+        }
+        for id in &rows {
+            if *id != winner {
+                sqlx::query("DELETE FROM tracker WHERE id = ?")
+                    .bind(id)
+                    .execute(&mut *conn)
+                    .await
+                    .context("Failed to drop a superseded tracker entry")?;
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn apply_delete(
@@ -140,7 +278,7 @@ async fn apply_delete(
     remote: &RemoteEvent,
     watermark: Option<&Watermark>,
 ) -> Result<ApplyOutcome> {
-    let entity_id = remote.event.id;
+    let entity_id = remote.event.entity_id;
     if watermark.is_some_and(|w| !w.deleted) && has_unsynced_events(conn, entity_id).await? {
         return Ok(ApplyOutcome::Conflict(Box::new(Conflict {
             kind: ConflictKind::RemoteDeleteVsLocalEdit,
@@ -161,8 +299,9 @@ async fn apply_delete(
     state::record_watermark(
         conn,
         entity_id,
+        remote.event.event_id,
         remote.event.timestamp,
-        &remote.device_id.to_string(),
+        &remote.event.device_id.to_string(),
         None,
     )
     .await?;
@@ -176,10 +315,12 @@ async fn apply_upsert(
     watermark: Option<&Watermark>,
 ) -> Result<ApplyOutcome> {
     // A local delete still in the outbox is a decision the user must confirm.
-    if watermark.is_some_and(|w| w.deleted) && has_unsynced_delete(conn, remote.event.id).await? {
+    if watermark.is_some_and(|w| w.deleted)
+        && has_unsynced_delete(conn, remote.event.entity_id).await?
+    {
         return Ok(ApplyOutcome::Conflict(Box::new(Conflict {
             kind: ConflictKind::RemoteUpsertVsLocalDelete,
-            entity_id: remote.event.id,
+            entity_id: remote.event.entity_id,
             event: remote.clone(),
             resurrectable: true,
         })));
@@ -194,19 +335,20 @@ async fn apply_upsert(
             .and_then(|w| w.last_payload);
         return Ok(ApplyOutcome::Conflict(Box::new(Conflict {
             kind: ConflictKind::CompletionOnMissingTask,
-            entity_id: remote.event.id,
+            entity_id: remote.event.entity_id,
             event: remote.clone(),
             resurrectable: task_snapshot.is_some(),
         })));
     }
 
-    write_payload(conn, remote.event.id, payload).await?;
+    write_payload(conn, remote.event.entity_id, payload).await?;
     let json = serde_json::to_string(&Some(payload)).context("Failed to serialize a sync event")?;
     state::record_watermark(
         conn,
-        remote.event.id,
+        remote.event.entity_id,
+        remote.event.event_id,
         remote.event.timestamp,
-        &remote.device_id.to_string(),
+        &remote.event.device_id.to_string(),
         Some(&json),
     )
     .await?;
@@ -346,8 +488,9 @@ pub async fn resolve_conflict(
     state::record_watermark(
         &mut tx,
         entity_id,
+        conflict.event.event.event_id,
         conflict.event.event.timestamp,
-        &conflict.event.device_id.to_string(),
+        &conflict.event.event.device_id.to_string(),
         snapshot.as_deref(),
     )
     .await?;
@@ -415,13 +558,13 @@ pub async fn resolve_conflict(
             .await?;
         }
     }
-    tx.commit().await.context("Failed to commit a resolution")?;
     if matches!(conflict.kind, ConflictKind::CompletionOnMissingTask)
         && matches!(resolution, Resolution::Resurrect)
         && let Some(EntityPayload::Completion(data)) = &conflict.event.event.payload
     {
-        crate::db::sync_short_id(pool, data.todo_id).await?;
+        crate::db::sync_short_id(&mut tx, data.todo_id).await?;
     }
+    tx.commit().await.context("Failed to commit a resolution")?;
     Ok(())
 }
 
@@ -491,10 +634,10 @@ async fn find_entity_table(
     Ok(None)
 }
 
-/// The outbox rows to push, oldest first: `(event_id, SyncEvent)`.
-pub async fn pending_events(pool: &SqlitePool) -> Result<Vec<(crate::db::EventId, SyncEvent)>> {
+/// The outbox rows to push, oldest first.
+pub async fn pending_events(pool: &SqlitePool) -> Result<Vec<SyncEvent>> {
     let rows = sqlx::query(
-        "SELECT event_id, entity_id, timestamp, payload FROM _sync_events
+        "SELECT event_id, device_id, entity_id, timestamp, payload FROM _sync_events
          WHERE synced = 0 ORDER BY version ASC",
     )
     .fetch_all(pool)
@@ -504,14 +647,13 @@ pub async fn pending_events(pool: &SqlitePool) -> Result<Vec<(crate::db::EventId
         .map(|row| {
             let payload: Option<EntityPayload> =
                 serde_json::from_str(row.get("payload")).context("Corrupt outbox payload")?;
-            Ok((
-                row.get("event_id"),
-                SyncEvent {
-                    id: row.get("entity_id"),
-                    timestamp: row.get("timestamp"),
-                    payload,
-                },
-            ))
+            Ok(SyncEvent {
+                event_id: row.get("event_id"),
+                entity_id: row.get("entity_id"),
+                device_id: row.get("device_id"),
+                timestamp: row.get("timestamp"),
+                payload,
+            })
         })
         .collect()
 }

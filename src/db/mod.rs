@@ -291,10 +291,12 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         CREATE TABLE IF NOT EXISTS _sync_events (
             version    INTEGER PRIMARY KEY AUTOINCREMENT,
             event_id   TEXT NOT NULL UNIQUE,
+            device_id  TEXT NOT NULL,
             entity_id  TEXT NOT NULL,
             timestamp  INTEGER NOT NULL,
             payload    TEXT NOT NULL,
-            synced     INTEGER NOT NULL DEFAULT 0
+            synced     INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch())
         )
         "#,
     )
@@ -311,6 +313,9 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
             entity_id    TEXT PRIMARY KEY,
             timestamp    INTEGER NOT NULL,
             device_id    TEXT NOT NULL,
+            -- The applied event's id: the final LWW tie-breaker, so two
+            -- machines sharing a copied device id still converge.
+            event_id     TEXT NOT NULL,
             deleted      INTEGER NOT NULL DEFAULT 0,
             last_payload TEXT
         )
