@@ -826,7 +826,7 @@ pub fn interval_slot(interval: TrackerInterval, time_epoch: i64) -> Option<(i64,
 }
 
 /// The replacement-slot rules of the configured trackers, used when replaying
-/// tracker events (`@@SYNC.md` §4.3).
+/// tracker events (`@@SYNC.md` §4.1.4).
 ///
 /// Trackers that are not cumulative keep one entry per slot: logging again in
 /// the same slot replaces the previous entry. Two devices logging the same

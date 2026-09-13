@@ -523,6 +523,14 @@ pub fn is_text_field(kind: &str, field: &str) -> bool {
     )
 }
 
+/// Whether a text field holds free-form notes. A replacement conflict on a
+/// note can also be settled by keeping both texts; a name or a mood label can
+/// only be one value or the other (`@@SYNC.md` §4.2.1). The task and the mood
+/// body are the note columns, and both are called `body`.
+pub fn is_note_field(field: &str) -> bool {
+    field == task_field::BODY
+}
+
 impl SyncEvent {
     pub fn is_delete(&self) -> bool {
         self.payload.is_none()

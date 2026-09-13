@@ -26,8 +26,8 @@ use crate::tracker::TrackerSlots;
 use super::events;
 use super::state::{self, Stamp};
 use super::types::{
-    Change, EntityPayload, RemoteEvent, TrackerScore, completion_field, is_text_field, mood_field,
-    task_field, tracker_field,
+    Change, EntityPayload, RemoteEvent, TrackerScore, completion_field, is_note_field,
+    is_text_field, mood_field, task_field, tracker_field,
 };
 
 /// How many parent hops a cycle check follows before giving up: a loop already
@@ -123,7 +123,7 @@ impl ConflictKind {
                 ];
                 // Only a note can hold both texts; a name or a mood label is
                 // one value or the other.
-                if conflict.field == Some(mood_field::BODY) {
+                if conflict.field.is_some_and(is_note_field) {
                     options.push((
                         Resolution::AppendBoth,
                         "Append both",
@@ -414,10 +414,7 @@ pub async fn resolve_conflict(
                 Resolution::KeepLocal => conflict.local_value.clone().unwrap_or_default(),
                 Resolution::KeepRemote => conflict.remote_value.clone().unwrap_or_default(),
                 Resolution::AppendBoth => {
-                    anyhow::ensure!(
-                        field == task_field::BODY || field == mood_field::BODY,
-                        "only a note can hold both texts"
-                    );
+                    anyhow::ensure!(is_note_field(field), "only a note can hold both texts");
                     format!(
                         "{}\n{}",
                         conflict.local_value.clone().unwrap_or_default(),

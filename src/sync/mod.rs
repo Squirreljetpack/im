@@ -3,7 +3,7 @@
 //! The client half of the event stream: [`types`] is the wire format,
 //! [`state`] holds the device identity/clocks/LWW watermark, [`events`]
 //! appends the outbox rows that mutations produce, and [`apply`] replays
-//! incoming events (with the promptable delete conflicts of §4.4).
+//! incoming events (with the promptable text and parent conflicts of §4.2).
 
 pub mod apply;
 pub mod client;
@@ -24,6 +24,6 @@ pub use state::{
 };
 pub use types::{
     Change, CompletionData, EntityPayload, MoodCreateData, MoodUpdateData, RemoteEvent, SyncEvent,
-    TaskCreateData, TaskUpdateData, TrackerData, TrackerScore, TrackerUpdateData, is_text_field,
-    task_field,
+    TaskCreateData, TaskUpdateData, TrackerData, TrackerScore, TrackerUpdateData, is_note_field,
+    is_text_field, task_field,
 };

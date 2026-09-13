@@ -226,7 +226,7 @@ async fn remote_delete_removes_the_row() {
 }
 
 /// A deletion is terminal: it is applied without asking, and nothing that
-/// arrives for the entity afterwards brings it back (§4.2.2).
+/// arrives for the entity afterwards is applied (`@@SYNC.md` §4.1.5).
 #[tokio::test]
 async fn a_deletion_is_terminal() {
     let pool = test_pool().await.unwrap();
@@ -464,7 +464,7 @@ async fn cursor(pool: &SqlitePool) -> Option<String> {
 }
 
 /// A page whose completion is logged before the task it references still
-/// applies: the replay orders task upserts first (§4.5), so the foreign key
+/// applies: the replay orders task upserts first (§4.3), so the foreign key
 /// never fails and no conflict is raised. The cursor moves with the page.
 #[tokio::test]
 async fn a_page_applies_dependencies_before_dependents() {
@@ -503,8 +503,9 @@ async fn a_page_applies_dependencies_before_dependents() {
 }
 
 /// Two devices that logged the same tracker slot while offline keep only the
-/// winner after the replay, and the cleanup emits nothing (§4.3): every
-/// device derives the same state from the same events.
+/// winner after the replay: the loser is deleted locally and published as a
+/// deletion of its own, so every device converges on the winner without
+/// sharing this device's slots (`@@SYNC.md` §4.1.4).
 #[tokio::test]
 async fn a_replayed_tracker_slot_keeps_only_the_winner() {
     use crate::db::{EntryObject, TrackerObject, TrackerValue};
