@@ -85,7 +85,9 @@ pub async fn edit_task(pool: &SqlitePool, update: &UpdateTaskObject) -> Result<u
     if res.rows_affected() > 0
         && let Some(before) = before
     {
-        crate::sync::events::task_update(&mut tx, update.id, edit_diff(&before, update)).await?;
+        for diff in edit_diff(&before, update) {
+            crate::sync::events::task_update(&mut tx, update.id, diff).await?;
+        }
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(res.rows_affected())
@@ -109,42 +111,42 @@ async fn fetch_edit_preimage(
 }
 
 /// The diff between a task's stored columns and the edit applied to them.
-/// `None` fields mean *unchanged*; a nullable field wrapped twice marks a
-/// clear (`Some(None)`) apart from an absent one (§3).
 fn edit_diff(
     before: &sqlx::sqlite::SqliteRow,
     update: &UpdateTaskObject,
-) -> crate::sync::TaskUpdateData {
-    let mut diff = crate::sync::TaskUpdateData::default();
+) -> Vec<crate::sync::TaskUpdate> {
+    let mut diff = Vec::new();
     if before.get::<String, _>("name") != update.name {
-        diff.name = Some(update.name.clone());
+        diff.push(crate::sync::TaskUpdate::Name(update.name.clone()));
     }
     if before.get::<String, _>("body") != update.body {
-        diff.body = Some(update.body.clone());
+        diff.push(crate::sync::TaskUpdate::Body(update.body.clone()));
     }
     if before.get::<i32, _>("priority") != update.priority {
-        diff.priority = Some(update.priority);
+        diff.push(crate::sync::TaskUpdate::Priority(update.priority));
     }
     if before.get::<Option<i64>, _>("start_time") != update.start_time {
-        diff.start_time = update.start_time;
+        diff.push(crate::sync::TaskUpdate::StartTime(update.start_time));
     }
     if before.get::<Option<i64>, _>("available_duration_secs") != update.available_duration_secs {
-        diff.available_duration_secs = Some(update.available_duration_secs);
+        diff.push(crate::sync::TaskUpdate::AvailableDurationSecs(
+            update.available_duration_secs,
+        ));
     }
     if before.get::<Option<i64>, _>("interval_secs") != update.interval_secs {
-        diff.interval_secs = update.interval_secs;
+        diff.push(crate::sync::TaskUpdate::IntervalSecs(update.interval_secs));
     }
     if before.get::<i32, _>("target_count") != update.target_count {
-        diff.target_count = Some(update.target_count);
+        diff.push(crate::sync::TaskUpdate::TargetCount(update.target_count));
     }
     if (before.get::<i32, _>("optional") != 0) != update.optional {
-        diff.optional = Some(update.optional);
+        diff.push(crate::sync::TaskUpdate::Optional(update.optional));
     }
     if before.get::<Option<i64>, _>("end_time") != update.end_time {
-        diff.end_time = update.end_time;
+        diff.push(crate::sync::TaskUpdate::EndTime(update.end_time));
     }
     if before.get::<Option<Id>, _>("parent") != update.parent {
-        diff.parent_id = Some(update.parent);
+        diff.push(crate::sync::TaskUpdate::ParentId(update.parent));
     }
     diff
 }
@@ -797,11 +799,12 @@ pub async fn update_todo_body(pool: &SqlitePool, id: Id, body: &str) -> Result<u
         .await
         .context("Failed to update task body")?;
     if res.rows_affected() > 0 {
-        let diff = crate::sync::TaskUpdateData {
-            body: Some(body.to_string()),
-            ..Default::default()
-        };
-        crate::sync::events::task_update(&mut tx, id, diff).await?;
+        crate::sync::events::task_update(
+            &mut tx,
+            id,
+            crate::sync::TaskUpdate::Body(body.to_string()),
+        )
+        .await?;
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(res.rows_affected())
@@ -821,11 +824,12 @@ pub async fn set_task_parent(pool: &SqlitePool, task_id: Id, parent_id: Id) -> R
         .await
         .context("Failed to set task parent")?;
     if res.rows_affected() > 0 {
-        let diff = crate::sync::TaskUpdateData {
-            parent_id: Some(Some(parent_id)),
-            ..Default::default()
-        };
-        crate::sync::events::task_update(&mut tx, task_id, diff).await?;
+        crate::sync::events::task_update(
+            &mut tx,
+            task_id,
+            crate::sync::TaskUpdate::ParentId(Some(parent_id)),
+        )
+        .await?;
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(res.rows_affected())

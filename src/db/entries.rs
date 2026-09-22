@@ -360,11 +360,12 @@ pub async fn link_mood_to_tasks(pool: &SqlitePool, mood_id: Id, task_ids: &[Id])
         .await
         .context("Failed to link mood to task")?;
     if res.rows_affected() > 0 {
-        let diff = crate::sync::MoodUpdateData {
-            todo_id: Some(task_id),
-            ..Default::default()
-        };
-        crate::sync::events::mood_update(&mut tx, mood_id, diff).await?;
+        crate::sync::events::mood_update(
+            &mut tx,
+            mood_id,
+            crate::sync::MoodUpdate::TodoId(task_id),
+        )
+        .await?;
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(())
@@ -382,11 +383,12 @@ pub async fn link_mood_to_task(pool: &SqlitePool, mood_id: Id, task_id: Id) -> R
         .await
         .context("Failed to link mood to task")?;
     if result.rows_affected() > 0 {
-        let diff = crate::sync::MoodUpdateData {
-            todo_id: Some(Some(task_id)),
-            ..Default::default()
-        };
-        crate::sync::events::mood_update(&mut tx, mood_id, diff).await?;
+        crate::sync::events::mood_update(
+            &mut tx,
+            mood_id,
+            crate::sync::MoodUpdate::TodoId(Some(task_id)),
+        )
+        .await?;
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(result.rows_affected())
@@ -729,11 +731,12 @@ pub async fn update_tracker_score(pool: &SqlitePool, id: Id, value: &TrackerValu
         .await
         .context("Failed to update tracker score")?;
     if res.rows_affected() > 0 {
-        let diff = crate::sync::TrackerUpdateData {
-            score: Some(crate::sync::TrackerScore::from(value)),
-            ..Default::default()
-        };
-        crate::sync::events::tracker_update(&mut tx, id, diff).await?;
+        crate::sync::events::tracker_update(
+            &mut tx,
+            id,
+            crate::sync::TrackerUpdate::Score(crate::sync::TrackerScore::from(value)),
+        )
+        .await?;
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(res.rows_affected())
@@ -762,11 +765,12 @@ pub async fn update_tracker_time(pool: &SqlitePool, id: Id, time: i64) -> Result
         .await
         .context("Failed to update tracker entry time")?;
     if res.rows_affected() > 0 {
-        let diff = crate::sync::TrackerUpdateData {
-            time: Some(time),
-            ..Default::default()
-        };
-        crate::sync::events::tracker_update(&mut tx, id, diff).await?;
+        crate::sync::events::tracker_update(
+            &mut tx,
+            id,
+            crate::sync::TrackerUpdate::Time(time),
+        )
+        .await?;
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(res.rows_affected())

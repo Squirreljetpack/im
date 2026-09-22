@@ -6,7 +6,7 @@
 //! `serde(transparent)` over `uuid::Uuid`, so the JSON matches the spec.
 
 use anyhow::Context;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::db::{EventId, Id, TrackerValue};
@@ -99,13 +99,21 @@ pub struct RemoteEvent {
 #[serde(tag = "type", content = "data")]
 pub enum EntityPayload {
     TaskCreate(TaskCreateData),
-    TaskUpdate(TaskUpdateData),
+    TaskUpdate(TaskUpdate),
     MoodCreate(MoodCreateData),
-    MoodUpdate(MoodUpdateData),
+    MoodUpdate(MoodUpdate),
     TrackerCreate(TrackerData),
-    TrackerUpdate(TrackerUpdateData),
+    TrackerUpdate(TrackerUpdate),
     Completion(CompletionData),
 }
+
+/// Alias for `EntityPayload` as an event variant.
+pub type Event = EntityPayload;
+
+/// Backward-compatible type aliases.
+pub type TaskUpdateData = TaskUpdate;
+pub type MoodUpdateData = MoodUpdate;
+pub type TrackerUpdateData = TrackerUpdate;
 
 /// A new task: every column a peer needs to materialize the row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -132,41 +140,46 @@ pub struct TaskCreateData {
     pub parent_id: Option<Id>,
 }
 
-/// An edited task: only the fields the edit touched.
-///
-/// `None` means *unchanged*; a nullable field wrapped twice
-/// ([`double_option`]) also distinguishes a **clear** (`Some(None)` → `NULL`)
-/// from an absent field.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct TaskUpdateData {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub priority: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub start_time: Option<i64>,
-    #[serde(
-        default,
-        deserialize_with = "double_option",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub available_duration_secs: Option<Option<i64>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interval_secs: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_count: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub optional: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub end_time: Option<i64>,
-    #[serde(
-        default,
-        deserialize_with = "double_option",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub parent_id: Option<Option<Id>>,
+/// An update to a single field of a task.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "field", content = "value", rename_all = "snake_case")]
+pub enum TaskUpdate {
+    Name(String),
+    Body(String),
+    Priority(i32),
+    StartTime(Option<i64>),
+    AvailableDurationSecs(Option<i64>),
+    IntervalSecs(Option<i64>),
+    TargetCount(i32),
+    Optional(bool),
+    EndTime(Option<i64>),
+    ParentId(Option<Id>),
+}
+
+impl TaskUpdate {
+    pub fn change(&self) -> Change {
+        match self {
+            TaskUpdate::Name(name) => Change::set(task_field::NAME, name),
+            TaskUpdate::Body(body) => Change::set(task_field::BODY, body),
+            TaskUpdate::Priority(priority) => Change::set(task_field::PRIORITY, priority),
+            TaskUpdate::StartTime(Some(time)) => Change::set(task_field::START_TIME, time),
+            TaskUpdate::StartTime(None) => Change::clear(task_field::START_TIME),
+            TaskUpdate::AvailableDurationSecs(Some(secs)) => {
+                Change::set(task_field::AVAILABLE_DURATION_SECS, secs)
+            }
+            TaskUpdate::AvailableDurationSecs(None) => {
+                Change::clear(task_field::AVAILABLE_DURATION_SECS)
+            }
+            TaskUpdate::IntervalSecs(Some(secs)) => Change::set(task_field::INTERVAL_SECS, secs),
+            TaskUpdate::IntervalSecs(None) => Change::clear(task_field::INTERVAL_SECS),
+            TaskUpdate::TargetCount(count) => Change::set(task_field::TARGET_COUNT, count),
+            TaskUpdate::Optional(optional) => Change::set(task_field::OPTIONAL, optional),
+            TaskUpdate::EndTime(Some(time)) => Change::set(task_field::END_TIME, time),
+            TaskUpdate::EndTime(None) => Change::clear(task_field::END_TIME),
+            TaskUpdate::ParentId(Some(parent)) => Change::set(task_field::PARENT_ID, parent),
+            TaskUpdate::ParentId(None) => Change::clear(task_field::PARENT_ID),
+        }
+    }
 }
 
 /// A new mood entry.
@@ -180,27 +193,33 @@ pub struct MoodCreateData {
     pub score: Option<f32>,
     #[serde(default)]
     pub duration: Option<i64>,
-    #[serde(default)]
     pub todo_id: Option<Id>,
 }
 
-/// An edited mood entry: only the fields the edit touched.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct MoodUpdateData {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mood: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub score: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration: Option<i64>,
-    #[serde(
-        default,
-        deserialize_with = "double_option",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub todo_id: Option<Option<Id>>,
+/// An update to a single field of a mood entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "field", content = "value", rename_all = "snake_case")]
+pub enum MoodUpdate {
+    Mood(String),
+    Body(String),
+    Score(Option<f32>),
+    Duration(Option<i64>),
+    TodoId(Option<Id>),
+}
+
+impl MoodUpdate {
+    pub fn change(&self) -> Change {
+        match self {
+            MoodUpdate::Mood(mood) => Change::set(mood_field::MOOD, mood),
+            MoodUpdate::Body(body) => Change::set(mood_field::BODY, body),
+            MoodUpdate::Score(Some(score)) => Change::set(mood_field::SCORE, score),
+            MoodUpdate::Score(None) => Change::clear(mood_field::SCORE),
+            MoodUpdate::Duration(Some(dur)) => Change::set(mood_field::DURATION, dur),
+            MoodUpdate::Duration(None) => Change::clear(mood_field::DURATION),
+            MoodUpdate::TodoId(Some(todo)) => Change::set(mood_field::TODO_ID, todo),
+            MoodUpdate::TodoId(None) => Change::clear(mood_field::TODO_ID),
+        }
+    }
 }
 
 /// A new tracker entry.
@@ -213,19 +232,24 @@ pub struct TrackerData {
     pub mood_id: Option<Id>,
 }
 
-/// An edited tracker entry: only the fields the edit touched.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct TrackerUpdateData {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub score: Option<TrackerScore>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub time: Option<i64>,
-    #[serde(
-        default,
-        deserialize_with = "double_option",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub mood_id: Option<Option<Id>>,
+/// An update to a single field of a tracker entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "field", content = "value", rename_all = "snake_case")]
+pub enum TrackerUpdate {
+    Score(TrackerScore),
+    Time(i64),
+    MoodId(Option<Id>),
+}
+
+impl TrackerUpdate {
+    pub fn change(&self) -> Change {
+        match self {
+            TrackerUpdate::Score(score) => Change::set(tracker_field::SCORE, score),
+            TrackerUpdate::Time(time) => Change::set(tracker_field::TIME, time),
+            TrackerUpdate::MoodId(Some(mood)) => Change::set(tracker_field::MOOD_ID, mood),
+            TrackerUpdate::MoodId(None) => Change::clear(tracker_field::MOOD_ID),
+        }
+    }
 }
 
 /// Completions are append-only and immutable: editing a count is not
@@ -240,16 +264,6 @@ pub struct CompletionData {
 
 fn default_count() -> i32 {
     1
-}
-
-/// Deserialize a nullable field so an explicit `null` (a clear) differs from
-/// an absent one (unchanged).
-fn double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
-where
-    T: Deserialize<'de>,
-    D: Deserializer<'de>,
-{
-    Deserialize::deserialize(deserializer).map(Some)
 }
 
 /// A tracker value with its storage class preserved (the `tracker.score`
@@ -321,46 +335,7 @@ impl EntityPayload {
                 Change::set(task_field::END_TIME, data.end_time),
                 Change::set(task_field::PARENT_ID, data.parent_id),
             ],
-            EntityPayload::TaskUpdate(data) => {
-                let mut changes = Vec::new();
-                if let Some(name) = &data.name {
-                    changes.push(Change::set(task_field::NAME, name));
-                }
-                if let Some(body) = &data.body {
-                    changes.push(Change::set(task_field::BODY, body));
-                }
-                if let Some(priority) = data.priority {
-                    changes.push(Change::set(task_field::PRIORITY, priority));
-                }
-                if let Some(start_time) = data.start_time {
-                    changes.push(Change::set(task_field::START_TIME, start_time));
-                }
-                match data.available_duration_secs {
-                    Some(Some(secs)) => {
-                        changes.push(Change::set(task_field::AVAILABLE_DURATION_SECS, secs))
-                    }
-                    Some(None) => changes.push(Change::clear(task_field::AVAILABLE_DURATION_SECS)),
-                    None => {}
-                }
-                if let Some(interval_secs) = data.interval_secs {
-                    changes.push(Change::set(task_field::INTERVAL_SECS, interval_secs));
-                }
-                if let Some(target_count) = data.target_count {
-                    changes.push(Change::set(task_field::TARGET_COUNT, target_count));
-                }
-                if let Some(optional) = data.optional {
-                    changes.push(Change::set(task_field::OPTIONAL, optional));
-                }
-                if let Some(end_time) = data.end_time {
-                    changes.push(Change::set(task_field::END_TIME, end_time));
-                }
-                match data.parent_id {
-                    Some(Some(parent)) => changes.push(Change::set(task_field::PARENT_ID, parent)),
-                    Some(None) => changes.push(Change::clear(task_field::PARENT_ID)),
-                    None => {}
-                }
-                changes
-            }
+            EntityPayload::TaskUpdate(data) => vec![data.change()],
             EntityPayload::MoodCreate(data) => vec![
                 Change::set(mood_field::MOOD, &data.mood),
                 Change::set(mood_field::BODY, &data.body),
@@ -369,48 +344,14 @@ impl EntityPayload {
                 Change::set(mood_field::DURATION, data.duration),
                 Change::set(mood_field::TODO_ID, data.todo_id),
             ],
-            EntityPayload::MoodUpdate(data) => {
-                let mut changes = Vec::new();
-                if let Some(mood) = &data.mood {
-                    changes.push(Change::set(mood_field::MOOD, mood));
-                }
-                if let Some(body) = &data.body {
-                    changes.push(Change::set(mood_field::BODY, body));
-                }
-                if let Some(score) = data.score {
-                    changes.push(Change::set(mood_field::SCORE, score));
-                }
-                if let Some(duration) = data.duration {
-                    changes.push(Change::set(mood_field::DURATION, duration));
-                }
-                match data.todo_id {
-                    Some(Some(todo)) => changes.push(Change::set(mood_field::TODO_ID, todo)),
-                    Some(None) => changes.push(Change::clear(mood_field::TODO_ID)),
-                    None => {}
-                }
-                changes
-            }
+            EntityPayload::MoodUpdate(data) => vec![data.change()],
             EntityPayload::TrackerCreate(data) => vec![
                 Change::set(tracker_field::TRACKER_TYPE, &data.tracker_type),
                 Change::set(tracker_field::SCORE, &data.score),
                 Change::set(tracker_field::TIME, data.time),
                 Change::set(tracker_field::MOOD_ID, data.mood_id),
             ],
-            EntityPayload::TrackerUpdate(data) => {
-                let mut changes = Vec::new();
-                if let Some(score) = &data.score {
-                    changes.push(Change::set(tracker_field::SCORE, score));
-                }
-                if let Some(time) = data.time {
-                    changes.push(Change::set(tracker_field::TIME, time));
-                }
-                match data.mood_id {
-                    Some(Some(mood)) => changes.push(Change::set(tracker_field::MOOD_ID, mood)),
-                    Some(None) => changes.push(Change::clear(tracker_field::MOOD_ID)),
-                    None => {}
-                }
-                changes
-            }
+            EntityPayload::TrackerUpdate(data) => vec![data.change()],
             EntityPayload::Completion(data) => vec![
                 Change::set(completion_field::TODO_ID, data.todo_id),
                 Change::set(completion_field::TIME, data.time),
@@ -430,82 +371,59 @@ impl EntityPayload {
 pub fn payload_of_change(kind: &str, change: &Change) -> anyhow::Result<EntityPayload> {
     let value = change.value.clone();
     match (kind, change.field) {
-        ("task", task_field::NAME) => Ok(EntityPayload::TaskUpdate(TaskUpdateData {
-            name: Some(
-                value
-                    .and_then(|value| value.as_str().map(str::to_string))
-                    .unwrap_or_default(),
-            ),
-            ..TaskUpdateData::default()
-        })),
-        ("task", task_field::BODY) => Ok(EntityPayload::TaskUpdate(TaskUpdateData {
-            body: Some(
-                value
-                    .and_then(|value| value.as_str().map(str::to_string))
-                    .unwrap_or_default(),
-            ),
-            ..TaskUpdateData::default()
-        })),
-        ("task", task_field::PARENT_ID) => Ok(EntityPayload::TaskUpdate(TaskUpdateData {
-            parent_id: Some(
-                value
-                    .as_ref()
-                    .and_then(|value| value.as_str())
-                    .and_then(|text| Id::parse(text).ok()),
-            ),
-            ..TaskUpdateData::default()
-        })),
+        ("task", task_field::NAME) => Ok(EntityPayload::TaskUpdate(TaskUpdate::Name(
+            value
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_default(),
+        ))),
+        ("task", task_field::BODY) => Ok(EntityPayload::TaskUpdate(TaskUpdate::Body(
+            value
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_default(),
+        ))),
+        ("task", task_field::PARENT_ID) => Ok(EntityPayload::TaskUpdate(TaskUpdate::ParentId(
+            value
+                .as_ref()
+                .and_then(|value| value.as_str())
+                .and_then(|text| Id::parse(text).ok()),
+        ))),
         ("task", task_field::AVAILABLE_DURATION_SECS) => {
-            Ok(EntityPayload::TaskUpdate(TaskUpdateData {
-                available_duration_secs: Some(value.as_ref().and_then(Value::as_i64)),
-                ..TaskUpdateData::default()
-            }))
+            Ok(EntityPayload::TaskUpdate(TaskUpdate::AvailableDurationSecs(
+                value.as_ref().and_then(Value::as_i64),
+            )))
         }
-        ("mood", mood_field::MOOD) => Ok(EntityPayload::MoodUpdate(MoodUpdateData {
-            mood: Some(
-                value
-                    .and_then(|value| value.as_str().map(str::to_string))
-                    .unwrap_or_default(),
-            ),
-            ..MoodUpdateData::default()
-        })),
-        ("mood", mood_field::BODY) => Ok(EntityPayload::MoodUpdate(MoodUpdateData {
-            body: Some(
-                value
-                    .and_then(|value| value.as_str().map(str::to_string))
-                    .unwrap_or_default(),
-            ),
-            ..MoodUpdateData::default()
-        })),
-        ("mood", mood_field::TODO_ID) => Ok(EntityPayload::MoodUpdate(MoodUpdateData {
-            todo_id: Some(
+        ("mood", mood_field::MOOD) => Ok(EntityPayload::MoodUpdate(MoodUpdate::Mood(
+            value
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_default(),
+        ))),
+        ("mood", mood_field::BODY) => Ok(EntityPayload::MoodUpdate(MoodUpdate::Body(
+            value
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_default(),
+        ))),
+        ("mood", mood_field::TODO_ID) => Ok(EntityPayload::MoodUpdate(MoodUpdate::TodoId(
+            value
+                .as_ref()
+                .and_then(|value| value.as_str())
+                .and_then(|text| Id::parse(text).ok()),
+        ))),
+        ("tracker", tracker_field::SCORE) => Ok(EntityPayload::TrackerUpdate(TrackerUpdate::Score(
+            value
+                .map(|value| serde_json::from_value(value).context("Corrupt tracker score"))
+                .transpose()?
+                .context("Tracker score cannot be null")?,
+        ))),
+        ("tracker", tracker_field::TIME) => Ok(EntityPayload::TrackerUpdate(TrackerUpdate::Time(
+            value.as_ref().and_then(Value::as_i64).unwrap_or_default(),
+        ))),
+        ("tracker", tracker_field::MOOD_ID) => {
+            Ok(EntityPayload::TrackerUpdate(TrackerUpdate::MoodId(
                 value
                     .as_ref()
                     .and_then(|value| value.as_str())
                     .and_then(|text| Id::parse(text).ok()),
-            ),
-            ..MoodUpdateData::default()
-        })),
-        ("tracker", tracker_field::SCORE) => Ok(EntityPayload::TrackerUpdate(TrackerUpdateData {
-            score: value
-                .map(|value| serde_json::from_value(value).context("Corrupt tracker score"))
-                .transpose()?,
-            ..TrackerUpdateData::default()
-        })),
-        ("tracker", tracker_field::TIME) => Ok(EntityPayload::TrackerUpdate(TrackerUpdateData {
-            time: value.as_ref().and_then(Value::as_i64),
-            ..TrackerUpdateData::default()
-        })),
-        ("tracker", tracker_field::MOOD_ID) => {
-            Ok(EntityPayload::TrackerUpdate(TrackerUpdateData {
-                mood_id: Some(
-                    value
-                        .as_ref()
-                        .and_then(|value| value.as_str())
-                        .and_then(|text| Id::parse(text).ok()),
-                ),
-                ..TrackerUpdateData::default()
-            }))
+            )))
         }
         (kind, field) => anyhow::bail!("cannot publish field '{field}' of a {kind}"),
     }
@@ -534,26 +452,5 @@ pub fn is_note_field(field: &str) -> bool {
 impl SyncEvent {
     pub fn is_delete(&self) -> bool {
         self.payload.is_none()
-    }
-}
-
-impl TaskUpdateData {
-    /// Whether the edit changed anything at all.
-    pub fn is_empty(&self) -> bool {
-        *self == TaskUpdateData::default()
-    }
-}
-
-impl MoodUpdateData {
-    /// Whether the edit changed anything at all.
-    pub fn is_empty(&self) -> bool {
-        *self == MoodUpdateData::default()
-    }
-}
-
-impl TrackerUpdateData {
-    /// Whether the edit changed anything at all.
-    pub fn is_empty(&self) -> bool {
-        *self == TrackerUpdateData::default()
     }
 }

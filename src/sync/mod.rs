@@ -23,7 +23,7 @@ pub use state::{
     now_ms,
 };
 pub use types::{
-    Change, CompletionData, EntityPayload, MoodCreateData, MoodUpdateData, RemoteEvent, SyncEvent,
-    TaskCreateData, TaskUpdateData, TrackerData, TrackerScore, TrackerUpdateData, is_note_field,
-    is_text_field, task_field,
+    Change, CompletionData, EntityPayload, Event, MoodCreateData, MoodUpdate, MoodUpdateData,
+    RemoteEvent, SyncEvent, TaskCreateData, TaskUpdate, TaskUpdateData, TrackerData, TrackerScore,
+    TrackerUpdate, TrackerUpdateData, is_note_field, is_text_field, task_field,
 };

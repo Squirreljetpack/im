@@ -604,15 +604,12 @@ async fn a_replayed_tracker_slot_keeps_only_the_winner() {
 // Field-level diffs (§3, §4.1)
 // ---------------------------------------------------------------------------
 
-fn task_update(fields: crate::sync::TaskUpdateData) -> crate::sync::EntityPayload {
-    crate::sync::EntityPayload::TaskUpdate(fields)
+fn task_update(field: crate::sync::TaskUpdate) -> crate::sync::EntityPayload {
+    crate::sync::EntityPayload::TaskUpdate(field)
 }
 
 fn priority_change(priority: i32) -> crate::sync::EntityPayload {
-    task_update(crate::sync::TaskUpdateData {
-        priority: Some(priority),
-        ..Default::default()
-    })
+    task_update(crate::sync::TaskUpdate::Priority(priority))
 }
 
 async fn task_i64(pool: &SqlitePool, id: Id, column: &str) -> Option<i64> {
@@ -640,31 +637,27 @@ async fn task_parent(pool: &SqlitePool, id: Id) -> Option<Id> {
         .unwrap()
 }
 
-/// A clear survives the JSON round trip: an absent field means *unchanged*, an
-/// explicit `null` means *clear the column*, and the two never collapse.
+/// A clear is an explicit enum variant with None and serializes to null.
 #[test]
-fn a_clear_is_not_an_absent_field() {
-    let update = crate::sync::TaskUpdateData {
-        available_duration_secs: Some(None),
-        parent_id: Some(None),
-        priority: Some(3),
-        ..Default::default()
-    };
+fn a_clear_is_an_explicit_variant_with_none() {
+    let update = crate::sync::TaskUpdate::AvailableDurationSecs(None);
     let json = serde_json::to_string(&update).unwrap();
-    assert!(json.contains("\"available_duration_secs\":null"), "{json}");
-    assert!(json.contains("\"parent_id\":null"), "{json}");
-    assert!(
-        !json.contains("target_count"),
-        "unset fields stay out: {json}"
-    );
+    assert_eq!(json, "{\"field\":\"available_duration_secs\",\"value\":null}");
 
-    let parsed: crate::sync::TaskUpdateData = serde_json::from_str(&json).unwrap();
+    let parsed: crate::sync::TaskUpdate = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed, update);
 
-    // A field that is only absent still means unchanged.
-    let absent: crate::sync::TaskUpdateData = serde_json::from_str("{}").unwrap();
-    assert_eq!(absent, crate::sync::TaskUpdateData::default());
-    assert!(absent.is_empty());
+    let parent_clear = crate::sync::TaskUpdate::ParentId(None);
+    let json_parent = serde_json::to_string(&parent_clear).unwrap();
+    assert_eq!(json_parent, "{\"field\":\"parent_id\",\"value\":null}");
+    let parsed_parent: crate::sync::TaskUpdate = serde_json::from_str(&json_parent).unwrap();
+    assert_eq!(parsed_parent, parent_clear);
+
+    let set_val = crate::sync::TaskUpdate::Priority(3);
+    let json_set = serde_json::to_string(&set_val).unwrap();
+    assert_eq!(json_set, "{\"field\":\"priority\",\"value\":3}");
+    let parsed_set: crate::sync::TaskUpdate = serde_json::from_str(&json_set).unwrap();
+    assert_eq!(parsed_set, set_val);
 }
 
 /// Two devices editing *different* fields keep both edits, whatever order the
@@ -679,10 +672,9 @@ async fn disjoint_field_updates_both_survive() {
             Id::new(),
             future_ts() + 500,
             id,
-            Some(task_update(crate::sync::TaskUpdateData {
-                start_time: Some(1_800_000_000),
-                ..Default::default()
-            })),
+            Some(task_update(crate::sync::TaskUpdate::StartTime(Some(
+                1_800_000_000,
+            )))),
         );
         let events = if reversed {
             vec![newer, older]
@@ -746,10 +738,9 @@ async fn a_cleared_field_reaches_the_other_device() {
             Id::new(),
             future_ts(),
             id,
-            Some(task_update(crate::sync::TaskUpdateData {
-                available_duration_secs: Some(Some(600)),
-                ..Default::default()
-            })),
+            Some(task_update(crate::sync::TaskUpdate::AvailableDurationSecs(
+                Some(600),
+            ))),
         ),
     )
     .await
@@ -765,10 +756,9 @@ async fn a_cleared_field_reaches_the_other_device() {
             Id::new(),
             future_ts() + 1,
             id,
-            Some(task_update(crate::sync::TaskUpdateData {
-                available_duration_secs: Some(None),
-                ..Default::default()
-            })),
+            Some(task_update(crate::sync::TaskUpdate::AvailableDurationSecs(
+                None,
+            ))),
         ),
     )
     .await
@@ -789,10 +779,9 @@ async fn note_conflict(pool: &SqlitePool) -> (Id, crate::sync::apply::Conflict) 
         Id::new(),
         future_ts(),
         id,
-        Some(task_update(crate::sync::TaskUpdateData {
-            body: Some("remote note".to_string()),
-            ..Default::default()
-        })),
+        Some(task_update(crate::sync::TaskUpdate::Body(
+            "remote note".to_string(),
+        ))),
     );
     let step = crate::sync::apply::apply_event(pool, &incoming)
         .await
@@ -834,8 +823,8 @@ async fn a_contested_note_can_keep_the_local_text() {
     let published = pending.last().unwrap();
     assert!(published.timestamp > conflict.event.event.timestamp);
     match &published.payload {
-        Some(crate::sync::EntityPayload::TaskUpdate(data)) => {
-            assert_eq!(data.body.as_deref(), Some("local note"));
+        Some(crate::sync::EntityPayload::TaskUpdate(crate::sync::TaskUpdate::Body(body))) => {
+            assert_eq!(body, "local note");
         }
         other => panic!("expected a body update, got {other:?}"),
     }
@@ -867,10 +856,7 @@ async fn cycle_conflict(pool: &SqlitePool) -> (Id, Id, crate::sync::apply::Confl
         Id::new(),
         future_ts(),
         b,
-        Some(task_update(crate::sync::TaskUpdateData {
-            parent_id: Some(Some(a)),
-            ..Default::default()
-        })),
+        Some(task_update(crate::sync::TaskUpdate::ParentId(Some(a)))),
     );
     let step = crate::sync::apply::apply_event(pool, &incoming)
         .await
@@ -934,19 +920,13 @@ async fn a_third_device_repairs_a_cycle_deterministically() {
             Id::new(),
             future_ts(),
             a,
-            Some(task_update(crate::sync::TaskUpdateData {
-                parent_id: Some(Some(b)),
-                ..Default::default()
-            })),
+            Some(task_update(crate::sync::TaskUpdate::ParentId(Some(b)))),
         );
         let ba = remote(
             Id::new(),
             future_ts() + 500,
             b,
-            Some(task_update(crate::sync::TaskUpdateData {
-                parent_id: Some(Some(a)),
-                ..Default::default()
-            })),
+            Some(task_update(crate::sync::TaskUpdate::ParentId(Some(a)))),
         );
         let events = if reversed { vec![ba, ab] } else { vec![ab, ba] };
 

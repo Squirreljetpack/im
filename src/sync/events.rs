@@ -12,8 +12,8 @@ use crate::db::{EventId, Id};
 
 use super::state::{self, Stamp};
 use super::types::{
-    Change, CompletionData, EntityPayload, MoodCreateData, MoodUpdateData, TaskCreateData,
-    TaskUpdateData, TrackerData, TrackerScore, TrackerUpdateData,
+    Change, CompletionData, EntityPayload, MoodCreateData, MoodUpdate, TaskCreateData,
+    TaskUpdate, TrackerData, TrackerScore, TrackerUpdate,
 };
 
 /// Emit the creation snapshot of a task.
@@ -47,12 +47,9 @@ pub async fn task_create(conn: &mut SqliteConnection, id: Id) -> Result<()> {
     .await
 }
 
-/// Emit an edit of a task: only the fields the edit changed.
-pub async fn task_update(conn: &mut SqliteConnection, id: Id, diff: TaskUpdateData) -> Result<()> {
-    if diff.is_empty() {
-        return Ok(());
-    }
-    emit_mutation(conn, id, EntityPayload::TaskUpdate(diff)).await
+/// Emit an edit of a task field.
+pub async fn task_update(conn: &mut SqliteConnection, id: Id, update: TaskUpdate) -> Result<()> {
+    emit_mutation(conn, id, EntityPayload::TaskUpdate(update)).await
 }
 
 /// Emit the creation snapshot of a mood entry.
@@ -79,12 +76,9 @@ pub async fn mood_create(conn: &mut SqliteConnection, id: Id) -> Result<()> {
     .await
 }
 
-/// Emit an edit of a mood entry: only the fields the edit changed.
-pub async fn mood_update(conn: &mut SqliteConnection, id: Id, diff: MoodUpdateData) -> Result<()> {
-    if diff.is_empty() {
-        return Ok(());
-    }
-    emit_mutation(conn, id, EntityPayload::MoodUpdate(diff)).await
+/// Emit an edit of a mood field.
+pub async fn mood_update(conn: &mut SqliteConnection, id: Id, update: MoodUpdate) -> Result<()> {
+    emit_mutation(conn, id, EntityPayload::MoodUpdate(update)).await
 }
 
 /// Emit the creation snapshot of a tracker entry.
@@ -113,16 +107,13 @@ pub async fn tracker_create(conn: &mut SqliteConnection, id: Id) -> Result<()> {
     .await
 }
 
-/// Emit an edit of a tracker entry: only the fields the edit changed.
+/// Emit an edit of a tracker field.
 pub async fn tracker_update(
     conn: &mut SqliteConnection,
     id: Id,
-    diff: TrackerUpdateData,
+    update: TrackerUpdate,
 ) -> Result<()> {
-    if diff.is_empty() {
-        return Ok(());
-    }
-    emit_mutation(conn, id, EntityPayload::TrackerUpdate(diff)).await
+    emit_mutation(conn, id, EntityPayload::TrackerUpdate(update)).await
 }
 
 /// Emit a logged completion (append-only, never edited — §3).
