@@ -487,6 +487,7 @@ async fn resolve_cycle(
         Resolution::UseLocalParent => {
             // Keep this device's link and publish it, so peers that applied the
             // incoming link revert.
+            record_event_stamps(conn, conflict).await?;
             let local = conflict.local_parent;
             let change = match local {
                 Some(parent) => Change::set(task_field::PARENT_ID, parent),
@@ -502,7 +503,6 @@ async fn resolve_cycle(
             )
             .await?;
             events::republish_field(conn, entity_id, "task", &change).await?;
-            record_event_stamps(conn, conflict).await?;
         }
         Resolution::DetachBoth => {
             record_event_stamps(conn, conflict).await?;
@@ -1041,13 +1041,23 @@ pub async fn pending_events(pool: &SqlitePool) -> Result<Vec<super::types::SyncE
 
 /// Mark the outbox rows as pushed (their server ack arrived).
 pub async fn mark_pushed(pool: &SqlitePool, event_ids: &[crate::db::EventId]) -> Result<()> {
+    if event_ids.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to start transaction to settle pushed events")?;
     for event_id in event_ids {
         sqlx::query("UPDATE _sync_events SET synced = 1 WHERE event_id = ?")
             .bind(event_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .context("Failed to settle a pushed event")?;
     }
+    tx.commit()
+        .await
+        .context("Failed to commit settled pushed events")?;
     Ok(())
 }
 

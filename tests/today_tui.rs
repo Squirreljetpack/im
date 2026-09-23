@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Serialize headless TUI tests: they all share the global capture buffer.
-static TUI_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static TUI_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Seed a mood row "today" (within `TodayHorizon::Today`).
 async fn seed_mood(pool: &SqlitePool, mood: &str, body: &str) {
@@ -89,11 +89,8 @@ fn captured_line(needle: &str) -> String {
 /// the label text render in the same row. Regression: rows could render
 /// with no content when the view started.
 #[tokio::test]
-// The guard intentionally spans the awaits: headless TUI tests share the
-// global capture buffer and must run one at a time.
-#[allow(clippy::await_holding_lock)]
 async fn today_tui_row_content_renders() {
-    let _guard = TUI_LOCK.lock().unwrap();
+    let _guard = TUI_LOCK.lock().await;
     matchmaker::test::clear();
 
     let pool = test_pool().await.unwrap();
@@ -201,9 +198,8 @@ fn screen_rows(raw: &str) -> Vec<String> {
 /// The ui border (menu) title renders the same label on the top border
 /// line, prefixed by the `┌` corner glyph.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn today_tui_menu_title() {
-    let _guard = TUI_LOCK.lock().unwrap();
+    let _guard = TUI_LOCK.lock().await;
     matchmaker::test::clear();
 
     let pool = test_pool().await.unwrap();
@@ -245,9 +241,8 @@ async fn today_tui_menu_title() {
 /// renders from the event loop's live bind map); a second alt-h toggles
 /// back to the cursor-tracked entry preview.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn today_tui_alt_h_help_toggles() {
-    let _guard = TUI_LOCK.lock().unwrap();
+    let _guard = TUI_LOCK.lock().await;
     matchmaker::test::clear();
 
     let pool = test_pool().await.unwrap();
@@ -348,9 +343,8 @@ async fn today_tui_alt_h_help_toggles() {
 /// stale `widths_buffer` overshoot in matchmaker's
 /// `ResultsUI::update_dimensions`).
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn today_tui_resize_shrinks_to_small_window() {
-    let _guard = TUI_LOCK.lock().unwrap();
+    let _guard = TUI_LOCK.lock().await;
     matchmaker::test::clear();
 
     let pool = test_pool().await.unwrap();
