@@ -28,6 +28,7 @@ fn raw_fp32_name(alias: &str) -> String {
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=assets/help.txt");
+    println!("cargo:rerun-if-changed=assets/vhelp.txt");
     let profile = env::var("PROFILE").unwrap_or_default();
     if profile == "release" {
         println!("cargo:rerun-if-changed=assets/config.toml");

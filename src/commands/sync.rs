@@ -23,28 +23,20 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// Safety net for the page loop: the server pages at 1000 events, so a
 /// backlog deeper than this is a server problem, not a sync in progress.
 const MAX_PAGES: usize = 10_000;
-/// What to do about local mutations that `--reset` is about to drop.
-#[derive(Debug)]
-enum ResetGuard {
-    /// Nothing unsynced: reset without asking.
-    Proceed,
-    /// Ask before dropping this many unsynced mutations.
-    Confirm(usize),
-}
-
-/// The `--reset` tripwire. Dropped mutations exist nowhere but the local
-/// database, so a non-interactive run refuses instead of guessing.
-fn reset_guard(pending: usize, interactive: bool) -> Result<ResetGuard> {
-    if pending == 0 {
-        return Ok(ResetGuard::Proceed);
-    }
+/// The `--reset` tripwire. Non-interactive runs refuse to reset without a terminal
+/// to confirm.
+fn reset_guard(pending: usize, interactive: bool) -> Result<()> {
     if !interactive {
-        bail!(
-            "{pending} local change(s) have not been synced yet and `im sync --reset` would discard \
-             them — sync first, or run it in a terminal to confirm"
-        );
+        if pending > 0 {
+            bail!(
+                "{pending} local change(s) have not been synced yet and `im :sync --reset` would discard \
+                 them — sync first, or run it in a terminal to confirm"
+            );
+        } else {
+            bail!("`im :sync --reset` needs an interactive terminal to confirm resetting the local database");
+        }
     }
-    Ok(ResetGuard::Confirm(pending))
+    Ok(())
 }
 
 pub async fn sync_command(pool: &SqlitePool, config: &Config, reset: bool) -> Result<()> {
@@ -54,9 +46,8 @@ pub async fn sync_command(pool: &SqlitePool, config: &Config, reset: bool) -> Re
 
     if reset {
         let pending = session::unsynced_count(pool).await?;
-        if let ResetGuard::Confirm(pending) = reset_guard(pending, interactive)?
-            && !crate::prompts::prompt_discard_unsynced(pending)?
-        {
+        reset_guard(pending, interactive)?;
+        if !crate::prompts::prompt_discard_unsynced(pending)? {
             bail!("keeping the local database");
         }
         let dropped = session::reset_local_state(pool).await?;
@@ -82,7 +73,7 @@ pub async fn sync_command(pool: &SqlitePool, config: &Config, reset: bool) -> Re
         if !report.conflicts.is_empty() {
             if !interactive {
                 bail!(
-                    "{} event(s) conflict with this device's changes — run `im sync` in a terminal to \
+                    "{} event(s) conflict with this device's changes — run `im :sync` in a terminal to \
                      settle them",
                     report.conflicts.len()
                 );
@@ -191,22 +182,18 @@ async fn parent_label(pool: &SqlitePool, task: Option<crate::db::Id>, fallback: 
 mod tests {
     use super::*;
 
-    /// Nothing unsynced: a reset needs no confirmation.
+    /// A reset requires an interactive terminal even without pending changes.
     #[test]
-    fn a_reset_without_pending_changes_proceeds() {
-        assert!(matches!(
-            reset_guard(0, false).unwrap(),
-            ResetGuard::Proceed
-        ));
+    fn a_reset_refuses_without_a_terminal() {
+        assert!(reset_guard(0, true).is_ok());
+        let err = reset_guard(0, false).unwrap_err().to_string();
+        assert!(err.contains("needs an interactive terminal"), "{err}");
     }
 
     /// Unsynced changes: a terminal asks, a pipe refuses.
     #[test]
     fn a_reset_with_pending_changes_refuses_without_a_terminal() {
-        assert!(matches!(
-            reset_guard(3, true).unwrap(),
-            ResetGuard::Confirm(3)
-        ));
+        assert!(reset_guard(3, true).is_ok());
         let err = reset_guard(3, false).unwrap_err().to_string();
         assert!(err.contains("3 local change(s)"), "{err}");
     }

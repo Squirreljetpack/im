@@ -91,11 +91,17 @@ pub async fn execute_command<W: Write>(
         }
 
         Command::Help => {
-            // assets/help.txt is bundled via `include_str!` so the compiled
-            // binary always has the help text even when the working directory
-            // does not contain the assets directory.
+            // assets/help.txt and assets/vhelp.txt are bundled via
+            // `include_str!` so the compiled binary always has the help text
+            // even when the working directory does not contain the assets
+            // directory.
             const HELP: &str = include_str!("../../assets/help.txt");
-            out.write_all(HELP.as_bytes())?;
+            const VHELP: &str = include_str!("../../assets/vhelp.txt");
+            if opts.verbose() {
+                out.write_all(VHELP.as_bytes())?;
+            } else {
+                out.write_all(HELP.as_bytes())?;
+            }
             Ok(())
         }
 

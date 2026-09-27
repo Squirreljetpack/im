@@ -43,6 +43,9 @@ pub(crate) async fn resolve_parent(
             }
         }
         TaskRef::Pick => {
+            if !atty::is(atty::Stream::Stdin) {
+                anyhow::bail!("Picking a parent task requires an interactive terminal");
+            }
             // Cancelling the picker cancels the whole operation.
             let picked =
                 crate::ui::oneshots::OneshotPickerApp::new(config.clone(), opts.fullscreen)

@@ -388,17 +388,18 @@ pub fn prompt_db_doctor_confirm(count: i64) -> Result<bool> {
         .map_err(|e| anyhow::anyhow!("Prompt cancelled: {}", e))
 }
 
-/// Confirm dropping unsynced local changes so `im sync --reset` can rebuild
-/// the local database from the server log. The default is `false`: the dropped
-/// changes are not recoverable from anywhere.
+/// Confirm resetting the local database so `im :sync --reset` can rebuild
+/// the local database from the server log.
 pub fn prompt_discard_unsynced(count: usize) -> Result<bool> {
     use cliclack::{confirm, intro};
 
     intro("Reset local database")?;
 
-    cliclack::log::warning(format!(
-        "{count} local change(s) have not been synced and will be discarded."
-    ))?;
+    if count > 0 {
+        cliclack::log::warning(format!(
+            "{count} local change(s) have not been synced and will be discarded."
+        ))?;
+    }
 
     confirm("Rebuild the local database from the server log?".to_string())
         .initial_value(false)

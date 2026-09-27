@@ -80,7 +80,7 @@ Usage:
   im ! @ [<time>] [:<name>] [%<duration>]        create a scheduled task 
                                                         (interactive if partial)
   im +[task] [count]                             edit or update a task by its reference
-                                                        (see the creation grammar at bottom)
+                                                        (see `im -vh`)
 
 Views:
   im @[date]                                     today view
@@ -107,48 +107,13 @@ Other:
   im :db doctor                                  check tracker entries vs kinds; prune mismatches
 
 Sync:
-  im auth register|login                         create an account / sign this device in
-  im auth status|logout                          show the signed-in account / forget it
-  im sync                                        push local events and apply the other
-                                                        devices' events (asks about
-                                                        concurrent rewrites and parent
-                                                        cycles)
-  im sync --reset                                discard the local database and rebuild
-                                                        it from the server log
-
----
+  im :auth register|login|status|logout          create an account / sign this device in / ..
+  im :sync                                       push local changes, pull remote changes
+  im :sync --reset                               rebuild database from remote state
 
 Flags:
   im -q | -v <command>                           quiet / verbose; flags go first
-  im --help | -h                                 show this help
-
-
-Entry creation full grammar:
-  im <mood> [. [body]]                           log a mood (with an optional body)
-  im %<duration>                                 start a timed session
-  im [-<tracker> [value]]...                     add one or more custom tracker records
-  im [link]... [entry] [link]...                 add new tracker records and task completions
-                                                 linked to a new mood entry.
-  where:
-    entry :=             mood | %duration
-    link  := -<tracker> [value] | +<task> [count]
-  
-  im ! [+[task]] [name] [@<time>]                create a oneshot task (linked to a parent)
-  im ! %<duration> [name]                        create a recurring task (interactive)
-  im ! @ [<time>] [:<name>] [%<duration>]        create a scheduled task 
-                                                        (interactive if partial)
-  im +[task] [count]                             edit a task or update its completion state
-
-  Tasks are referred to (i.e. when editing or linking a oneshot to a parent or a mood),
-  by a single argument that begins with `+`, followed by either:
-  - the short id of the task (+7)
-  - an ordered sequence of query words that matches only one task name (+groceries)
-  - or nothing (+): pick interactively.
-
-  All the previous subcommands support a trailing [<dots> [body]].
-  - <dots> is an argument of only .'s.
-  - If without a body, `$EDITOR` will open.
-  - the number of dots then chooses which template (defined in your config file) the `$EDITOR` opens.
+  im --help | -h                                 show this help (-v applies)
 ```
 <!-- HELP_END -->
 

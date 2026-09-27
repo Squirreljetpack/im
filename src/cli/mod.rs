@@ -96,9 +96,10 @@ pub enum Command {
         show: ViewVariant,
         horizon: TodayHorizon,
     },
-    /// `im --help` / `im -h` in the initial position (handled in
+    /// `im --help` / `im -h` / `im -vh` in the initial position (handled in
     /// `parse_cli`, before the command dispatchers — `parse_from` never sees
-    /// a help token). Handlers print the contents of `assets/help.txt`.
+    /// a help token). Handlers print the contents of `assets/help.txt` (or
+    /// `assets/vhelp.txt` when verbose).
     Help,
     /// `im :config [moods|colors]` — handlers open a config-style file in
     /// $VISUAL/$EDITOR via [`crate::editor::open_editor_at`]. With no

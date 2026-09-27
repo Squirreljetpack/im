@@ -236,6 +236,67 @@ pub fn span_total_seconds(span: Span) -> Option<f64> {
         .filter(|s| *s > 0.0)
 }
 
+/// Shift a day-start epoch by `days` calendar days, returning the day-start
+/// of the target day.
+pub fn shift_days(day_start_epoch: Epoch, days: i64) -> Epoch {
+    if let Ok(z) = zoned_from_unix_secs(day_start_epoch) {
+        let shifted = if days >= 0 {
+            z.checked_add(Span::new().days(days))
+        } else {
+            z.checked_sub(Span::new().days(-days))
+        };
+        if let Ok(z2) = shifted
+            && let Ok(start) = z2.start_of_day()
+        {
+            return start.timestamp().as_second();
+        }
+    }
+    day_start(day_start_epoch + days * 86400)
+}
+
+/// Shift a day-start epoch by `months` calendar months, returning the day-start
+/// of the matching day (or clamped to month end).
+pub fn shift_months(day_start_epoch: Epoch, months: i8) -> Epoch {
+    if let Ok(z) = zoned_from_unix_secs(day_start_epoch) {
+        let shifted = if months >= 0 {
+            z.checked_add(Span::new().months(months))
+        } else {
+            z.checked_sub(Span::new().months(-months))
+        };
+        if let Ok(z2) = shifted
+            && let Ok(start) = z2.start_of_day()
+        {
+            return start.timestamp().as_second();
+        }
+    }
+    day_start(day_start_epoch + i64::from(months) * 30 * 86400)
+}
+
+/// End of the month horizon relative to `day_start` (00:00:00 local time).
+/// Goes up to not including the next matching day of the next month
+/// (or end of next month if the next month does not contain the matching day).
+pub fn month_horizon_end(day_start_epoch: Epoch) -> Epoch {
+    let Ok(z) = zoned_from_unix_secs(day_start_epoch) else {
+        return day_end(day_start_epoch + 29 * 86400);
+    };
+    let target_day = z.day();
+    let Ok(next_z) = z.checked_add(Span::new().months(1)) else {
+        return day_end(day_start_epoch + 29 * 86400);
+    };
+    if next_z.day() == target_day {
+        next_z
+            .checked_sub(Span::new().days(1))
+            .and_then(|prev| prev.end_of_day())
+            .map(|end| end.timestamp().as_second())
+            .unwrap_or_else(|_| day_end(day_start_epoch + 29 * 86400))
+    } else {
+        next_z
+            .end_of_day()
+            .map(|end| end.timestamp().as_second())
+            .unwrap_or_else(|_| day_end(day_start_epoch + 29 * 86400))
+    }
+}
+
 // ── tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -288,5 +349,36 @@ mod tests {
         assert_eq!(day_start(ts), today_start());
         assert_eq!(day_end(ts), today_end());
         assert_eq!(day_end(ts) - day_start(ts), 86399);
+    }
+
+    #[test]
+    fn test_shift_days() {
+        let today = today_start();
+        assert_eq!(shift_days(today, 1), day_end(today) + 1);
+        assert_eq!(shift_days(today, -1), day_start(today - 1));
+        assert_eq!(shift_days(today, 7), shift_days(shift_days(today, 2), 5));
+    }
+
+    #[test]
+    fn test_month_horizon_end() {
+        // Sep 26 -> Oct 25 23:59:59 (matching day Oct 26 not included)
+        let sep26 = parse_datetime("2026-09-26 00:00", DATE_DIALECT).unwrap();
+        let oct25_end = parse_datetime("2026-10-25 23:59:59", DATE_DIALECT).unwrap();
+        assert_eq!(month_horizon_end(sep26), oct25_end);
+
+        // Jan 31 2026 -> Feb 28 2026 23:59:59 (Feb has no 31st, clamped to end of Feb)
+        let jan31 = parse_datetime("2026-01-31 00:00", DATE_DIALECT).unwrap();
+        let feb28_end = parse_datetime("2026-02-28 23:59:59", DATE_DIALECT).unwrap();
+        assert_eq!(month_horizon_end(jan31), feb28_end);
+
+        // Jan 31 2024 -> Feb 29 2024 23:59:59 (leap year)
+        let jan31_leap = parse_datetime("2024-01-31 00:00", DATE_DIALECT).unwrap();
+        let feb29_end = parse_datetime("2024-02-29 23:59:59", DATE_DIALECT).unwrap();
+        assert_eq!(month_horizon_end(jan31_leap), feb29_end);
+
+        // Aug 31 -> Sep 30 23:59:59 (Sep has 30 days)
+        let aug31 = parse_datetime("2026-08-31 00:00", DATE_DIALECT).unwrap();
+        let sep30_end = parse_datetime("2026-09-30 23:59:59", DATE_DIALECT).unwrap();
+        assert_eq!(month_horizon_end(aug31), sep30_end);
     }
 }

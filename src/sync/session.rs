@@ -99,7 +99,7 @@ pub async fn sync_once(
 ) -> Result<SyncReport> {
     let token = signed_in(pool)
         .await?
-        .context("not logged in — run `im auth login`")?;
+        .context("not logged in — run `im :auth login`")?;
     let device = {
         let mut conn = pool
             .acquire()

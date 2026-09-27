@@ -20,7 +20,7 @@ pub async fn auth_command(pool: &SqlitePool, sub: AuthSubcommand) -> Result<()> 
                 "Registered {} on {server}; this device is signed in.",
                 account.email
             );
-            println!("Run `im sync` to upload the events this device has queued.");
+            println!("Run `im :sync` to upload the events this device has queued.");
         }
 
         AuthSubcommand::Login => {
@@ -29,12 +29,12 @@ pub async fn auth_command(pool: &SqlitePool, sub: AuthSubcommand) -> Result<()> 
             let account = session::login(&server, &email, &password).await?;
             session::store_account(pool, &account).await?;
             println!("Signed in as {} on {server}.", account.email);
-            println!("Run `im sync` to exchange events with the other devices.");
+            println!("Run `im :sync` to exchange events with the other devices.");
         }
 
         AuthSubcommand::Status => {
             let Some(token) = session::signed_in(pool).await? else {
-                println!("Not signed in (run `im auth login`).");
+                println!("Not signed in (run `im :auth login`).");
                 return Ok(());
             };
             let server = server_url();
@@ -70,7 +70,7 @@ pub async fn auth_command(pool: &SqlitePool, sub: AuthSubcommand) -> Result<()> 
 
 fn prompt_credentials() -> Result<(String, String)> {
     if !atty::is(atty::Stream::Stdin) {
-        bail!("`im auth` needs an interactive terminal to ask for the email and password");
+        bail!("`im :auth` needs an interactive terminal to ask for the email and password");
     }
     let email: String = cliclack::input("Email:")
         .placeholder("you@example.com")

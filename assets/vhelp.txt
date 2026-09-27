@@ -1,0 +1,26 @@
+Entry creation full grammar:
+  im <mood> [. [body]]                           log a mood (with an optional body)
+  im %<duration>                                 start a timed session
+  im [-<tracker> [value]]...                     add one or more custom tracker records
+  im [link]... [entry] [link]...                 add new tracker records and task completions
+                                                 linked to a new mood entry.
+  where:
+    entry :=             mood | %duration
+    link  := -<tracker> [value] | +<task> [count]
+  
+  im ! [+[task]] [name] [@<time>]                create a oneshot task (linked to a parent)
+  im ! %<duration> [name]                        create a recurring task (interactive)
+  im ! @ [<time>] [:<name>] [%<duration>]        create a scheduled task 
+                                                        (interactive if partial)
+  im +[task] [count]                             edit a task or update its completion state
+
+  Tasks are referred to (i.e. when editing or linking a oneshot to a parent or a mood),
+  by a single argument that begins with `+`, followed by either:
+  - the short id of the task (+7)
+  - (a string of) one or more words that uniquely queries a task name (+groceries)
+  - or nothing (+): pick interactively.
+
+  All the previous subcommands support a trailing [<dots> [body]].
+  - <dots> is some number of `.`'s.
+  - If without a body, `$EDITOR` will open: the number of dots then chooses
+    which template (defined in your config file) the `$EDITOR` opens.

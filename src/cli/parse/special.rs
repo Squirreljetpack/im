@@ -1,4 +1,4 @@
-use super::super::{Command, ConfigTarget};
+use super::super::{AuthSubcommand, Command, ConfigTarget};
 use super::tracker::parse_tracker_command;
 
 pub(crate) fn parse_special_command(args: &[String]) -> anyhow::Result<Command> {
@@ -103,10 +103,43 @@ pub(crate) fn parse_special_command(args: &[String]) -> anyhow::Result<Command> 
         return parse_tracker_command(args);
     }
 
-    // Grid view stub: :g (unimplemented)
-    if first == ":g" {
-        anyhow::bail!("Grid view (:g) is not yet implemented");
+    if first == ":auth" {
+        return parse_auth_command(&args[1..]);
+    }
+
+    if first == ":sync" {
+        let reset = match args.get(1).map(String::as_str) {
+            None => false,
+            Some("--reset") => true,
+            Some(other) => {
+                anyhow::bail!("`im :sync` takes no argument other than --reset, got {other}")
+            }
+        };
+        if args.len() > 2 {
+            anyhow::bail!("`im :sync` takes at most one argument");
+        }
+        return Ok(Command::Sync { reset });
     }
 
     anyhow::bail!("Unknown special command: {}", first)
+}
+
+/// `im :auth <register|login|status|logout>`.
+fn parse_auth_command(args: &[String]) -> anyhow::Result<Command> {
+    let Some(name) = args.first() else {
+        anyhow::bail!("`im :auth` needs a subcommand: register, login, status or logout");
+    };
+    let sub = match name.as_str() {
+        "register" => AuthSubcommand::Register,
+        "login" => AuthSubcommand::Login,
+        "status" => AuthSubcommand::Status,
+        "logout" => AuthSubcommand::Logout,
+        other => anyhow::bail!(
+            "unknown auth subcommand '{other}' (expected register, login, status or logout)"
+        ),
+    };
+    if args.len() > 1 {
+        anyhow::bail!("`im :auth {name}` takes no further arguments");
+    }
+    Ok(Command::Auth { sub })
 }

@@ -504,17 +504,47 @@ fn handler(action: ImAction, state: &mut MMState<'_, TodayEntry, ()>, ctx: &Toda
             tokio::spawn(async move {
                 // The anchored day must never move into the future.
                 let today = crate::date::today_start();
-                let current = {
+                let (current, horizon) = {
                     let v = ctx.view.lock().unwrap();
-                    v.day_epoch
+                    (v.day_epoch, v.horizon)
                 };
                 if forward && current >= today {
                     return;
                 }
-                let new_epoch = if forward {
-                    crate::date::day_end(current) + 1
+                let new_epoch = match horizon {
+                    TodayHorizon::Today => {
+                        if forward {
+                            crate::date::shift_days(current, 1)
+                        } else {
+                            crate::date::shift_days(current, -1)
+                        }
+                    }
+                    TodayHorizon::Tomorrow => {
+                        if forward {
+                            crate::date::shift_days(current, 2)
+                        } else {
+                            crate::date::shift_days(current, -2)
+                        }
+                    }
+                    TodayHorizon::Week => {
+                        if forward {
+                            crate::date::shift_days(current, 7)
+                        } else {
+                            crate::date::shift_days(current, -7)
+                        }
+                    }
+                    TodayHorizon::Month => {
+                        if forward {
+                            crate::date::shift_months(current, 1)
+                        } else {
+                            crate::date::shift_months(current, -1)
+                        }
+                    }
+                };
+                let new_epoch = if forward && new_epoch > today {
+                    today
                 } else {
-                    crate::date::day_start(current - 1)
+                    new_epoch
                 };
                 {
                     let mut v = ctx.view.lock().unwrap();

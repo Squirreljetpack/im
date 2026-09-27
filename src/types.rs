@@ -101,6 +101,7 @@ pub enum TodayHorizon {
     Today,
     Tomorrow,
     Week,
+    Month,
 }
 
 impl TodayHorizon {
@@ -108,7 +109,8 @@ impl TodayHorizon {
         match self {
             TodayHorizon::Today => TodayHorizon::Tomorrow,
             TodayHorizon::Tomorrow => TodayHorizon::Week,
-            TodayHorizon::Week => TodayHorizon::Today,
+            TodayHorizon::Week => TodayHorizon::Month,
+            TodayHorizon::Month => TodayHorizon::Today,
         }
     }
 
@@ -117,17 +119,20 @@ impl TodayHorizon {
             TodayHorizon::Today => "today",
             TodayHorizon::Tomorrow => "+tomorrow",
             TodayHorizon::Week => "+this week",
+            TodayHorizon::Month => "+this month",
         }
     }
 
     /// End of the horizon (inclusive) as epoch seconds, relative to the
     /// anchored day (its day-start). `Week` is always the next 7 days from
-    /// the anchored day.
+    /// the anchored day. `Month` goes up to not including the next matching
+    /// day of the next month (or end of next month).
     pub fn end_epoch(&self, day_start: i64) -> i64 {
         match self {
             TodayHorizon::Today => date::day_end(day_start),
             TodayHorizon::Tomorrow => date::day_end(day_start + 86400),
             TodayHorizon::Week => date::day_end(day_start + 6 * 86400),
+            TodayHorizon::Month => date::month_horizon_end(day_start),
         }
     }
 }
@@ -191,4 +196,22 @@ pub struct Task {
     pub available_duration: Option<Epoch>,
     /// `true` when a bare `%` was passed on recurring creation (`! %`) to prompt for the duration.
     pub pick_duration: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_today_horizon_cycle_and_labels() {
+        assert_eq!(TodayHorizon::Today.next(), TodayHorizon::Tomorrow);
+        assert_eq!(TodayHorizon::Tomorrow.next(), TodayHorizon::Week);
+        assert_eq!(TodayHorizon::Week.next(), TodayHorizon::Month);
+        assert_eq!(TodayHorizon::Month.next(), TodayHorizon::Today);
+
+        assert_eq!(TodayHorizon::Today.label(), "today");
+        assert_eq!(TodayHorizon::Tomorrow.label(), "+tomorrow");
+        assert_eq!(TodayHorizon::Week.label(), "+this week");
+        assert_eq!(TodayHorizon::Month.label(), "+this month");
+    }
 }

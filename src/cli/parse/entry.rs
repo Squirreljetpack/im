@@ -136,7 +136,11 @@ pub(crate) fn parse_entry_command(args: &[String]) -> anyhow::Result<Command> {
     let (mood, duration) = if mood_parts.is_empty() {
         (String::new(), None)
     } else {
-        let joined = mood_parts.join(" ");
+        let joined = mood_parts
+            .iter()
+            .map(|s| if s == ":" { "\n" } else { s.as_str() })
+            .collect::<Vec<_>>()
+            .join(" ");
         let trimmed = joined.trim();
         if trimmed == "%" {
             cba::ebog!(
