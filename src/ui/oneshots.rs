@@ -85,6 +85,9 @@ impl OneshotPickerApp {
         );
 
         let mut mm = Matchmaker::new(worker, tasks_accept_hook);
+        // Same as the tasks view: keep the injected (sorted) order as the
+        // score-tie break instead of nucleo's text-length heuristic.
+        mm.worker.set_stability(15);
         mm.config_render(render_cfg);
         mm.config_tui(tui_cfg);
 

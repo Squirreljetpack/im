@@ -195,6 +195,13 @@ impl TodayApp {
                 .into_iter()
                 .collect()
         });
+        // Keep the app's entry order — rows are injected in `apply_sort`
+        // order, so score ties must fall back to injection index. Nucleo's
+        // default stability (0) breaks such ties by matcher-column text
+        // length instead, which scrambles an empty query (every row scores
+        // the same). A threshold keeps score differences under that bucket
+        // in injected order, so near-ties while filtering stay time-ordered.
+        mm.worker.set_stability(15);
 
         // The event loop owns the binds; the alt-h help renders the live
         // bind map through the loop's pointer (`get_binds_ptr`), so the

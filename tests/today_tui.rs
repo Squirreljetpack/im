@@ -24,14 +24,27 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Serialize headless TUI tests: they all share the global capture buffer.
-static TUI_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static TUI_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Seed a mood row "today" (within `TodayHorizon::Today`).
 async fn seed_mood(pool: &SqlitePool, mood: &str, body: &str) {
-    sqlx::query("INSERT INTO mood (mood, body, time) VALUES (?, ?, ?)")
+    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (?, ?, ?, ?)")
+        .bind(im::db::Id::new())
         .bind(mood)
         .bind(body)
         .bind(im::date::today_start() + 3600)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// Seed a mood row at an explicit timestamp (row-order assertions).
+async fn seed_mood_at(pool: &SqlitePool, mood: &str, time: i64) {
+    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (?, ?, ?, ?)")
+        .bind(im::db::Id::new())
+        .bind(mood)
+        .bind("")
+        .bind(time)
         .execute(pool)
         .await
         .unwrap();
@@ -88,11 +101,8 @@ fn captured_line(needle: &str) -> String {
 /// the label text render in the same row. Regression: rows could render
 /// with no content when the view started.
 #[tokio::test]
-// The guard intentionally spans the awaits: headless TUI tests share the
-// global capture buffer and must run one at a time.
-#[allow(clippy::await_holding_lock)]
 async fn today_tui_row_content_renders() {
-    let _guard = TUI_LOCK.lock().unwrap();
+    let _guard = TUI_LOCK.lock().await;
     matchmaker::test::clear();
 
     let pool = test_pool().await.unwrap();
@@ -200,9 +210,57 @@ fn screen_rows(raw: &str) -> Vec<String> {
 /// The ui border (menu) title renders the same label on the top border
 /// line, prefixed by the `┌` corner glyph.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
+async fn today_tui_rows_sorted_by_time() {
+    let _guard = TUI_LOCK.lock().await;
+    matchmaker::test::clear();
+
+    let pool = test_pool().await.unwrap();
+    im::global::set_pool(pool.clone());
+    // The integration binary installs the first pool for the whole process
+    // (later `set_pool` calls are ignored), so seed through the installed
+    // pool — the one the app actually reads.
+    let pool = im::global::pool();
+    let today = im::date::today_start();
+    // Inserted out of order: the rendered list must still be time-sorted.
+    // Regression: nucleo's default stability orders equal scores (every row
+    // under an empty query) by matcher-column text length, which scrambled
+    // the initial list.
+    seed_mood_at(&pool, "late entry", today + 15 * 3600).await;
+    seed_mood_at(&pool, "early entry", today + 9 * 3600).await;
+    seed_mood_at(&pool, "noon entry", today + 12 * 3600).await;
+
+    let config = Config::default();
+    let app = TodayApp::new(config, today, ViewVariant::All, TodayHorizon::Today, false).await;
+    app.run_with(headless_cfg("noon entry")).await.unwrap();
+
+    // Only the results pane decides the order: the preview pane repeats the
+    // selected entry's text, so cut every row at the results/preview divider.
+    let rows = screen_rows(&matchmaker::test::contents());
+    let results: Vec<&str> = rows
+        .iter()
+        .map(|r| r.split('│').nth(1).unwrap_or(""))
+        .collect();
+    let position = |label: &str| {
+        results
+            .iter()
+            .position(|r| r.contains(label))
+            .unwrap_or_else(|| panic!("{label} not in results pane: {rows:?}"))
+    };
+    assert!(
+        position("early entry") < position("noon entry"),
+        "09:00 row must precede the 12:00 row: {results:?}"
+    );
+    assert!(
+        position("noon entry") < position("late entry"),
+        "12:00 row must precede the 15:00 row: {results:?}"
+    );
+}
+
+/// The ui border (menu) title renders the same label on the top border
+/// line, prefixed by the `┌` corner glyph.
+#[tokio::test]
 async fn today_tui_menu_title() {
-    let _guard = TUI_LOCK.lock().unwrap();
+    let _guard = TUI_LOCK.lock().await;
     matchmaker::test::clear();
 
     let pool = test_pool().await.unwrap();
@@ -244,9 +302,8 @@ async fn today_tui_menu_title() {
 /// renders from the event loop's live bind map); a second alt-h toggles
 /// back to the cursor-tracked entry preview.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn today_tui_alt_h_help_toggles() {
-    let _guard = TUI_LOCK.lock().unwrap();
+    let _guard = TUI_LOCK.lock().await;
     matchmaker::test::clear();
 
     let pool = test_pool().await.unwrap();
@@ -347,9 +404,8 @@ async fn today_tui_alt_h_help_toggles() {
 /// stale `widths_buffer` overshoot in matchmaker's
 /// `ResultsUI::update_dimensions`).
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn today_tui_resize_shrinks_to_small_window() {
-    let _guard = TUI_LOCK.lock().unwrap();
+    let _guard = TUI_LOCK.lock().await;
     matchmaker::test::clear();
 
     let pool = test_pool().await.unwrap();
