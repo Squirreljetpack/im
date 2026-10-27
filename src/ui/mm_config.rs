@@ -91,7 +91,7 @@ pub fn get_mm_cfg() -> (
         // on disk, or the bundled default below.
         let _ = std::fs::write(path, DEFAULT_MM_DEV_CONFIG);
     }
-    let mut mm_cfg: MMConfig = cba::bo::load_type_or_default(path, |s| toml::from_str(s));
+    let mut mm_cfg: MMConfig = cba::bo::load_type_or_default(path, None, |s| toml::from_str(s));
     mm_cfg.binds = default_binds().modify(|b| b.extend(mm_cfg.binds));
     // Force the selection prefixes off after the file loads: the views
     // render no row prefixes, and the config file must not re-enable them.

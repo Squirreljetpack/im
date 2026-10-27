@@ -1,14 +1,14 @@
 //! Lightweight previewer: owns the preview content as a shared
-//! `Text<'static>` that matchmaker's `Preview` widget renders every frame.
+//! `Override::Text` that matchmaker's `Preview` widget renders every frame.
 //! The UI event listener calls [`Previewer::update_today`] /
 //! [`Previewer::update_task`] with the current item (cloned once at the
 //! call site); each call bumps an internal generation counter — dropping
 //! stale in-flight computes — and spawns the async build, which writes the
-//! shared string only when its generation is still current.
+//! shared override only when its generation is still current.
 
-use matchmaker::preview::{AppendOnly, Preview};
+use matchmaker::preview::{AppendOnly, Override, Preview};
 use ratatui::text::Text;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::color::ColorAxes;
@@ -24,8 +24,8 @@ use tokio::sync::OnceCell;
 
 #[derive(Clone)]
 pub struct Previewer {
-    /// The preview content the `Preview` widget renders; `None` = blank.
-    string: Arc<Mutex<Option<Text<'static>>>>,
+    /// The content the `Preview` widget renders; `Override::None` = blank.
+    content: Arc<Mutex<Override>>,
     /// Bumped on every update/stop; in-flight computes check their captured
     /// value before writing, so stale results never overwrite newer ones.
     generation: Arc<AtomicU64>,
@@ -36,20 +36,21 @@ pub struct Previewer {
 impl Previewer {
     pub fn new(axes: Arc<OnceCell<ColorAxes>>) -> Self {
         Self {
-            string: Arc::new(Mutex::new(None)),
+            content: Arc::new(Mutex::new(Override::None)),
             generation: Arc::new(AtomicU64::new(0)),
             axes,
         }
     }
 
     /// The widget to attach via `PickOptions::preview`. The append-only
-    /// lines stay empty (the string override wins); the changed flag is a
-    /// no-op — matchmaker re-reads the string on every frame.
+    /// lines stay empty (the text override wins) and the widget's own
+    /// generation counter is unused (it only drives image loading).
     pub fn view(&self) -> Preview {
         Preview::new(
             AppendOnly::new(),
-            self.string.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Default::default(),
+            self.content.clone(),
+            Arc::new(AtomicUsize::new(0)),
         )
     }
 
@@ -59,19 +60,19 @@ impl Previewer {
     /// overwrite it.
     pub fn set_text(&self, text: Text<'static>) {
         self.generation.fetch_add(1, Ordering::SeqCst);
-        *self.string.lock().unwrap() = Some(text);
+        *self.content.lock().unwrap() = Override::Text(text);
     }
 
     /// Blank the preview and invalidate in-flight computes.
     pub fn stop(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
-        *self.string.lock().unwrap() = None;
+        *self.content.lock().unwrap() = Override::None;
     }
 
     /// Kickstart a preview compute for a today-view entry.
     pub fn update_today(&self, entry: TodayEntry) {
         let my_gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let string = self.string.clone();
+        let content = self.content.clone();
         let generation = self.generation.clone();
         let pool = pool();
         let config = config().clone();
@@ -146,7 +147,7 @@ impl Previewer {
                 build_today_preview(&entry, &config)
             };
             if generation.load(Ordering::SeqCst) == my_gen {
-                *string.lock().unwrap() = Some(Text::from(lines));
+                *content.lock().unwrap() = Override::Text(Text::from(lines));
             }
         });
     }
@@ -154,7 +155,7 @@ impl Previewer {
     /// Kickstart a preview compute for a tasks-view row.
     pub fn update_task(&self, task: TaskRow) {
         let my_gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let string = self.string.clone();
+        let content = self.content.clone();
         let generation = self.generation.clone();
         let pool = pool();
         let config = config().clone();
@@ -204,7 +205,7 @@ impl Previewer {
                 tree.as_ref(),
             );
             if generation.load(Ordering::SeqCst) == my_gen {
-                *string.lock().unwrap() = Some(Text::from(lines));
+                *content.lock().unwrap() = Override::Text(Text::from(lines));
             }
         });
     }
