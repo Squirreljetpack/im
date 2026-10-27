@@ -300,7 +300,9 @@ pub struct TodayFetch {
 ///
 /// `show` selects what is displayed:
 /// - `All`: moods, trackers, open tasks, scheduled tasks, recurring windows,
-///   and tasks completed today.
+///   and tasks completed today. On a day anchored before today the open
+///   oneshots are only those created in the view window, timestamped by
+///   their creation moment (plus any with a completion entry that day).
 /// - `A` ("journal"): moods, trackers, and completion events in the horizon (displaying
 ///   completions instead of tasks, with cumulative completion counts).
 /// - `B` ("tasks"): tasks only (no moods/trackers), showing overdue/due oneshot tasks,
@@ -623,7 +625,12 @@ pub async fn fetch_today_entries(
             });
         }
     } else {
+        // A day anchored in the past reconstructs that day's agenda rather
+        // than today's: oneshots are the ones created in the window and are
+        // pinned to their creation moment (see `TasksFilter::CreatedInWindow`).
+        let past_anchor = day_start_epoch < crate::date::today_start();
         let filter = match show {
+            ViewVariant::All if past_anchor => TasksFilter::CreatedInWindow,
             ViewVariant::All => TasksFilter::All,
             ViewVariant::B => TasksFilter::Due,
             ViewVariant::A => unreachable!(),
@@ -632,15 +639,29 @@ pub async fn fetch_today_entries(
 
         if tasks_enabled {
             // 3. Oneshot tasks per the variant-bound task filter: `Due` keeps
-            // dated tasks due before or within the horizon; `All` / `Pending` have
-            // no date bounds. Incomplete only — completed tasks in `All` surface
-            // through step 5 below.
+            // dated tasks due before or within the horizon; `All` / `Pending`
+            // have no date bounds; `CreatedInWindow` (past-anchored `All`)
+            // keeps the ones created in the window. Incomplete only — tasks
+            // with a completion entry in the window surface through step 5
+            // below.
             let due_tasks =
                 crate::db::fetch_oneshot_tasks(pool, filter, horizon_end, day_start_epoch).await?;
 
+            // Past-anchored rows show when the task came into existence; a
+            // due date would point at a different day than the one viewed.
+            let creation_time = filter == TasksFilter::CreatedInWindow;
             for task in &due_tasks {
-                let time = pending_sort_time(task, now_ts);
-                let time_label = task_time_label(task, time, day_start_epoch);
+                let time = if creation_time {
+                    task.start_time
+                        .unwrap_or_else(|| pending_sort_time(task, now_ts))
+                } else {
+                    pending_sort_time(task, now_ts)
+                };
+                let time_label = if creation_time {
+                    today_time_label(time, day_start_epoch)
+                } else {
+                    task_time_label(task, time, day_start_epoch)
+                };
                 entries.push(TodayEntry {
                     id: None,
                     time,
@@ -1291,5 +1312,58 @@ mod tests {
         assert_eq!(water[1].label, "water");
         assert_eq!(water[1].score, Some(2.0));
         assert_eq!(water[1].tracker_total, Some(2.0));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_today_entries_past_anchor_oneshots() {
+        use crate::db::{TaskObject, create_task, test_pool};
+
+        let pool = test_pool().await.unwrap();
+        // A day anchored before today: `All` lists the oneshots created in
+        // that day's window, not every open oneshot.
+        let day =
+            crate::date::parse_datetime("2024-03-15 00:00", crate::date::DATE_DIALECT).unwrap();
+        let at = |s: &str| crate::date::parse_datetime(s, crate::date::DATE_DIALECT).unwrap();
+        let config = Config::default();
+        let make = |name: &str, created: &str, due: Option<&str>| TaskObject {
+            id: None,
+            short_id: None,
+            name: name.to_string(),
+            body: String::new(),
+            priority: 5,
+            start_time: Some(at(created)),
+            available_duration_secs: None,
+            interval_secs: None,
+            target_count: 0,
+            optional: false,
+            end_time: due.map(at),
+            parent: None,
+        };
+        // Created before the window: hidden on that day.
+        create_task(&pool, &make("older undated", "2024-03-10 08:00", None))
+            .await
+            .unwrap();
+        // Created before the window but due on the anchored day: still
+        // hidden — a past day keys oneshots on creation, not due date.
+        create_task(
+            &pool,
+            &make("older dated", "2024-03-10 08:00", Some("2024-03-15 18:00")),
+        )
+        .await
+        .unwrap();
+        // Created on the anchored day: shown at its creation moment.
+        create_task(&pool, &make("created that day", "2024-03-15 09:15", None))
+            .await
+            .unwrap();
+
+        let TodayFetch { entries, .. } =
+            fetch_today_entries(&pool, &config, TodayHorizon::Today, day, ViewVariant::All)
+                .await
+                .unwrap();
+
+        let names: Vec<&str> = entries.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(names, vec!["created that day"]);
+        assert_eq!(entries[0].time, at("2024-03-15 09:15"));
+        assert_eq!(entries[0].time_label, "09:15");
     }
 }

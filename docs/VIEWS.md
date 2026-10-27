@@ -88,9 +88,11 @@ The Today View renders a combined timeline/agenda of entries within the selected
 | **`A`** | `[show: journal]` | **Journal event timeline**: Moods, tracker entries, and **task completion events** occurring within the horizon. Open/uncompleted tasks are hidden; each logged completion appears at its exact timestamp, showing cumulative progress (e.g. 1/5, 2/5, 3/5). |
 | **`B`** | `[show: due]` | **Tasks agenda**: Tasks only (moods and tracker entries hidden). Shows dated oneshots due within the horizon or overdue (`end_time <= horizon_end`), scheduled tasks overlapping the horizon, and the earliest upcoming availability window per recurring task. Completed-today tasks are not explicitly merged. |
 
+**Past-anchored days** (`@<date>` / shift-left, view window starting before today): `All` reconstructs that day's agenda instead of showing today's open tasks. Its oneshots are the ones **created within the view window** (`start_time` in `[day_start, horizon_end]`) — an old undated oneshot does not linger in historical views — with any task that logged a completion on the anchored day still merged in with its completion timestamp. Today and future anchors keep the unbounded open-oneshot list.
+
 #### Today View Time Cell Rules
 - **Journal Entries & Completions**: Timestamp of the mood, tracker, or task completion event (`today_time_label`).
-- **Open Oneshots**: Empty for undated oneshots (sort after timed entries); deadline (`end_time`) for dated oneshots.
+- **Open Oneshots**: Empty for undated oneshots (sort after timed entries); deadline (`end_time`) for dated oneshots. On past-anchored days, the creation moment (`start_time`) instead — that is what the window filter matches on.
 - **Scheduled Tasks**: Done rows show the completion timestamp (or window end for auto-completed tasks); open rows show the start time.
 - **Recurring Windows**:
   - `All`: Emits an entry for every availability window intersecting the horizon.

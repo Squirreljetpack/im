@@ -93,6 +93,11 @@ pub enum TasksFilter {
     /// Open oneshot tasks due within the horizon; overdue ones (due before
     /// the day start) excluded.
     Horizon,
+    /// Open oneshot tasks created within the view window
+    /// (`[day_start, horizon_end]`) — the today view's past-anchored
+    /// filter, where a historical day lists only the oneshots that were
+    /// created in it.
+    CreatedInWindow,
 }
 
 /// How far ahead to include incomplete todos in the today view.

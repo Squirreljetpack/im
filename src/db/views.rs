@@ -10,6 +10,9 @@ use crate::types::{TasksFilter, ViewMode, ViewVariant};
 /// back to `start_time`, so legacy rows and undated tasks keep a proxy
 /// due): `Horizon` keeps only [day_start, horizon_end] (overdue excluded),
 /// `Overdue` keeps dated rows (`end_time` set) due by the horizon end,
+/// `CreatedInWindow` bounds the creation moment (`start_time`) to
+/// [day_start, horizon_end] — the past-anchored today view, which lists the
+/// oneshots created in the viewed window instead of every open one — and
 /// `Pending` and `All` have no date bounds at all. Every filter drops
 /// completed rows — the today view surfaces today's completions through
 /// the separate completed-today fetch (see `fetch_tasks_completed_on`),
@@ -68,6 +71,22 @@ pub async fn fetch_oneshot_tasks(
         .fetch_all(pool)
         .await
         .context("Failed to fetch due oneshot tasks")?,
+        // Creation-moment bound (`start_time`, the moment `! name` ran):
+        // rows without one (pre-creation-time legacy rows) never match.
+        TasksFilter::CreatedInWindow => sqlx::query_as::<_, TaskRow>(
+            r#"SELECT t.*, NULL AS completions, NULL AS last_time
+               FROM todos t
+               WHERE t.interval_secs IS NULL
+               AND t.available_duration_secs IS NULL
+               AND t.start_time <= ?
+               AND t.start_time >= ?
+               ORDER BY t.priority DESC, t.start_time ASC"#,
+        )
+        .bind(horizon_end)
+        .bind(day_start)
+        .fetch_all(pool)
+        .await
+        .context("Failed to fetch window-created oneshot tasks")?,
     };
 
     let with_completions = attach_full_completions(pool, tasks, crate::date::now()).await?;
