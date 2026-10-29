@@ -8,10 +8,12 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use im::db::{TaskObject, create_task, test_pool};
+use im::db::{
+    EntryObject, TaskObject, TrackerObject, TrackerValue, create_entry, create_task, test_pool,
+};
 use im::sync::client::Client;
 use im::sync::session;
-use im::sync::{KEY_AUTH_TOKEN, sync_once};
+use im::sync::sync_once;
 use im::tracker::TrackerSlots;
 use sqlx::{Row, SqlitePool};
 use tokio::sync::OnceCell;
@@ -145,7 +147,7 @@ async fn device(name: &str) -> (SqlitePool, String) {
 /// machine produces).
 async fn second_device(token: &str) -> SqlitePool {
     let pool = test_pool().await.expect("in-memory db");
-    session::state_set(&pool, KEY_AUTH_TOKEN, token)
+    session::store_token(&pool, token)
         .await
         .expect("seed the token");
     pool
@@ -221,25 +223,54 @@ async fn sleep_between_mutations() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 }
 
-/// Sync one device until the server has nothing more for it.
-async fn drain(pool: &SqlitePool) {
-    loop {
-        let report = sync(pool).await;
-        if !report.has_more {
-            return;
-        }
-    }
-}
-
 /// Converge a set of devices: each round trip only learns what the *other*
 /// device pushed before it, so a device needs one more round after a peer
 /// pushes.
 async fn settle(devices: &[&SqlitePool]) {
+    settle_with(devices, &TrackerSlots::default()).await
+}
+
+/// `settle` for a configuration whose tracker intervals matter (slot dedup).
+async fn settle_with(devices: &[&SqlitePool], slots: &TrackerSlots) {
     for _ in 0..3 {
         for device in devices {
-            drain(device).await;
+            loop {
+                let report = sync_with(device, slots).await;
+                if !report.has_more {
+                    break;
+                }
+            }
         }
     }
+}
+
+/// A scheduled task: it has an availability window and no interval, which is
+/// how the model tells it apart from the other two kinds.
+fn scheduled_task_object(name: &str) -> TaskObject {
+    TaskObject {
+        available_duration_secs: Some(3600),
+        ..task_object(name, "")
+    }
+}
+
+/// A tracker entry with no mood, logged at `time` (the caller decides, so two
+/// devices can be made to compete for one slot).
+async fn log_tracker(pool: &SqlitePool, tracker_type: &str, value: i64, time: i64) {
+    let entry = EntryObject {
+        mood: String::new(),
+        body: String::new(),
+        time,
+        embedding: None,
+        score: None,
+        trackers: vec![TrackerObject {
+            tracker_type: tracker_type.to_string(),
+            value: TrackerValue::Integer(value),
+            replace_slot: None,
+        }],
+        duration: None,
+        todo_id: None,
+    };
+    create_entry(pool, &entry).await.expect("log the entry");
 }
 
 #[tokio::test]
@@ -428,4 +459,89 @@ async fn a_fresh_database_rebuilds_itself_from_the_server() {
     session::reset_local_state(&rebuilt).await.unwrap();
     sync(&rebuilt).await;
     assert_eq!(task_row(&rebuilt, "kept").await.unwrap().0, task.to_string());
+}
+
+#[tokio::test]
+async fn a_scheduled_task_is_one_cell_across_devices() {
+    let (device_a, token) = device("scheduled").await;
+    let device_b = second_device(&token).await;
+    let (task, _) = create_task(&device_a, &scheduled_task_object("meditate"))
+        .await
+        .unwrap();
+    settle(&[&device_a, &device_b]).await;
+
+    let count = |pool: SqlitePool| async move {
+        let rows: Vec<(String, i32)> =
+            sqlx::query_as("SELECT id, count FROM todo_completions WHERE todo_id = ?")
+                .bind(task)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        rows
+    };
+
+    im::db::set_scheduled_completion(&device_a, task, Some(1))
+        .await
+        .unwrap();
+    settle(&[&device_a, &device_b]).await;
+    let derived = im::db::scheduled_completion_id(task).to_string();
+    assert_eq!(count(device_a.clone()).await, vec![(derived.clone(), 1)]);
+    assert_eq!(
+        count(device_b.clone()).await,
+        vec![(derived.clone(), 1)],
+        "the other device wrote the same derived id"
+    );
+
+    // Un-marking on B, which never saw the row's birthday, is the same cell.
+    sleep_between_mutations().await;
+    im::db::set_scheduled_completion(&device_b, task, None)
+        .await
+        .unwrap();
+    settle(&[&device_a, &device_b]).await;
+    assert_eq!(count(device_a.clone()).await, vec![(derived.clone(), -1)]);
+    assert_eq!(count(device_b.clone()).await, vec![(derived.clone(), -1)]);
+
+    // And it can be marked again: un-marking spent nothing.
+    sleep_between_mutations().await;
+    im::db::set_scheduled_completion(&device_a, task, Some(0))
+        .await
+        .unwrap();
+    settle(&[&device_a, &device_b]).await;
+    assert_eq!(count(device_a.clone()).await, vec![(derived.clone(), 0)]);
+    assert_eq!(count(device_b).await, vec![(derived, 0)]);
+}
+
+#[tokio::test]
+async fn a_replace_mode_slot_keeps_one_entry_across_devices() {
+    let (device_a, token) = device("slots").await;
+    let device_b = second_device(&token).await;
+    let config: im::config::Config = toml::from_str(
+        r#"
+[tracker.water]
+kind = "integer"
+interval = { anchor = "2026-01-01T00:00:00+00:00", span = "1 day" }
+"#,
+    )
+    .expect("the tracker config parses");
+    let slots = TrackerSlots::from_config(&config);
+
+    // Both log into the same day slot while disconnected, so neither has seen
+    // the other's row when it writes.
+    let now = im::date::now();
+    log_tracker(&device_a, "water", 1, now).await;
+    log_tracker(&device_b, "water", 2, now + 1).await;
+    settle_with(&[&device_a, &device_b], &slots).await;
+
+    let entries = |pool: SqlitePool| async move {
+        let rows: Vec<(i64, String)> =
+            sqlx::query_as("SELECT time, CAST(score AS TEXT) FROM tracker WHERE type = 'water'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        rows
+    };
+    // The later write owns the slot; the loser is deleted and the deletion is
+    // published, so both devices agree on the same single row.
+    assert_eq!(entries(device_a.clone()).await, vec![(now + 1, "2".into())]);
+    assert_eq!(entries(device_b).await, vec![(now + 1, "2".into())]);
 }

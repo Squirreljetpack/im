@@ -6,9 +6,8 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-use crate::db::Id;
 
 use super::types::{SyncRequest, SyncResponse};
 
