@@ -42,6 +42,9 @@ const MAX_PUSH = 1000;
 const LIVE = encode({ text: "live" });
 const DEAD = encode({ text: "deleted" });
 
+/** A push that cannot land whole, so none of it lands. */
+class Refused extends Error {}
+
 interface CellRow {
   entity_id: string;
   field: string;
@@ -170,7 +173,30 @@ export class UserSyncDO implements DurableObject {
     const cursor = Number.isInteger(body.cursor) && body.cursor > 0 ? body.cursor : 0;
     const now = Date.now();
 
-    const payload: SyncResponse = this.ctx.storage.transactionSync(() => {
+    try {
+      return json(this.pushBatch(body, device, cursor, now, pageSize));
+    } catch (failure) {
+      if (failure instanceof Refused) {
+        return error(failure.message, 400);
+      }
+      throw failure;
+    }
+  }
+
+  /**
+   * Validate and append the batch, then serve the pull that follows it.
+   *
+   * Throws `Refused` when the push cannot land whole: the transaction rolls
+   * back, so a refusal leaves no trace.
+   */
+  private pushBatch(
+    body: SyncRequest,
+    device: string,
+    cursor: number,
+    now: number,
+    pageSize: number,
+  ): SyncResponse {
+    return this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
       // Everything appended by this push shares one batch: a page may break
       // between pushes but never inside one, which is what keeps a create's
@@ -195,6 +221,28 @@ export class UserSyncDO implements DurableObject {
           pushed.push({ index, ...result.cell });
         }
       });
+      // A reader builds a row only from the page that carries its existence
+      // cell, and a row is one `INSERT`: the domain tables cannot be filled one
+      // cell at a time. A create that landed without the fields its kind marks
+      // required would therefore be unbuildable on every other device, silently
+      // and for good, so a push carrying one lands nothing at all.
+      for (const entity of creating) {
+        const existence = this.cell(sql, entity, EXISTENCE);
+        if (existence === undefined || existence.value === DEAD) {
+          continue;
+        }
+        const spec = kindSpec(existence.kind);
+        if (spec === undefined) {
+          continue;
+        }
+        for (const [name, field] of Object.entries(spec.fields)) {
+          if (field.required === true && this.cell(sql, entity, name) === undefined) {
+            throw new Refused(
+              `create of ${entity} (${existence.kind}) is missing required field "${name}": one push must carry a whole create`,
+            );
+          }
+        }
+      }
       // A cell is only accepted or superseded once the whole batch has landed:
       // a later event of the same push can legitimately take the cell away
       // from an earlier one.
@@ -212,8 +260,6 @@ export class UserSyncDO implements DurableObject {
         superseded: this.notices(sql, cursor, device),
       };
     });
-
-    return json(payload);
   }
 
   /**
