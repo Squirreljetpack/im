@@ -412,10 +412,8 @@ pub async fn compute_mood_colors_and_backfill(
             None => (predict_saliency(embedder, &row.mood), true),
         };
 
-        // 3. Persist missing fields to DB if pool is provided and row has valid id
-        if let Some(pool) = pool
-            && row.id > 0
-        {
+        // 3. Persist missing fields to DB if a pool is provided
+        if let Some(pool) = pool {
             let _ = crate::db::update_mood_embedding_and_score(
                 pool,
                 row.id,

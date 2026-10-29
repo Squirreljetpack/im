@@ -124,19 +124,20 @@ for (( off = 365; off >= 1; off-- )); do
       dur=$(( (25 + RANDOM % 3 * 15) * 60 ))   # 25m / 40m / 55m
       body=""
       (( RANDOM % 4 == 0 )) && body="felt ${mood} during the block"
-      print -r -- "INSERT INTO mood (mood, body, time, embedding, score, duration) VALUES ('$(esc_sql "$mood")', '$(esc_sql "$body")', $ts, NULL, NULL, $dur);" >>"$SQL"
+      print -r -- "INSERT INTO mood (id, mood, body, time, embedding, score, duration) VALUES (lower(hex(randomblob(16))), '$(esc_sql "$mood")', '$(esc_sql "$body")', $ts, NULL, NULL, $dur);" >>"$SQL"
     else
-      print -r -- "INSERT INTO mood (mood, body, time, embedding, score, duration) VALUES ('$(esc_sql "$mood")', '', $ts, NULL, NULL, NULL);" >>"$SQL"
+      print -r -- "INSERT INTO mood (id, mood, body, time, embedding, score, duration) VALUES (lower(hex(randomblob(16))), '$(esc_sql "$mood")', '', $ts, NULL, NULL, NULL);" >>"$SQL"
     fi
     (( inserted++ ))
   done
 done
 
-# The mood table matches im's CREATE TABLE IF NOT EXISTS exactly; im creates
-# its other tables (tracker, todos, ...) on first startup.
+# The mood table mirrors im's CREATE TABLE IF NOT EXISTS (TEXT uuid keys);
+# im creates its other tables (tracker, todos, ...) on first startup. Rows
+# are inserted with their own random ids — the demo does not need UUIDv7.
 for db in "$DB_REL" "$DB_DEV"; do
   sqlite3 "$db" 'CREATE TABLE IF NOT EXISTS mood (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT PRIMARY KEY,
       mood TEXT NOT NULL,
       body TEXT NOT NULL DEFAULT '"''"',
       time INTEGER NOT NULL DEFAULT (unixepoch()),

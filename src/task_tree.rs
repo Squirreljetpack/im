@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, Result};
 use sqlx::SqlitePool;
 
-use crate::db::TaskRow;
+use crate::db::{Id, TaskRow};
 
 /// A task and its descendants, rooted at one task.
 #[derive(Debug, Clone)]
@@ -33,7 +33,7 @@ impl TaskTree {
     /// uses `UNION` (row de-duplication), so a parent cycle in the data
     /// cannot make the query loop; assembly additionally tracks seen ids so
     /// a corrupt parent link is clipped rather than recursed forever.
-    pub async fn load(pool: &SqlitePool, root_id: i64) -> Result<Option<TaskTree>> {
+    pub async fn load(pool: &SqlitePool, root_id: Id) -> Result<Option<TaskTree>> {
         let now = crate::date::now();
         let rows = sqlx::query_as::<_, TaskRow>(
             r#"WITH RECURSIVE subtree(id) AS (
@@ -59,8 +59,8 @@ impl TaskTree {
         // the current interval via jiff calendar math).
         let rows = crate::db::attach_full_completions(pool, rows, now).await?;
 
-        let mut nodes: HashMap<i64, TaskRow> = HashMap::with_capacity(rows.len());
-        let mut children_of: HashMap<i64, Vec<i64>> = HashMap::new();
+        let mut nodes: HashMap<Id, TaskRow> = HashMap::with_capacity(rows.len());
+        let mut children_of: HashMap<Id, Vec<Id>> = HashMap::new();
         // Iterate the rows in query order (priority, start time, id) so the
         // sibling order in each `children` vec is stable and meaningful;
         // HashMap iteration order would randomize it.
@@ -122,10 +122,10 @@ fn push_node(
 /// was already visited on this path (a parent cycle) — the back edge is
 /// clipped.
 fn assemble(
-    id: i64,
-    nodes: &mut HashMap<i64, TaskRow>,
-    children_of: &HashMap<i64, Vec<i64>>,
-    seen: &mut HashSet<i64>,
+    id: Id,
+    nodes: &mut HashMap<Id, TaskRow>,
+    children_of: &HashMap<Id, Vec<Id>>,
+    seen: &mut HashSet<Id>,
 ) -> Option<TaskTreeNode> {
     if !seen.insert(id) {
         return None;
@@ -147,7 +147,7 @@ fn assemble(
 #[cfg(test)]
 mod tests {
     use crate::db::test_pool;
-    use crate::db::{TaskObject, create_task};
+    use crate::db::{Id, TaskObject, create_task};
     use crate::types::TaskKind;
 
     use super::*;
@@ -156,10 +156,10 @@ mod tests {
     async fn seed_task(
         pool: &sqlx::SqlitePool,
         name: &str,
-        parent: Option<i64>,
+        parent: Option<Id>,
         target_count: i32,
         interval_secs: Option<i64>,
-    ) -> i64 {
+    ) -> Id {
         let (id, _short) = create_task(
             pool,
             &TaskObject {
@@ -216,7 +216,7 @@ mod tests {
     #[tokio::test]
     async fn test_load_missing_root_returns_none() {
         let pool = test_pool().await.unwrap();
-        assert!(TaskTree::load(&pool, 42).await.unwrap().is_none());
+        assert!(TaskTree::load(&pool, Id::new()).await.unwrap().is_none());
     }
 
     #[tokio::test]

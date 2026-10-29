@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use sqlx::{Row, SqlitePool};
 
+use super::Id;
+
 pub async fn prune_embedding_cache(pool: &SqlitePool) -> Result<u64> {
     let rows_affected = sqlx::query("DELETE FROM embedding_cache")
         .execute(pool)
@@ -13,7 +15,7 @@ pub async fn prune_embedding_cache(pool: &SqlitePool) -> Result<u64> {
 /// Backfill embedding and/or saliency score for a mood row in a single query.
 pub async fn update_mood_embedding_and_score(
     pool: &SqlitePool,
-    id: i64,
+    id: Id,
     blob: Option<&[u8]>,
     score: Option<f32>,
 ) -> Result<u64> {
@@ -45,13 +47,13 @@ pub async fn update_mood_embedding_and_score(
 }
 
 /// Backfill a mood row's stored embedding.
-pub async fn update_mood_embedding(pool: &SqlitePool, id: i64, blob: &[u8]) -> Result<u64> {
+pub async fn update_mood_embedding(pool: &SqlitePool, id: Id, blob: &[u8]) -> Result<u64> {
     update_mood_embedding_and_score(pool, id, Some(blob), None).await
 }
 
 /// Persist a mood's cached saliency score (backfilled by
 /// `ColorAxes::mood_color_cached` on the first render pass).
-pub async fn update_mood_score(pool: &SqlitePool, id: i64, score: f32) -> Result<u64> {
+pub async fn update_mood_score(pool: &SqlitePool, id: Id, score: f32) -> Result<u64> {
     update_mood_embedding_and_score(pool, id, None, Some(score)).await
 }
 

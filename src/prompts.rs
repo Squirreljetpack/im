@@ -5,7 +5,8 @@
 //! `crate::output`; database access lives in `crate::db`.
 
 use anyhow::Result;
-use std::path::Path;
+
+use crate::db::Id;
 
 /// Maximum allowed task priority. Anything higher is rejected at ingestion
 /// time (cliclack validation in `prompt_priority`). Lower bound is 1 — zero
@@ -148,7 +149,7 @@ pub fn prompt_parent_id() -> Result<Option<crate::types::TaskRef>> {
 /// Prompt for a task's user-facing short id in the editor.
 pub async fn prompt_short_id(
     pool: &sqlx::SqlitePool,
-    current_id: i64,
+    current_id: Id,
     current_short: Option<i64>,
 ) -> Result<Option<i64>> {
     use cliclack::input;
@@ -387,17 +388,20 @@ pub fn prompt_db_doctor_confirm(count: i64) -> Result<bool> {
         .map_err(|e| anyhow::anyhow!("Prompt cancelled: {}", e))
 }
 
-/// Confirm deleting an invalid database file so it can be recreated fresh.
-/// Interactive callers only — non-interactive runs never reach this. The
-/// default is `false`: deleting the db destroys all stored data.
-pub fn prompt_delete_invalid_db(_path: &Path) -> Result<bool> {
+/// Confirm resetting the local database so `im :sync --reset` can rebuild
+/// the local database from the server log.
+pub fn prompt_discard_unsynced(count: usize) -> Result<bool> {
     use cliclack::{confirm, intro};
 
-    intro("Invalid database")?;
+    intro("Reset local database")?;
 
-    cliclack::log::warning("This will permanently remove ALL stored data.")?;
+    if count > 0 {
+        cliclack::log::warning(format!(
+            "{count} local change(s) have not been synced and will be discarded."
+        ))?;
+    }
 
-    confirm("Database is invalid. Delete it and start fresh?".to_string())
+    confirm("Rebuild the local database from the server log?".to_string())
         .initial_value(false)
         .interact()
         .map_err(|e| anyhow::anyhow!("Prompt cancelled: {}", e))

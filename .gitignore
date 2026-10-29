@@ -6,3 +6,4 @@ target/
 TODO/
 /cache
 /model/
+node_modules/

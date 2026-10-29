@@ -54,7 +54,7 @@ pub fn apply_delta_to_counts(counts: &[i32], delta: i32) -> Vec<i32> {
 /// task-completion API at `task::` for callers and tests.
 pub async fn apply_completion_delta(
     pool: &SqlitePool,
-    todo_id: i64,
+    todo_id: crate::db::Id,
     delta: i32,
 ) -> anyhow::Result<i32> {
     crate::db::update_task(pool, todo_id, delta).await

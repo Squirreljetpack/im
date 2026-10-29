@@ -25,28 +25,23 @@ pub fn parse_cli(args: Vec<String>) -> anyhow::Result<Cli> {
     // `F` sets `opts.fullscreen`.
     let mut opts = CliOpts::default();
     let mut rest: Vec<String> = Vec::new();
+    let mut is_help = false;
 
     let mut in_flags = true;
     for arg in args {
         if in_flags {
-            // `-h` / `--help` are only recognized in the initial position
-            // and short-circuit to Help before any dispatching prefix (so a
-            // help token is never re-read as a tracker name or command).
-            // After a non-flag token, `-h` is entry text like any other
-            // `-word`.
-            if arg == "-h" || arg == "--help" {
-                return Ok(Cli {
-                    opts,
-                    cmd: Command::Help,
-                });
+            if arg == "--help" {
+                is_help = true;
+                continue;
             }
             match arg.strip_prefix('-') {
-                Some(s) if !s.is_empty() && s.chars().all(|c| FLAG_CHARACTERS.contains(c)) => {
+                Some(s) if !s.is_empty() && s.chars().all(|c| FLAG_CHARACTERS.contains(c) || c == 'h') => {
                     for c in s.chars() {
                         match c {
                             'q' => opts.qv[0] += 1,
                             'v' => opts.qv[1] += 1,
                             'F' => opts.fullscreen = true,
+                            'h' => is_help = true,
                             _ => unreachable!(), // all() guard above
                         }
                     }
@@ -56,6 +51,13 @@ pub fn parse_cli(args: Vec<String>) -> anyhow::Result<Cli> {
             }
         }
         rest.push(arg);
+    }
+
+    if is_help {
+        return Ok(Cli {
+            opts,
+            cmd: Command::Help,
+        });
     }
 
     Ok(Cli {
@@ -122,7 +124,9 @@ pub fn parse_from(args: Vec<String>) -> anyhow::Result<Command> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{BODY_DELIMITER, ConfigTarget, DbSubcommand, TrackerItem, TrackerPeriod};
+    use super::super::{
+        AuthSubcommand, BODY_DELIMITER, ConfigTarget, DbSubcommand, TrackerItem, TrackerPeriod,
+    };
     use super::*;
     use crate::types::{Entry, Task, TaskKind, TaskRef, ViewMode};
 
@@ -1609,6 +1613,32 @@ mod tests {
         let cli = parse_cli(args(&["-q", "-h"])).unwrap();
         assert_eq!(cli.opts.qv, [1, 0]);
         assert_eq!(cli.cmd, Command::Help);
+
+        let cli = parse_cli(args(&["-vh"])).unwrap();
+        assert_eq!(cli.opts.qv, [0, 1]);
+        assert!(cli.opts.verbose());
+        assert_eq!(cli.cmd, Command::Help);
+
+        let cli = parse_cli(args(&["-hv"])).unwrap();
+        assert_eq!(cli.opts.qv, [0, 1]);
+        assert!(cli.opts.verbose());
+        assert_eq!(cli.cmd, Command::Help);
+
+        let cli = parse_cli(args(&["-v", "-h"])).unwrap();
+        assert_eq!(cli.opts.qv, [0, 1]);
+        assert!(cli.opts.verbose());
+        assert_eq!(cli.cmd, Command::Help);
+
+        let cli = parse_cli(args(&["-h", "-v"])).unwrap();
+        assert_eq!(cli.opts.qv, [0, 1]);
+        assert!(cli.opts.verbose());
+        assert_eq!(cli.cmd, Command::Help);
+
+        let cli = parse_cli(args(&["--help", "-v"])).unwrap();
+        assert_eq!(cli.opts.qv, [0, 1]);
+        assert!(cli.opts.verbose());
+        assert_eq!(cli.cmd, Command::Help);
+
         // After a non-flag token, -h is entry text (a valueless tracker
         // reference), not help.
         let cli = parse_cli(args(&["ok", "-h"])).unwrap();

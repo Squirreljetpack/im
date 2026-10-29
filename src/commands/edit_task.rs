@@ -3,6 +3,7 @@ use sqlx::SqlitePool;
 
 use crate::cli::CliOpts;
 use crate::config::Config;
+use crate::db::Id;
 use crate::types::{TaskKind, TaskRef};
 
 pub(super) async fn handle_task_edit(
@@ -331,7 +332,7 @@ pub(super) async fn handle_task_edit(
 /// duplicate). Returns `Err` so the caller stays in the menu.
 async fn validate_edit_name(
     pool: &SqlitePool,
-    current_id: i64,
+    current_id: Id,
     name: &str,
     kind: TaskKind,
 ) -> Result<()> {
