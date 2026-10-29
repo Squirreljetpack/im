@@ -10,7 +10,9 @@ export default defineConfig(async () => {
         wrangler: { configPath: "./wrangler.toml" },
         // The auth table comes from the D1 migration; the setup file applies
         // it so tests do not depend on `wrangler d1 migrations apply`.
-        miniflare: { bindings: { TEST_MIGRATIONS: migrations } },
+        miniflare: {
+          bindings: { TEST_MIGRATIONS: migrations, JWT_SECRET: "test-secret" },
+        },
       }),
     ],
     test: { setupFiles: ["./test/apply-migrations.ts"] },
