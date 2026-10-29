@@ -9,11 +9,13 @@
 //! * a cell that cannot be written is skipped and reported, never allowed to
 //!   poison the rest of the page.
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use sqlx::{Row, SqliteConnection};
 
 use super::schema::{self, KIND_ORDER};
-use super::types::{CellValue, DELETED, EXISTENCE, LogRow};
+use super::types::{CellEvent, CellValue, DELETED, EXISTENCE, LogRow};
 use crate::db::Id;
 
 /// What one page did.
@@ -34,16 +36,203 @@ pub struct Skip {
     pub reason: String,
 }
 
+/// Whether a cell is the marker that ends an entity.
+fn is_dead(cell: &CellEvent) -> bool {
+    cell.field == EXISTENCE && cell.value.as_ref().and_then(CellValue::as_text) == Some(DELETED)
+}
+
+/// Entities whose create arrived without the cells that make a row buildable.
+///
+/// A pull is cut by register version, and a required cell's register row moves
+/// forward whenever that cell is rewritten — a rename, a rescore. So the
+/// existence cell can arrive on one page and its required cells on another, and
+/// the domain tables cannot be filled one cell at a time: the row is one
+/// `INSERT`, so every cell it needs has to be in hand. Those cells are held
+/// here until they are, and [`Pending::fence`] says how far the cursor may move
+/// while they wait — which is what lets them stay in memory.
+#[derive(Debug, Default)]
+pub struct Pending {
+    held: HashMap<Id, Held>,
+}
+
+#[derive(Debug)]
+struct Held {
+    kind: String,
+    /// The existence cell's version: nothing at or below it is in the database.
+    since: i64,
+    cells: Vec<LogRow>,
+    /// Why the last attempt to build the row failed.
+    reason: String,
+}
+
+impl Pending {
+    fn holds(&self, entity: Id) -> bool {
+        self.held.contains_key(&entity)
+    }
+
+    /// Hold an entity from the existence cell that announced it.
+    fn start(&mut self, row: &LogRow) {
+        self.held.insert(
+            row.cell.entity_id,
+            Held {
+                kind: row.cell.kind.clone(),
+                since: row.version,
+                cells: vec![row.clone()],
+                reason: String::new(),
+            },
+        );
+    }
+
+    /// Add a cell to a held entity, keeping the newest write of its field.
+    fn add(&mut self, row: &LogRow) {
+        let Some(held) = self.held.get_mut(&row.cell.entity_id) else {
+            return;
+        };
+        let position = held
+            .cells
+            .iter()
+            .position(|cell| cell.cell.field == row.cell.field);
+        match position {
+            Some(index) if held.cells[index].version < row.version => {
+                held.cells[index] = row.clone();
+            }
+            Some(_) => {}
+            None => held.cells.push(row.clone()),
+        }
+    }
+
+    /// Drop an entity that was deleted before it could be built: there is
+    /// nothing to insert and nothing local to remove.
+    fn forget(&mut self, entity: Id) {
+        self.held.remove(&entity);
+    }
+
+    /// How far the cursor may advance: it may not pass a create whose cells are
+    /// not in the database yet.
+    pub(crate) fn fence(&self, end: i64) -> i64 {
+        self.held
+            .values()
+            .map(|held| held.since - 1)
+            .min()
+            .unwrap_or(end)
+    }
+
+    /// Nothing more is coming, so what is still held will never be buildable.
+    /// Report it rather than pin the cursor behind it for every later pull.
+    pub(crate) fn abandon(&mut self) -> Vec<Skip> {
+        let mut held: Vec<(Id, Held)> = self.held.drain().collect();
+        held.sort_unstable_by_key(|(_, held)| held.since);
+        held.into_iter()
+            .map(|(entity_id, held)| Skip {
+                entity_id,
+                field: "create".to_string(),
+                reason: if held.reason.is_empty() {
+                    "the cells needed to build it never arrived".to_string()
+                } else {
+                    held.reason
+                },
+            })
+            .collect()
+    }
+
+    /// Build every held entity that now has the cells its schema requires.
+    async fn flush(&mut self, conn: &mut SqliteConnection, applied: &mut Applied) -> Result<()> {
+        // Insert first, in `KIND_ORDER` so a referrer's target is built before
+        // it; a row still short a required cell stays held.
+        let mut built: Vec<(Id, Held)> = Vec::new();
+        for kind in KIND_ORDER {
+            let Some(table) = schema::table(kind) else {
+                continue;
+            };
+            let mut due: Vec<(i64, Id)> = self
+                .held
+                .iter()
+                .filter(|(_, held)| held.kind == kind)
+                .map(|(entity, held)| (held.since, *entity))
+                .collect();
+            due.sort_unstable_by_key(|(since, _)| *since);
+            for (_, entity) in due {
+                let Some(mut held) = self.held.remove(&entity) else {
+                    continue;
+                };
+                let outcome = {
+                    let cells: Vec<&LogRow> = held
+                        .cells
+                        .iter()
+                        .filter(|row| row.cell.field != EXISTENCE)
+                        .collect();
+                    insert_entity(&mut *conn, kind, table, entity, &cells).await
+                };
+                match outcome {
+                    Ok(()) => {
+                        applied.created += 1;
+                        built.push((entity, held));
+                    }
+                    Err(error) => {
+                        held.reason = format!("{error:#}");
+                        self.held.insert(entity, held);
+                    }
+                }
+            }
+        }
+        // The row, then its cells: a link the insert had to leave out, because
+        // its target was built later in this same flush, is written now that
+        // every row exists.
+        for (entity, held) in built {
+            for row in &held.cells {
+                if row.cell.field != EXISTENCE {
+                    apply_cell(&mut *conn, row, applied).await?;
+                }
+            }
+            if held.kind == "task" {
+                crate::db::sync_short_id(&mut *conn, entity).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Apply a page of served cells.
-pub async fn apply_rows(conn: &mut SqliteConnection, rows: &[LogRow]) -> Result<Applied> {
+///
+/// A cell whose entity has no local row yet is held in `pending` until the
+/// cells that build the row have arrived, which can take more pages.
+pub async fn apply_rows(
+    conn: &mut SqliteConnection,
+    rows: &[LogRow],
+    pending: &mut Pending,
+) -> Result<Applied> {
     let mut applied = Applied::default();
-    materialise(&mut *conn, rows, &mut applied).await?;
+    let mut served: Vec<&LogRow> = Vec::with_capacity(rows.len());
     for row in rows {
+        let entity = row.cell.entity_id;
+        if pending.holds(entity) {
+            if is_dead(&row.cell) {
+                pending.forget(entity);
+            } else {
+                pending.add(row);
+            }
+            continue;
+        }
+        if row.cell.field == EXISTENCE && !is_dead(&row.cell) {
+            let Some(table) = schema::table(&row.cell.kind) else {
+                served.push(row);
+                continue;
+            };
+            if !exists(&mut *conn, table, entity).await? {
+                pending.start(row);
+                continue;
+            }
+        }
+        served.push(row);
+    }
+
+    pending.flush(&mut *conn, &mut applied).await?;
+    for row in &served {
         apply_cell(&mut *conn, row, &mut applied).await?;
     }
     // A task's short id is a local projection: a task that just appeared needs
     // one, and a completion that landed can retire it.
-    for row in rows {
+    for row in &served {
         if row.cell.kind == "task" {
             crate::db::sync_short_id(&mut *conn, row.cell.entity_id).await?;
         }
@@ -51,49 +240,6 @@ pub async fn apply_rows(conn: &mut SqliteConnection, rows: &[LogRow]) -> Result<
     Ok(applied)
 }
 
-/// Write every entity that appears for the first time, existence cell first.
-async fn materialise(
-    conn: &mut SqliteConnection,
-    rows: &[LogRow],
-    applied: &mut Applied,
-) -> Result<()> {
-    for kind in KIND_ORDER {
-        for row in rows {
-            if row.cell.kind != kind || row.cell.field != EXISTENCE {
-                continue;
-            }
-            if row.cell.value.as_ref().and_then(CellValue::as_text) == Some(DELETED) {
-                continue;
-            }
-            let entity = row.cell.entity_id;
-            let Some(table) = schema::table(kind) else {
-                continue;
-            };
-            if exists(&mut *conn, table, entity).await? {
-                continue;
-            }
-            let cells: Vec<&LogRow> = rows
-                .iter()
-                .filter(|candidate| {
-                    candidate.cell.entity_id == entity && candidate.cell.field != EXISTENCE
-                })
-                .collect();
-            match insert_entity(&mut *conn, kind, table, entity, &cells).await {
-                Ok(()) => applied.created += 1,
-                Err(error) => applied.skipped.push(Skip {
-                    entity_id: entity,
-                    field: EXISTENCE.to_string(),
-                    reason: format!("{error:#}"),
-                }),
-            }
-        }
-    }
-    Ok(())
-}
-
-/// One `INSERT` from the entity's existence cell and the fields that came with
-/// it. The domain tables have `NOT NULL` columns, so this cannot be done one
-/// cell at a time.
 /// The value a cell materialises as. A null `completion.count` is how an
 /// earlier build stored a scheduled task's unmarked state, and the column is
 /// NOT NULL, so it lands as the sentinel; every other null cell stays null.
@@ -106,6 +252,9 @@ fn stored_value(kind: &str, field: &str, value: &Option<CellValue>) -> Option<Ce
     }
 }
 
+/// One `INSERT` from the cells that arrived with the entity's existence cell.
+/// The domain tables have `NOT NULL` columns, so this cannot be done one cell
+/// at a time.
 async fn insert_entity(
     conn: &mut SqliteConnection,
     kind: &str,
@@ -138,6 +287,13 @@ async fn insert_entity(
                 continue;
             };
             if !exists(&mut *conn, link_table, target).await? {
+                // Leaving out a required link is not an option: the row would
+                // stay unbuildable until the target arrives.
+                anyhow::ensure!(
+                    schema::field(kind, &row.cell.field).is_none_or(|field| !field.required),
+                    "missing required field {}: the row it points at has not arrived",
+                    row.cell.field
+                );
                 continue;
             }
         }
@@ -194,7 +350,7 @@ async fn apply_cell(
         return Ok(());
     };
     let outcome = if row.cell.field == EXISTENCE {
-        if row.cell.value.as_ref().and_then(CellValue::as_text) == Some(DELETED) {
+        if is_dead(&row.cell) {
             sqlx::query(sqlx::AssertSqlSafe(format!("DELETE FROM \"{table}\" WHERE id = ?")))
                 .bind(entity)
                 .execute(&mut *conn)

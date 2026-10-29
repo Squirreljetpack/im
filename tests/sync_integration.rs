@@ -159,7 +159,8 @@ async fn sync(pool: &SqlitePool) -> session::SyncReport {
 
 async fn sync_with(pool: &SqlitePool, slots: &TrackerSlots) -> session::SyncReport {
     let server = server().await;
-    sync_once(pool, &server.base, SYNC_TIMEOUT, slots)
+    let mut pull = session::Pull::resume(pool).await.expect("resume the pull");
+    sync_once(pool, &server.base, SYNC_TIMEOUT, slots, &mut pull)
         .await
         .expect("sync")
 }
