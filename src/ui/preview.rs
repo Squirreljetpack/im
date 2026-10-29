@@ -277,7 +277,9 @@ pub fn build_preview(
     // body, with a blank line on each side.
     if task.target_count > 0 {
         lines.push(Line::default());
-        let done = task.completions.unwrap_or(0);
+        // The raw sum can dip below zero when two devices undo the same work;
+        // nothing below zero is meaningful to show.
+        let done = task.completions.unwrap_or(0).max(0);
         let target = task.target_count;
         let bar_width = 20usize;
         let filled = ((done as f64 / target as f64) * bar_width as f64).round() as usize;
