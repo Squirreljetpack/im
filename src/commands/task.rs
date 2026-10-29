@@ -180,7 +180,7 @@ pub(super) async fn create_task_command(
                     };
 
                     let mut select = cliclack::select("Edit fields:");
-                    select = select.item("save", "Save", "");
+                    select = select.item("save", "Finish", "");
                     select = select.item("priority", "Priority", priority_val.to_string());
                     select = select.item("body", "Body", &body_hint);
                     select = select.item("parent", "Parent", &parent_label);
@@ -499,7 +499,7 @@ async fn create_recurring_task(
         };
 
         let mut select = cliclack::select("Edit fields:");
-        select = select.item("save", "Save", "");
+        select = select.item("save", "Finish", "");
         select = select.item("priority", "Priority", priority_val.to_string());
         select = select.item("body", "Body", &body_hint);
         select = select.item(
@@ -662,7 +662,7 @@ async fn create_scheduled_task(
         };
 
         let mut select = cliclack::select("Edit fields:");
-        select = select.item("save", "Save", "");
+        select = select.item("save", "Finish", "");
         select = select.item("priority", "Priority", priority_val.to_string());
         select = select.item("body", "Body", &body_hint);
         select = select.item("optional", "Optional", if optional { "Yes" } else { "No" });
