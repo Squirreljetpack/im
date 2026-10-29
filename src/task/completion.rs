@@ -87,7 +87,9 @@ pub fn completion_percentage(target_count: i32, completions: Option<i32>) -> Opt
     if target_count == 0 {
         None
     } else {
-        let count = completions.unwrap_or(0);
+        // Concurrent undos can drive the raw sum below zero; a negative
+        // percentage is not a state anyone can act on.
+        let count = completions.unwrap_or(0).max(0);
         Some((count as f64 / target_count as f64) * 100.0)
     }
 }

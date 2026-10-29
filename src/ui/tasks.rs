@@ -304,7 +304,11 @@ pub(crate) fn task_columns(view: &Arc<Mutex<TasksApp>>) -> [Column<TaskRow, ()>;
             ];
             if item.target_count > 0 {
                 line.push(Span::styled(
-                    format!(" {}/{}", item.completions.unwrap_or(0), item.target_count),
+                    format!(
+                        " {}/{}",
+                        item.completions.unwrap_or(0).max(0),
+                        item.target_count
+                    ),
                     Style::default().fg(Color::DarkGray),
                 ));
             }
