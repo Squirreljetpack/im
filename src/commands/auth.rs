@@ -4,14 +4,15 @@ use anyhow::{Result, bail};
 use sqlx::SqlitePool;
 
 use crate::cli::AuthSubcommand;
+use crate::config::Config;
 use crate::sync::client::server_url;
 use crate::sync::session;
 
-pub async fn auth_command(pool: &SqlitePool, sub: AuthSubcommand) -> Result<()> {
+pub async fn auth_command(pool: &SqlitePool, config: &Config, sub: AuthSubcommand) -> Result<()> {
     match sub {
         AuthSubcommand::Register => {
             let (email, password) = prompt_credentials()?;
-            let server = server_url();
+            let server = server_url(config);
             let account = session::register(&server, &email, &password).await?;
             session::store_account(pool, &account).await?;
             println!(
@@ -23,7 +24,7 @@ pub async fn auth_command(pool: &SqlitePool, sub: AuthSubcommand) -> Result<()> 
 
         AuthSubcommand::Login => {
             let (email, password) = prompt_credentials()?;
-            let server = server_url();
+            let server = server_url(config);
             let account = session::login(&server, &email, &password).await?;
             session::store_account(pool, &account).await?;
             println!("Signed in as {} on {server}.", account.email);
@@ -35,7 +36,7 @@ pub async fn auth_command(pool: &SqlitePool, sub: AuthSubcommand) -> Result<()> 
                 println!("Not signed in (run `im :auth login`).");
                 return Ok(());
             };
-            let server = server_url();
+            let server = server_url(config);
             match session::account_status(&server, &token).await {
                 Ok(status) => {
                     let queued = session::unsynced_count(pool).await?;

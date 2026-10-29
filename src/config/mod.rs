@@ -33,6 +33,8 @@ mod trackers;
 pub use trackers::*;
 mod views;
 pub use views::*;
+mod sync;
+pub use sync::*;
 
 /// The whole configuration file (`config.toml`). Every section is optional
 /// — a missing section or key falls back to a built-in default, so a config
@@ -42,7 +44,7 @@ pub use views::*;
 /// named by `[moods] source`), `[tasks]` (defaults for new tasks, badge
 /// colors), `[tracker.<name>]` (trackers), `[grid]` (tracker grid
 /// ranges), `[tasks_view]` and `[today_view]` (view options), `[badges]`
-/// (row marker glyphs), `[editor]` (body editor).
+/// (row marker glyphs), `[editor]` (body editor), `[sync]` (server URL).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -72,6 +74,9 @@ pub struct Config {
 
     #[serde(default)]
     pub editor: EditorConfig,
+
+    #[serde(default)]
+    pub sync: SyncConfig,
 }
 
 impl Default for Config {
