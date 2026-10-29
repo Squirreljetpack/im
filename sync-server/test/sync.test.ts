@@ -450,6 +450,39 @@ describe("push validation", () => {
     ]);
   });
 
+  it("refuses a create that is missing a required field, and lands none of it", async () => {
+    const account = await register("frost@example.com");
+    const task = "0193f000-0000-7000-8000-000000000098";
+    // A reader builds a row only from the page carrying the existence cell, so
+    // an existence cell without `name` would be unbuildable on every device.
+    const refused = await call("/api/sync", {
+      method: "POST",
+      token: account.token,
+      body: {
+        device_id: "device-a",
+        cursor: 0,
+        events: [cell(task, "task", "", { text: "live" }, ago(1000))],
+      },
+    });
+    expect(refused.status).toBe(400);
+    expect(await refused.text()).toContain('missing required field "name"');
+
+    // The transaction rolled back: not even the existence cell landed.
+    const pulled = await sync(account.token, "device-b", 0);
+    expect(pulled.events).toEqual([]);
+
+    const accepted = await sync(
+      account.token,
+      "device-a",
+      0,
+      create(task, "task", [["name", { text: "whole" }]], ago(1000)),
+    );
+    expect(accepted.verdicts.map((verdict) => verdict.outcome)).toEqual([
+      "accepted",
+      "accepted",
+    ]);
+  });
+
   it("is idempotent for retried pushes", async () => {
     const account = await register("rupert@example.com");
     const task = "0193f000-0000-7000-8000-000000000020";
