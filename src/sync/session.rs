@@ -39,6 +39,9 @@ pub struct SyncReport {
     pub notices: Vec<String>,
     /// Content of tasks and moods deleted elsewhere, offered as a copy.
     pub resurrect: Vec<Resurrect>,
+    /// The cursor this round started from, so the caller can prove progress
+    /// when the server says another page is waiting.
+    pub cursor_before: i64,
     /// The cursor the next round resumes from.
     pub cursor: i64,
     pub has_more: bool,
@@ -57,13 +60,6 @@ pub struct Resurrect {
     pub image: String,
     pub device: Option<String>,
     pub at: Option<i64>,
-}
-
-impl SyncReport {
-    /// Whether the caller should make another round trip.
-    pub fn again(&self) -> bool {
-        self.has_more || self.pending > 0 || self.clock_ahead.is_some()
-    }
 }
 
 /// Store the account a successful `im :auth register`/`login` returned.
@@ -151,6 +147,7 @@ pub async fn sync_once(
 
     let mut report = SyncReport {
         pushed: batch.len(),
+        cursor_before: cursor,
         cursor: response.cursor,
         has_more: response.has_more,
         ..SyncReport::default()
@@ -190,8 +187,6 @@ pub async fn sync_once(
     Ok(report)
 }
 
-/// Read the outbox in emission order: a create's existence cell must reach the
-/// server before the fields it introduces.
 /// Turn supersession notices into prose. The winning value arrived in the same
 /// response and has already been applied, so this only says why a value the
 /// user was looking at changed underneath them.
@@ -240,22 +235,37 @@ async fn row_exists(conn: &mut SqliteConnection, kind: &str, id: Id) -> Result<b
     Ok(row.is_some())
 }
 
+/// Events in one push: the server refuses more, and one push is one batch.
+const MAX_PUSH: usize = 1000;
+
 /// Read the outbox in emission order: a create's existence cell must reach the
 /// server before the fields it introduces.
 ///
-/// A push also never splits an entity. The server appends a whole push as one
-/// batch and a page may only break between batches, so an entity whose cells
-/// straddled two pushes could be materialised from neither. If the batch ends
-/// mid-entity, that entity waits for the next round.
+/// A push never splits a *create*. `create` appends the existence cell and its
+/// fields back to back, the server gives a whole push one batch, and a page may
+/// only break between batches. A reader materialises a row only from the page
+/// that carries its existence cell, and requires that page to also carry the
+/// fields the schema marks required (`insert_entity`); every later cell is a
+/// blind `UPDATE`, so a create split across two pushes is lost on the reader for
+/// good. The window therefore ends at an entity boundary: when the entity of the
+/// last row continues past it, its rows wait for the next round. Later edits of
+/// an already-created entity may split freely; the row exists by then and its
+/// cells apply on their own.
+///
+/// Deferral is skipped only when the whole window belongs to the entity that
+/// continues past it, which liveness needs: a single entity must not stall the
+/// outbox. That cannot cut a create, because a create is one existence cell
+/// plus at most its kind's fields — only repeated edits can fill a window.
 async fn outbox(conn: &mut SqliteConnection) -> Result<Vec<(EventId, CellEvent)>> {
     let mut rows = sqlx::query(
         "SELECT id, event_id, device_id, entity_id, kind, field, value, timestamp
-           FROM _sync_events ORDER BY id ASC LIMIT 1000",
+           FROM _sync_events ORDER BY id ASC LIMIT ?",
     )
+    .bind(MAX_PUSH as i64)
     .fetch_all(&mut *conn)
     .await
     .context("Failed to read the outbox")?;
-    if rows.len() == 1000
+    if rows.len() == MAX_PUSH
         && let Some(last) = rows.last()
     {
         let tail = last.get::<String, _>("entity_id");

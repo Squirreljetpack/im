@@ -20,9 +20,6 @@ use crate::tracker::TrackerSlots;
 /// How long `im sync` waits on the server: it is the interactive path, so a
 /// slow connection is worth waiting for.
 const TIMEOUT: Duration = Duration::from_secs(30);
-/// A round can queue work of its own (tracker slot repairs). More than a couple
-/// of rounds means two devices keep colliding, not a sync in progress.
-const MAX_ROUNDS: usize = 4;
 
 /// `--reset` must not silently discard changes that never reached the server.
 fn reset_guard(pending: usize, interactive: bool) -> Result<()> {
@@ -61,7 +58,7 @@ pub async fn sync_command(pool: &SqlitePool, config: &Config, reset: bool) -> Re
 
     let mut totals = Totals::default();
     let mut clock_retried = false;
-    for _ in 0..MAX_ROUNDS {
+    loop {
         let report = sync_once(pool, &server, TIMEOUT, &slots).await?;
         totals.pushed += report.pushed;
         totals.created += report.created;
@@ -96,6 +93,26 @@ pub async fn sync_command(pool: &SqlitePool, config: &Config, reset: bool) -> Re
         }
 
         if report.has_more {
+            // Termination rests on this: the server only reports another page
+            // after delivering cells, so the cursor must have moved. A boundary
+            // that did not move it would re-issue the same request forever.
+            anyhow::ensure!(
+                report.cursor > report.cursor_before,
+                "the server reported more pages but the cursor did not advance past {}; stopping",
+                report.cursor_before
+            );
+            continue;
+        }
+        if report.pending > 0 {
+            // Applying a page can queue repairs of its own (a tracker slot loser
+            // is deleted and pushed as a delete), so a round can end with work
+            // left over. Each repair deletes a local row, so draining converges;
+            // a round that could not push what is queued would not.
+            anyhow::ensure!(
+                report.pushed > 0,
+                "{} change(s) are queued but the outbox returned none of them; stopping",
+                report.pending
+            );
             continue;
         }
         for offer in &report.resurrect {
@@ -109,7 +126,6 @@ pub async fn sync_command(pool: &SqlitePool, config: &Config, reset: bool) -> Re
         println!("Up to date at cursor {}.", report.cursor);
         return Ok(());
     }
-    bail!("still syncing after {MAX_ROUNDS} rounds; stopping")
 }
 
 #[derive(Default)]
