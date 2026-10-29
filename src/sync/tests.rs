@@ -4,7 +4,7 @@
 use sqlx::{Row, SqlitePool};
 
 use super::apply;
-use super::types::{CellEvent, CellValue, EXISTENCE, LogRow};
+use super::types::{CellEvent, CellValue, EXISTENCE, LogRow, live};
 use crate::db::{TaskObject, create_task, delete_task, test_pool, update_todo_body};
 
 fn task(name: &str) -> TaskObject {
@@ -122,9 +122,13 @@ async fn a_served_create_materialises_a_row_with_its_local_projection() {
     let page = queued(&source).await;
 
     let target = test_pool().await.expect("in-memory db");
-    let applied = apply::apply_rows(&mut *target.acquire().await.unwrap(), &page)
-        .await
-        .expect("apply");
+    let applied = apply::apply_rows(
+        &mut *target.acquire().await.unwrap(),
+        &page,
+        &mut apply::Pending::default(),
+    )
+    .await
+    .expect("apply");
     assert_eq!(applied.created, 1);
     assert!(applied.skipped.is_empty(), "{:?}", applied.skipped);
 
@@ -148,9 +152,13 @@ async fn a_served_cell_updates_without_recreating() {
     let (id, _) = create_task(&source, &task("before")).await.expect("create");
     let create = queued(&source).await;
     let target = test_pool().await.expect("in-memory db");
-    apply::apply_rows(&mut *target.acquire().await.unwrap(), &create)
-        .await
-        .expect("apply");
+    apply::apply_rows(
+        &mut *target.acquire().await.unwrap(),
+        &create,
+        &mut apply::Pending::default(),
+    )
+    .await
+    .expect("apply");
 
     sqlx::query("DELETE FROM _sync_events")
         .execute(&source)
@@ -158,9 +166,13 @@ async fn a_served_cell_updates_without_recreating() {
         .unwrap();
     update_todo_body(&source, id, "after").await.expect("edit");
     let edit = queued(&source).await;
-    let applied = apply::apply_rows(&mut *target.acquire().await.unwrap(), &edit)
-        .await
-        .expect("apply the edit");
+    let applied = apply::apply_rows(
+        &mut *target.acquire().await.unwrap(),
+        &edit,
+        &mut apply::Pending::default(),
+    )
+    .await
+    .expect("apply the edit");
     assert_eq!(applied.updated, 1);
     let body: String = sqlx::query_scalar("SELECT body FROM todos WHERE id = ?")
         .bind(id)
@@ -180,9 +192,13 @@ async fn a_served_delete_takes_the_dependants_with_it() {
     let create = queued(&source).await;
 
     let target = test_pool().await.expect("in-memory db");
-    apply::apply_rows(&mut *target.acquire().await.unwrap(), &create)
-        .await
-        .expect("apply the creates");
+    apply::apply_rows(
+        &mut *target.acquire().await.unwrap(),
+        &create,
+        &mut apply::Pending::default(),
+    )
+    .await
+    .expect("apply the creates");
 
     delete_task(&source, parent).await.expect("delete");
     let delete: Vec<LogRow> = queued(&source)
@@ -190,9 +206,13 @@ async fn a_served_delete_takes_the_dependants_with_it() {
         .into_iter()
         .filter(|row| row.cell.entity_id == parent && row.cell.field == EXISTENCE)
         .collect();
-    apply::apply_rows(&mut *target.acquire().await.unwrap(), &delete)
-        .await
-        .expect("apply the delete");
+    apply::apply_rows(
+        &mut *target.acquire().await.unwrap(),
+        &delete,
+        &mut apply::Pending::default(),
+    )
+    .await
+    .expect("apply the delete");
 
     let gone: Option<i64> = sqlx::query_scalar("SELECT 1 FROM todos WHERE id = ?")
         .bind(parent)
@@ -223,9 +243,13 @@ async fn a_cell_for_a_row_that_never_appeared_is_skipped() {
             timestamp: 1,
         },
     };
-    let applied = apply::apply_rows(&mut *pool.acquire().await.unwrap(), &[orphan])
-        .await
-        .expect("apply");
+    let applied = apply::apply_rows(
+        &mut *pool.acquire().await.unwrap(),
+        &[orphan],
+        &mut apply::Pending::default(),
+    )
+    .await
+    .expect("apply");
     assert_eq!(applied.updated, 0);
     assert_eq!(applied.skipped.len(), 1);
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM todos")
@@ -233,4 +257,54 @@ async fn a_cell_for_a_row_that_never_appeared_is_skipped() {
         .await
         .unwrap();
     assert_eq!(count, 0, "no skeleton row is invented");
+}
+
+/// A required cell's register row moves forward whenever it is rewritten, so a
+/// create can straddle two pages. The row must not be invented from what
+/// arrived first, and the cursor must not pass what is still being built.
+#[tokio::test]
+async fn a_create_split_across_pages_waits_for_its_required_cell() {
+    let pool = test_pool().await.expect("in-memory db");
+    let id = crate::db::Id::new();
+    let device = crate::db::Id::new();
+    let cell = |version: i64, field: &str, value: Option<CellValue>| LogRow {
+        version,
+        cell: CellEvent {
+            event_id: crate::db::EventId::new(),
+            device_id: device,
+            entity_id: id,
+            kind: "task".to_string(),
+            field: field.to_string(),
+            value,
+            timestamp: version,
+        },
+    };
+    let existence = cell(10, EXISTENCE, live());
+    let name = cell(90, "name", Some(CellValue::text("late")));
+
+    let mut conn = pool.acquire().await.unwrap();
+    let mut pending = apply::Pending::default();
+    let first = apply::apply_rows(&mut conn, &[existence], &mut pending)
+        .await
+        .expect("apply the existence cell");
+    assert_eq!(first.created, 0, "an existence cell alone is not a row");
+    assert!(first.skipped.is_empty(), "and not a loss either");
+    assert_eq!(
+        pending.fence(50),
+        9,
+        "the cursor cannot pass the create it holds"
+    );
+
+    let second = apply::apply_rows(&mut conn, &[name], &mut pending)
+        .await
+        .expect("apply the name");
+    assert_eq!(second.created, 1, "the required cell completes the create");
+    assert_eq!(pending.fence(90), 90, "and the fence may move on");
+
+    let name: String = sqlx::query_scalar("SELECT name FROM todos WHERE id = ?")
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await
+        .expect("the row");
+    assert_eq!(name, "late");
 }

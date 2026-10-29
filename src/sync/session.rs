@@ -11,7 +11,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use sqlx::{Connection, Row, SqliteConnection, SqlitePool};
 
-use super::apply::{self, Skip};
+use super::apply::{self, Pending, Skip};
 use super::client::{Account, AccountStatus, Client, run_blocking};
 use super::state;
 use super::schema;
@@ -42,7 +42,7 @@ pub struct SyncReport {
     /// The cursor this round started from, so the caller can prove progress
     /// when the server says another page is waiting.
     pub cursor_before: i64,
-    /// The cursor the next round resumes from.
+    /// The version the next page is requested from.
     pub cursor: i64,
     pub has_more: bool,
     /// Cells still queued locally (tracker slot repairs queue their own).
@@ -60,6 +60,32 @@ pub struct Resurrect {
     pub image: String,
     pub device: Option<String>,
     pub at: Option<i64>,
+}
+
+/// A pull in progress: where it has reached, and the entities it is building.
+///
+/// `cursor` can run ahead of the low-water mark persisted in `_sync_state`,
+/// because a page is applied even while a create in it is still being built.
+/// The persisted mark, not this, is what a later run trusts: it never claims a
+/// cell that lives only in memory.
+pub struct Pull {
+    /// The version the next page is requested from.
+    cursor: i64,
+    pending: Pending,
+}
+
+impl Pull {
+    /// Start where the last pull stopped.
+    pub async fn resume(pool: &SqlitePool) -> Result<Pull> {
+        let mut conn = pool
+            .acquire()
+            .await
+            .context("Failed to acquire a db connection")?;
+        Ok(Pull {
+            cursor: state::cursor(&mut conn).await?,
+            pending: Pending::default(),
+        })
+    }
 }
 
 /// Store the account a successful `im :auth register`/`login` returned.
@@ -115,6 +141,7 @@ pub async fn sync_once(
     server: &str,
     timeout: Duration,
     slots: &TrackerSlots,
+    pull: &mut Pull,
 ) -> Result<SyncReport> {
     let mut conn = pool
         .acquire()
@@ -124,12 +151,11 @@ pub async fn sync_once(
         .await?
         .context("not logged in — run `im :auth login`")?;
     let device = state::device_id(&mut *conn).await?;
-    let cursor = state::cursor(&mut *conn).await?;
 
     let batch = outbox(&mut *conn).await?;
     let request = SyncRequest {
         device_id: device,
-        cursor,
+        cursor: pull.cursor,
         events: batch.iter().map(|row| row.1.clone()).collect(),
     };
     let client = Client::with_timeout(server, Some(token), timeout);
@@ -147,22 +173,36 @@ pub async fn sync_once(
 
     let mut report = SyncReport {
         pushed: batch.len(),
-        cursor_before: cursor,
+        cursor_before: pull.cursor,
         cursor: response.cursor,
         has_more: response.has_more,
         ..SyncReport::default()
     };
 
     // The page and the cursor commit together: a crash replays the page rather
-    // than skipping it.
+    // than skipping it. The cursor is a fence and may only pass cells that are
+    // in the database — a create still being built is not, so it holds the fence
+    // back and the next run is re-served the cells above it. That is what lets a
+    // held create stay in memory.
     let mut tx = (&mut *conn).begin().await.context("Failed to start a sync round")?;
-    let applied = apply::apply_rows(&mut tx, &response.events).await?;
-    state::set_cursor(&mut tx, response.cursor).await?;
+    let applied = apply::apply_rows(&mut tx, &response.events, &mut pull.pending).await?;
+    let fence = if response.has_more {
+        pull.pending.fence(response.cursor)
+    } else {
+        response.cursor
+    };
+    state::set_cursor(&mut tx, fence).await?;
     tx.commit().await.context("Failed to commit a sync round")?;
     report.created = applied.created;
     report.applied = applied.updated;
     report.deleted = applied.deleted;
     report.skipped = applied.skipped;
+    if !response.has_more {
+        // Nothing else is coming, so a held create can never be completed.
+        // Reporting it beats a fence that would never move again.
+        report.skipped.extend(pull.pending.abandon());
+    }
+    pull.cursor = response.cursor;
 
     let touched = tracker_slots(&mut conn, slots, &response.events).await?;
     let repaired = apply::dedup_tracker_slots(&mut conn, &touched).await?;
@@ -584,7 +624,8 @@ pub async fn resurrect(pool: &SqlitePool, offer: &Resurrect) -> Result<Option<Id
         .begin()
         .await
         .context("Failed to start the resurrection")?;
-    let applied = apply::apply_rows(&mut tx, &rows).await?;
+    // The copy is built and written in one go, so nothing needs holding.
+    let applied = apply::apply_rows(&mut tx, &rows, &mut Pending::default()).await?;
     if applied.created == 0 {
         return Ok(None);
     }

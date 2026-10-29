@@ -56,10 +56,11 @@ pub async fn sync_command(pool: &SqlitePool, config: &Config, reset: bool) -> Re
         }
     }
 
+    let mut pull = session::Pull::resume(pool).await?;
     let mut totals = Totals::default();
     let mut clock_retried = false;
     loop {
-        let report = sync_once(pool, &server, TIMEOUT, &slots).await?;
+        let report = sync_once(pool, &server, TIMEOUT, &slots, &mut pull).await?;
         totals.pushed += report.pushed;
         totals.created += report.created;
         totals.applied += report.applied;
