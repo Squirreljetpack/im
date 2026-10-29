@@ -16,7 +16,8 @@ use super::client::{Account, AccountStatus, Client, run_blocking};
 use super::state;
 use super::schema;
 use super::types::{
-    self, CellEvent, CellValue, EXISTENCE, LogRow, Outcome, SyncRequest, SyncResponse, Verdict,
+    self, CellEvent, CellValue, EXISTENCE, LogRow, Notice, Outcome, SyncRequest, SyncResponse,
+    Verdict,
 };
 use crate::db::{EventId, Id};
 use crate::tracker::TrackerSlots;
@@ -176,6 +177,7 @@ pub async fn sync_once(
     }
 
     reconcile(&mut conn, &response.verdicts, &batch, response.now, &mut report).await?;
+    explain_lost(&mut conn, &response.superseded, &batch, &mut report).await?;
 
     for (event_id, _) in &batch {
         sqlx::query("DELETE FROM _sync_events WHERE event_id = ?")
@@ -190,14 +192,89 @@ pub async fn sync_once(
 
 /// Read the outbox in emission order: a create's existence cell must reach the
 /// server before the fields it introduces.
+/// Turn supersession notices into prose. The winning value arrived in the same
+/// response and has already been applied, so this only says why a value the
+/// user was looking at changed underneath them.
+async fn explain_lost(
+    conn: &mut SqliteConnection,
+    notices: &[Notice],
+    batch: &[(EventId, CellEvent)],
+    report: &mut SyncReport,
+) -> Result<()> {
+    let pushed: HashSet<String> = batch.iter().map(|(id, _)| id.to_string()).collect();
+    for notice in notices {
+        // The local row is gone: the entity was deleted, which is reported on
+        // its own.
+        if !row_exists(&mut *conn, &notice.winner.cell.kind, notice.entity_id).await? {
+            continue;
+        }
+        // A queued edit of our own is the next word on that cell, so the loss
+        // is not the user's latest intent.
+        if pending_outranks(&mut *conn, &notice.winner, &pushed).await? {
+            continue;
+        }
+        report.notices.push(format!(
+            "{} {}: yours ({}) was replaced by {} ({} at {})",
+            short(notice.entity_id),
+            notice.field,
+            describe_value(&notice.lost),
+            describe_value(&notice.winner.cell.value),
+            notice.winner.cell.device_id,
+            format_stamp(notice.winner.cell.timestamp),
+        ));
+    }
+    Ok(())
+}
+
+async fn row_exists(conn: &mut SqliteConnection, kind: &str, id: Id) -> Result<bool> {
+    let Some(table) = schema::table(kind) else {
+        return Ok(false);
+    };
+    let row: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT 1 FROM \"{table}\" WHERE id = ?"
+    )))
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await
+    .with_context(|| format!("Failed to look up a {kind}"))?;
+    Ok(row.is_some())
+}
+
+/// Read the outbox in emission order: a create's existence cell must reach the
+/// server before the fields it introduces.
+///
+/// A push also never splits an entity. The server appends a whole push as one
+/// batch and a page may only break between batches, so an entity whose cells
+/// straddled two pushes could be materialised from neither. If the batch ends
+/// mid-entity, that entity waits for the next round.
 async fn outbox(conn: &mut SqliteConnection) -> Result<Vec<(EventId, CellEvent)>> {
-    let rows = sqlx::query(
-        "SELECT event_id, device_id, entity_id, kind, field, value, timestamp
+    let mut rows = sqlx::query(
+        "SELECT id, event_id, device_id, entity_id, kind, field, value, timestamp
            FROM _sync_events ORDER BY id ASC LIMIT 1000",
     )
     .fetch_all(&mut *conn)
     .await
     .context("Failed to read the outbox")?;
+    if rows.len() == 1000
+        && let Some(last) = rows.last()
+    {
+        let tail = last.get::<String, _>("entity_id");
+        let last_id = last.get::<i64, _>("id");
+        let first = rows
+            .iter()
+            .position(|row| row.get::<String, _>("entity_id") == tail)
+            .unwrap_or(0);
+        let continues: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM _sync_events WHERE entity_id = ? AND id > ? LIMIT 1")
+                .bind(&tail)
+                .bind(last_id)
+                .fetch_optional(&mut *conn)
+                .await
+                .context("Failed to read the outbox tail")?;
+        if continues.is_some() && first > 0 {
+            rows.truncate(first);
+        }
+    }
     let mut batch = Vec::with_capacity(rows.len());
     for row in rows {
         let value: Option<String> = row.get("value");

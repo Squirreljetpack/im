@@ -167,6 +167,25 @@ pub struct SyncResponse {
     pub has_more: bool,
     pub events: Vec<LogRow>,
     pub verdicts: Vec<Verdict>,
+    /// Cells this device wrote earlier that a peer has since replaced. Not
+    /// verdicts: they judge what this push sent, these explain a value the
+    /// device already had.
+    #[serde(default)]
+    pub superseded: Vec<Notice>,
+}
+
+/// A cell this device lost to another device *after* it was accepted.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Notice {
+    /// The losing event, as this device originally pushed it.
+    pub event_id: EventId,
+    pub entity_id: Id,
+    pub field: String,
+    /// What that event said — the value being replaced.
+    #[serde(default)]
+    pub lost: Option<CellValue>,
+    /// The event that replaced it, as it stood at that moment.
+    pub winner: LogRow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]

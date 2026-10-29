@@ -73,6 +73,22 @@ export interface Verdict {
   tombstone?: LogRow | null;
 }
 
+/**
+ * A cell this device wrote earlier that a later event of *another* device has
+ * since replaced. It is not a verdict: verdicts judge what this push sent,
+ * this tells the device why a value it already had is going to change.
+ */
+export interface SupersededNotice {
+  /** The losing event, as this device originally pushed it. */
+  event_id: string;
+  entity_id: string;
+  field: string;
+  /** What that event said — the value being replaced. */
+  lost: CellValue | null;
+  /** The event that replaced it, as it stood at that moment. */
+  winner: LogRow;
+}
+
 export interface SyncResponse {
   /** Advance the client's cursor to this. */
   cursor: number;
@@ -81,6 +97,8 @@ export interface SyncResponse {
   has_more: boolean;
   events: LogRow[];
   verdicts: Verdict[];
+  /** `superseded` notices for this device, about events it pushed earlier. */
+  superseded: SupersededNotice[];
 }
 
 export interface UserRow {

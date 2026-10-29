@@ -545,3 +545,38 @@ interval = { anchor = "2026-01-01T00:00:00+00:00", span = "1 day" }
     assert_eq!(entries(device_a.clone()).await, vec![(now + 1, "2".into())]);
     assert_eq!(entries(device_b).await, vec![(now + 1, "2".into())]);
 }
+
+#[tokio::test]
+async fn a_device_is_told_when_a_peer_replaces_its_cell() {
+    let (device_a, token) = device("notices").await;
+    let device_b = second_device(&token).await;
+    let (task, _) = create_task(&device_a, &task_object("shared", "mine"))
+        .await
+        .unwrap();
+    settle(&[&device_a, &device_b]).await;
+
+    // B writes the same cell later, so A's already-pushed value is replaced.
+    sleep_between_mutations().await;
+    set_body(&device_b, "shared", "theirs").await;
+    sync(&device_b).await;
+
+    // A learns about it from the notice, not by watching the text change.
+    let report = sync(&device_a).await;
+    let notice = report
+        .notices
+        .iter()
+        .find(|notice| notice.contains("body"))
+        .unwrap_or_else(|| panic!("no notice in {:?}", report.notices));
+    assert!(notice.contains("\"mine\""), "{notice}");
+    assert!(notice.contains("\"theirs\""), "{notice}");
+    assert_eq!(body_of(&device_a, "shared").await.as_deref(), Some("theirs"));
+
+    // The notice is not repeated once the device has read past it.
+    let report = sync(&device_a).await;
+    assert!(
+        !report.notices.iter().any(|notice| notice.contains("body")),
+        "{:?}",
+        report.notices
+    );
+    let _ = task;
+}
