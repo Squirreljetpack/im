@@ -184,11 +184,10 @@ pub async fn delete_task(pool: &SqlitePool, id: Id) -> Result<u64> {
 /// never touched, and the returned total is the sum within the current
 /// interval only; oneshot tasks: full history).
 ///
-/// Each completion row this touches gets its own sync event (upsert for a new
-/// or reduced row, delete for a fully consumed one), so peers replay the same
-/// completion totals. Afterwards the task's `short_id` is synced to its
-/// completion state (see [`sync_short_id`]) — a local projection that never
-/// syncs.
+/// Each completion row this touches gets its own sync event, so peers replay
+/// the same completion totals. Afterwards the task's `short_id` is synced to
+/// its completion state (see [`sync_short_id`]) — a local projection that
+/// never syncs.
 pub async fn update_task(pool: &SqlitePool, todo_id: Id, delta: i32) -> Result<i32> {
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
 
@@ -232,18 +231,27 @@ pub async fn update_task(pool: &SqlitePool, todo_id: Id, delta: i32) -> Result<i
         // It is clamped to what the interval holds: undoing more than was
         // logged is a no-op for the total, and a negative sum would be a worse
         // answer than "nothing left to undo".
-        let held: i32 = match interval_start {
-            Some(boundary) => sqlx::query_scalar(
-                "SELECT COALESCE(SUM(count), 0) FROM todo_completions
-                  WHERE todo_id = ? AND time >= ?",
-            )
-            .bind(todo_id)
-            .bind(boundary)
-            .fetch_one(&mut *tx)
-            .await?,
+        //
+        // The row carries the time of the completion it takes back, not the
+        // time of the undo: a row's time is the moment whose progress it
+        // changes, so a reader that groups by time shows the net at that
+        // moment instead of a completion followed by a smaller one later. The
+        // undo's own moment survives only as the event's stamp.
+        let (held, cancelled_at): (i32, Option<i64>) = match interval_start {
+            Some(boundary) => {
+                sqlx::query_as(
+                    "SELECT COALESCE(SUM(count), 0), MAX(CASE WHEN count > 0 THEN time END)
+                       FROM todo_completions WHERE todo_id = ? AND time >= ?",
+                )
+                .bind(todo_id)
+                .bind(boundary)
+                .fetch_one(&mut *tx)
+                .await?
+            }
             None => {
-                sqlx::query_scalar(
-                    "SELECT COALESCE(SUM(count), 0) FROM todo_completions WHERE todo_id = ?",
+                sqlx::query_as(
+                    "SELECT COALESCE(SUM(count), 0), MAX(CASE WHEN count > 0 THEN time END)
+                       FROM todo_completions WHERE todo_id = ?",
                 )
                 .bind(todo_id)
                 .fetch_one(&mut *tx)
@@ -260,7 +268,7 @@ pub async fn update_task(pool: &SqlitePool, todo_id: Id, delta: i32) -> Result<i
         sqlx::query("INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, ?)")
             .bind(completion_id)
             .bind(todo_id)
-            .bind(crate::date::now())
+            .bind(cancelled_at.unwrap_or_else(crate::date::now))
             .bind(delta)
             .execute(&mut *tx)
             .await?;
@@ -547,7 +555,9 @@ pub async fn fetch_task_by_id(pool: &SqlitePool, id: Id, now: i64) -> Result<Opt
     // Scope the completion sum to the current interval for recurring tasks
     // (calendar-aware jiff math); last_time stays unscoped.
     let rows =
-        sqlx::query("SELECT time, count FROM todo_completions WHERE todo_id = ? ORDER BY time ASC")
+        sqlx::query(
+            "SELECT time, count FROM todo_completions WHERE todo_id = ? ORDER BY time ASC",
+        )
             .bind(id)
             .fetch_all(pool)
             .await
@@ -559,7 +569,7 @@ pub async fn fetch_task_by_id(pool: &SqlitePool, id: Id, now: i64) -> Result<Opt
             count: r.get("count"),
         })
         .collect();
-    task.completions = match crate::task::interval_start(&task, now) {
+    let sum = match crate::task::interval_start(&task, now) {
         Some(floor) => {
             let scoped: Vec<_> = completions.iter().filter(|c| c.time >= floor).collect();
             if scoped.is_empty() {
@@ -576,7 +586,8 @@ pub async fn fetch_task_by_id(pool: &SqlitePool, id: Id, now: i64) -> Result<Opt
             }
         }
     };
-    task.last_time = completions.iter().map(|c| c.time).max();
+    task.completions = task.normalize_completions(sum);
+    task.last_time = super::views::last_standing(&task, &completions);
     Ok(Some(task))
 }
 
@@ -822,39 +833,89 @@ pub async fn set_task_parent(pool: &SqlitePool, task_id: Id, parent_id: Id) -> R
     Ok(res.rows_affected())
 }
 
-/// Set a scheduled task's completion entry, replacing any existing one.
-/// Scheduled tasks keep at most one completion row: `value` 1 = completed
-/// (early, or auto-completed by window elapse), 0 = failed (marked as
-/// missed). Runs in a transaction so the replace and its sync events are
-/// atomic, then syncs the short id (a completed task loses its short id; a
-/// failed one keeps it).
-pub async fn set_scheduled_completion(pool: &SqlitePool, todo_id: Id, value: i32) -> Result<()> {
-    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+/// The `count` a scheduled task's state row holds while it is not marked.
+/// `0` is failed and a positive count is done; the row itself stays because
+/// its id is derived from the task.
+pub const SCHEDULED_UNMARKED: i32 = -1;
 
-    let replaced: Vec<Id> = sqlx::query_scalar("SELECT id FROM todo_completions WHERE todo_id = ?")
-        .bind(todo_id)
-        .fetch_all(&mut *tx)
-        .await
-        .context("Failed to read the replaced scheduled completion")?;
-    sqlx::query("DELETE FROM todo_completions WHERE todo_id = ?")
-        .bind(todo_id)
-        .execute(&mut *tx)
-        .await
-        .context("Failed to clear scheduled task completion")?;
-    for id in &replaced {
+/// The completion row that carries a scheduled task's state. Deriving it from
+/// the task id rather than allocating one is what lets two devices mark the
+/// same task without creating two rows: they write the same cell, and the
+/// server picks the later write.
+///
+/// It also means the row is never replaced. An id gets one death, and that
+/// death belongs to the task disappearing — not to the user changing their
+/// mind, which is a new value for the same cell.
+pub fn scheduled_completion_id(todo_id: Id) -> Id {
+    Id::from(uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_URL,
+        format!("im:scheduled:{todo_id}").as_bytes(),
+    ))
+}
+
+/// Set a scheduled task's completion state: `Some(1)` completed, `Some(0)`
+/// failed, `None` not marked. One row, one cell (`count`), written in place —
+/// not marked is the stored [`SCHEDULED_UNMARKED`], so un-marking keeps the row
+/// (and its id) alive without spending it.
+pub async fn set_scheduled_completion(
+    pool: &SqlitePool,
+    todo_id: Id,
+    value: Option<i32>,
+) -> Result<()> {
+    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+    let completion_id = scheduled_completion_id(todo_id);
+    let count = value.unwrap_or(SCHEDULED_UNMARKED);
+
+    // Rows a pre-derivation build left behind for this task: one state per
+    // task, so anything else is a leftover to retire.
+    let stale: Vec<Id> = sqlx::query_scalar(
+        "SELECT id FROM todo_completions WHERE todo_id = ? AND id <> ?",
+    )
+    .bind(todo_id)
+    .bind(completion_id)
+    .fetch_all(&mut *tx)
+    .await
+    .context("Failed to read the replaced scheduled completions")?;
+    for id in &stale {
+        sqlx::query("DELETE FROM todo_completions WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .context("Failed to clear a stale scheduled completion")?;
         crate::sync::events::delete(&mut tx, *id, "completion").await?;
     }
 
-    let completion_id = Id::new();
-    sqlx::query("INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, ?)")
-        .bind(completion_id)
-        .bind(todo_id)
-        .bind(crate::date::now())
-        .bind(value)
-        .execute(&mut *tx)
-        .await
-        .context("Failed to insert scheduled task completion")?;
-    crate::sync::events::completion(&mut tx, completion_id).await?;
+    let existing: Option<Id> =
+        sqlx::query_scalar("SELECT id FROM todo_completions WHERE id = ?")
+            .bind(completion_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("Failed to read the scheduled completion")?;
+    if existing.is_some() {
+        // The row is the task's state, so its time is the moment of the state
+        // it holds: marking a task failed in the evening belongs to the
+        // evening, not to whenever the row was first created.
+        let at = crate::date::now();
+        sqlx::query("UPDATE todo_completions SET count = ?, time = ? WHERE id = ?")
+            .bind(count)
+            .bind(at)
+            .bind(completion_id)
+            .execute(&mut *tx)
+            .await
+            .context("Failed to update scheduled task completion")?;
+        crate::sync::events::completion_count(&mut tx, completion_id, count).await?;
+        crate::sync::events::completion_time(&mut tx, completion_id).await?;
+    } else {
+        sqlx::query("INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, ?)")
+            .bind(completion_id)
+            .bind(todo_id)
+            .bind(crate::date::now())
+            .bind(count)
+            .execute(&mut *tx)
+            .await
+            .context("Failed to insert scheduled task completion")?;
+        crate::sync::events::completion(&mut tx, completion_id).await?;
+    }
 
     sync_short_id(&mut tx, todo_id).await?;
     tx.commit().await.context("Failed to commit transaction")?;

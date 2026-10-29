@@ -6,7 +6,7 @@ use im::{
     cli::{CliOpts, parse_from},
     commands::execute_command,
     config::{Config, TrackerKind},
-    db::test_pool,
+    db::{TaskObject, create_task, test_pool},
 };
 use sqlx::{Row, SqlitePool};
 
@@ -6481,4 +6481,278 @@ async fn test_mood_links_at_most_one_task() {
             .await
             .unwrap();
     assert_eq!(links, vec![(Some(t1), mood_id)]);
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled completion: one cell, written in place
+// ---------------------------------------------------------------------------
+
+/// A scheduled task's state is a single tri-state cell on a row whose id is
+/// derived from the task: `1` done, `0` failed, `-1` not marked. Marking,
+/// failing and un-marking all write that one cell, so the row is never
+/// replaced and the id is never spent.
+#[tokio::test]
+async fn test_scheduled_completion_is_one_cell_written_in_place() {
+    let pool = im::db::test_pool().await.unwrap();
+    let (task, _) = create_task(
+        &pool,
+        &TaskObject {
+            id: None,
+            short_id: None,
+            name: "meditate".into(),
+            body: String::new(),
+            priority: 5,
+            start_time: Some(im::date::now()),
+            available_duration_secs: Some(3600),
+            interval_secs: None,
+            target_count: 0,
+            optional: false,
+            end_time: None,
+            parent: None,
+        },
+    )
+    .await
+    .unwrap();
+    let derived = im::db::scheduled_completion_id(task);
+
+    let state = |pool: sqlx::SqlitePool| async move {
+        let rows: Vec<(String, i32)> =
+            sqlx::query_as("SELECT id, count FROM todo_completions WHERE todo_id = ?")
+                .bind(task)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        rows
+    };
+    let completions = |pool: sqlx::SqlitePool| async move {
+        im::db::fetch_task_by_id(&pool, task, im::date::now())
+            .await
+            .unwrap()
+            .unwrap()
+            .completions
+    };
+
+    im::db::set_scheduled_completion(&pool, task, Some(1))
+        .await
+        .unwrap();
+    assert_eq!(state(pool.clone()).await, vec![(derived.to_string(), 1)]);
+    assert_eq!(completions(pool.clone()).await, Some(1));
+
+    // Failing writes the same cell, it does not replace the row.
+    im::db::set_scheduled_completion(&pool, task, Some(0))
+        .await
+        .unwrap();
+    assert_eq!(state(pool.clone()).await, vec![(derived.to_string(), 0)]);
+    assert_eq!(completions(pool.clone()).await, Some(0));
+
+    // Un-marking is a value, not a delete: the id survives, so the task can be
+    // marked again.
+    im::db::set_scheduled_completion(&pool, task, None)
+        .await
+        .unwrap();
+    assert_eq!(state(pool.clone()).await, vec![(derived.to_string(), -1)]);
+    assert_eq!(completions(pool.clone()).await, None);
+    assert!(!im::task::is_task_done(
+        0,
+        completions(pool.clone()).await
+    ));
+
+    im::db::set_scheduled_completion(&pool, task, Some(1))
+        .await
+        .unwrap();
+    assert_eq!(completions(pool.clone()).await, Some(1));
+    assert_eq!(state(pool.clone()).await.len(), 1);
+}
+
+/// An un-marked row is not a completion: the day/heatmap readers must skip it
+/// (`count > 0`), or the task would show up as completed on the day it was
+/// cleared.
+#[tokio::test]
+async fn test_unmarked_scheduled_row_is_not_a_completion() {
+    let pool = im::db::test_pool().await.unwrap();
+    let (task, _) = create_task(
+        &pool,
+        &TaskObject {
+            id: None,
+            short_id: None,
+            name: "walk".into(),
+            body: String::new(),
+            priority: 5,
+            start_time: Some(im::date::now()),
+            available_duration_secs: Some(3600),
+            interval_secs: None,
+            target_count: 0,
+            optional: false,
+            end_time: None,
+            parent: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let now = im::date::now();
+    im::db::set_scheduled_completion(&pool, task, Some(1))
+        .await
+        .unwrap();
+    let done = im::db::fetch_tasks_completed_on(&pool, now - 60, now + 60)
+        .await
+        .unwrap();
+    assert_eq!(done.len(), 1);
+
+    im::db::set_scheduled_completion(&pool, task, None)
+        .await
+        .unwrap();
+    let done = im::db::fetch_tasks_completed_on(&pool, now - 60, now + 60)
+        .await
+        .unwrap();
+    assert!(done.is_empty(), "cleared, not completed");
+}
+
+/// Directly plant completion rows at chosen moments, so a test can exercise
+/// corrections across distinct times without sleeping a second between calls.
+async fn plant_completions(pool: &sqlx::SqlitePool, task: im::db::Id, rows: &[(i64, i32)]) {
+    for (time, count) in rows {
+        sqlx::query("INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, ?)")
+            .bind(im::db::Id::new())
+            .bind(task)
+            .bind(time)
+            .bind(count)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_an_undo_lands_on_the_completion_it_takes_back() {
+    let pool = im::db::test_pool().await.unwrap();
+    let (task, _) = create_task(&pool, &counter_task("water")).await.unwrap();
+    plant_completions(&pool, task, &[(1_000, 1), (2_000, 1)]).await;
+
+    im::db::update_task(&pool, task, -1).await.unwrap();
+
+    // The correction carries the moment it corrects, so a reader that groups by
+    // time sees the net there instead of a completion followed by a smaller one.
+    let cancelled_at: i64 = sqlx::query_scalar(
+        "SELECT time FROM todo_completions WHERE todo_id = ? AND count < 0",
+    )
+    .bind(task)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(cancelled_at, 2_000);
+
+    // One moment stands (1 at 1000); the 2000 moment nets to zero and is gone.
+    let journal = im::db::fetch_completion_events_in_range(&pool, 0, 3_000)
+        .await
+        .unwrap();
+    let shown: Vec<(i64, i32)> = journal
+        .iter()
+        .map(|(row, task)| (row.time, task.completions.unwrap_or(0)))
+        .collect();
+    assert_eq!(shown, vec![(1_000, 1)]);
+
+    // The moment that stands is also the "last" one.
+    let row = im::db::fetch_task_by_id(&pool, task, im::date::now())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.last_time, Some(1_000));
+
+    // A second undo has nothing left at that moment, so it takes back the
+    // earlier one rather than leaving the journal claiming work that is gone.
+    im::db::update_task(&pool, task, -1).await.unwrap();
+    let journal = im::db::fetch_completion_events_in_range(&pool, 0, 3_000)
+        .await
+        .unwrap();
+    assert!(journal.is_empty(), "{journal:?}");
+
+    // Nothing stands, so the task has no last completion to report.
+    let row = im::db::fetch_task_by_id(&pool, task, im::date::now())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.completions, Some(0));
+    assert_eq!(row.last_time, None);
+}
+
+#[tokio::test]
+async fn test_a_partial_undo_only_lowers_its_own_moment() {
+    let pool = im::db::test_pool().await.unwrap();
+    let (task, _) = create_task(&pool, &counter_task("water")).await.unwrap();
+    plant_completions(&pool, task, &[(1_000, 3)]).await;
+
+    im::db::update_task(&pool, task, -1).await.unwrap();
+
+    let journal = im::db::fetch_completion_events_in_range(&pool, 0, 3_000)
+        .await
+        .unwrap();
+    let shown: Vec<(i64, i32, i32)> = journal
+        .iter()
+        .map(|(row, task)| (row.time, row.count, task.completions.unwrap_or(0)))
+        .collect();
+    assert_eq!(shown, vec![(1_000, 2, 2)]);
+}
+
+#[tokio::test]
+async fn test_editing_a_scheduled_state_moves_its_moment() {
+    let pool = im::db::test_pool().await.unwrap();
+    let (task, _) = create_task(
+        &pool,
+        &TaskObject {
+            id: None,
+            short_id: None,
+            name: "meditate".into(),
+            body: String::new(),
+            priority: 5,
+            start_time: Some(im::date::now()),
+            available_duration_secs: Some(3600),
+            interval_secs: None,
+            target_count: 0,
+            optional: false,
+            end_time: None,
+            parent: None,
+        },
+    )
+    .await
+    .unwrap();
+    let derived = im::db::scheduled_completion_id(task);
+    im::db::set_scheduled_completion(&pool, task, Some(1))
+        .await
+        .unwrap();
+    // Age the row: the state it holds is now old, and the next edit is new.
+    sqlx::query("UPDATE todo_completions SET time = 1000 WHERE id = ?")
+        .bind(derived)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    im::db::set_scheduled_completion(&pool, task, Some(0))
+        .await
+        .unwrap();
+
+    let time: i64 = sqlx::query_scalar("SELECT time FROM todo_completions WHERE id = ?")
+        .bind(derived)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(time > 1_000, "an edited state keeps its old moment: {time}");
+}
+
+/// A counter task: `target_count` above one so the acceptance path counts.
+fn counter_task(name: &str) -> TaskObject {
+    TaskObject {
+        id: None,
+        short_id: None,
+        name: name.into(),
+        body: String::new(),
+        priority: 5,
+        start_time: Some(1_700_000_000),
+        available_duration_secs: None,
+        interval_secs: None,
+        target_count: 5,
+        optional: false,
+        end_time: None,
+        parent: None,
+    }
 }

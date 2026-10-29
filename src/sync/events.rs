@@ -191,11 +191,25 @@ pub async fn completion(conn: &mut SqliteConnection, id: Id) -> Result<()> {
         ),
         (
             completion_field::COUNT,
-            row.get::<Option<i32>, _>("count")
-                .map(|count| CellValue::int(count)),
+            Some(CellValue::int(row.get::<i32, _>("count"))),
         ),
     ];
     create(conn, id, "completion", &cells).await
+}
+
+/// Emit a scheduled task's `count` cell on its own: the row already exists and
+/// only its state moved (`1` done, `0` failed, `-1` unmarked).
+pub async fn completion_count(conn: &mut SqliteConnection, id: Id, value: i32) -> Result<()> {
+    append(
+        conn,
+        id,
+        "completion",
+        completion_field::COUNT,
+        Some(CellValue::int(value)),
+        None,
+    )
+    .await?;
+    Ok(())
 }
 
 /// Emit a delete. The row is removed by the caller; this keeps a snapshot of

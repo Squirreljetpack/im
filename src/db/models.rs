@@ -165,6 +165,16 @@ impl TaskRow {
         }
     }
 
+    /// A completion sum as the readers use it: a scheduled task stores its
+    /// state as a signed count (`1` done, `0` failed, `-1` unmarked), and
+    /// unmarked means no completions at all.
+    pub(crate) fn normalize_completions(&self, sum: Option<i32>) -> Option<i32> {
+        match sum {
+            Some(count) if self.is_scheduled() && count < 0 => None,
+            other => other,
+        }
+    }
+
     pub fn is_done(&self) -> bool {
         if self.is_scheduled() {
             // Scheduled tasks are done when they have a completed entry

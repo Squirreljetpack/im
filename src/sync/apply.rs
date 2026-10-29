@@ -95,6 +95,18 @@ async fn materialise(
 /// One `INSERT` from the entity's existence cell and the fields that came with
 /// it. The domain tables have `NOT NULL` columns, so this cannot be done one
 /// cell at a time.
+/// The value a cell materialises as. A null `completion.count` is how an
+/// earlier build stored a scheduled task's unmarked state, and the column is
+/// NOT NULL, so it lands as the sentinel; every other null cell stays null.
+fn stored_value(kind: &str, field: &str, value: &Option<CellValue>) -> Option<CellValue> {
+    match value {
+        None if kind == "completion" && field == "count" => {
+            Some(CellValue::Int(i64::from(crate::db::SCHEDULED_UNMARKED)))
+        }
+        other => other.clone(),
+    }
+}
+
 async fn insert_entity(
     conn: &mut SqliteConnection,
     kind: &str,
@@ -142,7 +154,7 @@ async fn insert_entity(
     builder.push(") VALUES (").push_bind(entity);
     for row in &included {
         builder.push(", ");
-        match &row.cell.value {
+        match &stored_value(kind, &row.cell.field, &row.cell.value) {
             Some(CellValue::Text(text)) => {
                 builder.push_bind(text.clone());
             }
@@ -210,7 +222,8 @@ async fn apply_cell(
         // everything else has one class per column.
         let _ = spec.class;
         let sql = format!("UPDATE \"{table}\" SET \"{column}\" = ? WHERE id = ?");
-        let result = match &row.cell.value {
+        let value = stored_value(kind, &row.cell.field, &row.cell.value);
+        let result = match &value {
             Some(CellValue::Text(text)) => {
                 sqlx::query(sqlx::AssertSqlSafe(sql.clone())).bind(text).bind(entity).execute(&mut *conn).await
             }

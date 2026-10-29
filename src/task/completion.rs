@@ -68,15 +68,8 @@ pub async fn apply_completion_delta(
 /// - target_count > 0: Needs N completions. Done if completions >= target_count.
 pub fn is_task_done(target_count: i32, completions: Option<i32>) -> bool {
     match completions {
-        None => false,
-        Some(0) => false,
-        Some(count) => {
-            if target_count == 0 {
-                true
-            } else {
-                count >= target_count
-            }
-        }
+        Some(count) if count > 0 => target_count == 0 || count >= target_count,
+        _ => false,
     }
 }
 
