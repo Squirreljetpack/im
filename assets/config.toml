@@ -183,3 +183,7 @@ kind = "text"
 [tracker.grateful]
 kind = "text"
 colors = "grateful"
+
+[sync]
+# Base URL of the sync server. Can be overriden by `IM_SYNC_URL`.
+server = "https://im-sync.squirreljetpacks.workers.dev"

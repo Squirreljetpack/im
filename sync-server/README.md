@@ -11,8 +11,8 @@ this or the client test suite.
 
 | Path | Purpose |
 | --- | --- |
-| `src/index.ts` | Gateway: register/login/status in D1, `POST /api/v1/sync` routed to the caller's DO |
-| `src/user_sync_do.ts` | `UserSyncDO`: `sync_log` SQLite storage, push/pull, WebSocket hub |
+| `src/index.ts` | Gateway: register/login/status in D1, `POST /api/sync` routed to the caller's DO |
+| `src/user_sync_do.ts` | `UserSyncDO`: `sync_log` SQLite storage, per-cell arbitration, push/pull |
 | `src/auth.ts` | PBKDF2-SHA256 passwords, HS256 bearer tokens (WebCrypto + `jose`) |
 | `src/types.ts` | Bindings and the wire format shared with the Rust client |
 | `migrations/` | D1 migrations (`users`) |
@@ -30,7 +30,14 @@ npm run typecheck
 npm run dev         # wrangler dev on http://127.0.0.1:8787
 ```
 
-`wrangler dev` uses local D1 storage. Apply the schema once with:
+`wrangler dev` uses local D1 storage and reads secrets from `.dev.vars`
+(gitignored). A fresh checkout needs one:
+
+```sh
+printf 'JWT_SECRET = "dev-only-secret-change-me"\n' > .dev.vars
+```
+
+Apply the schema once with:
 
 ```sh
 npm run migrate:local
@@ -38,40 +45,46 @@ npm run migrate:local
 
 ## Protocol
 
-`POST /api/v1/sync` (bearer token):
+`POST /api/sync` (bearer token):
 
 ```jsonc
 {
   "device_id": "uuid",
-  "since_version": 0,
-  "client_events": [
-    { "event_id": "uuid", "id": "entity-uuid", "timestamp": 1757000000000,
-      "payload": { "type": "Task", "data": { "name": "write it" } } }
+  "cursor": 0,          // highest winner version this client has merged
+  "events": [
+    { "event_id": "uuid", "device_id": "uuid", "entity_id": "uuid",
+      "kind": "task", "field": "name", "value": { "text": "write it" },
+      "timestamp": 1757000000000 }
   ]
 }
 ```
 
 ```jsonc
 {
-  "new_server_version": 3,
-  "remote_events": [
-    { "version": 3, "event_id": "uuid", "device_id": "uuid",
-      "id": "entity-uuid", "timestamp": 1757000000000, "payload": null }
-  ]
+  "cursor": 3,          // advance the client's cursor to this
+  "now": 1757000000123, // server clock, for diagnosing `clock_ahead`
+  "has_more": false,    // pull again without pushing to continue paging
+  "events": [ /* LogRow: the cell event plus its `version` */ ],
+  "verdicts": [ { "event_id": "uuid", "outcome": "accepted",
+                  "reason": null, "winner": null } ],
+  "superseded": [ /* this device's earlier events that lost a cell */ ]
 }
 ```
 
-`payload` is opaque to the server: `null` is a delete, anything else an
-upsert snapshot. The response carries the authoring `device_id` because the
-client's last-write-wins rule is `(timestamp, device_id)`. Events are returned
-oldest-first, excluding those the caller's own device pushed; `event_id` is
-UNIQUE in the log, so retried pushes are idempotent. Clients may also open
-`/api/v1/sync/ws?device_id=...` to receive `{"type":"new_version","version":N}`
-whenever another device appends.
+One event writes one cell (`entity_id`, `field`). The existence cell has
+`field: ""` and value `{ "text": "deleted" }` for a delete. The server is the
+arbiter: for each cell the winner is the highest `(timestamp, device_id)`, and
+`verdicts` / `superseded` say what happened to what this push sent. Storage
+classes survive as `{ "int": 3 }`, `{ "real": 3.0 }` or `{ "text": "3" }`.
+
+Events are returned oldest-first, excluding those the caller's own device
+pushed, at most 1000 pushed events per request. `event_id` is UNIQUE in the
+log, so retried pushes are idempotent.
 
 ## Deploying (not needed for local testing)
 
 1. `wrangler d1 create im-sync-auth`, paste the id into `wrangler.toml`.
 2. `wrangler d1 migrations apply AUTH_DB --remote`
-3. `wrangler secret put JWT_SECRET`
+3. `wrangler secret put JWT_SECRET` — `JWT_SECRET` must not be defined in
+   `[vars]`, or the secret is rejected with `Binding name already in use`.
 4. `npm run deploy`

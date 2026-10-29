@@ -8,15 +8,29 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::config::Config;
 
 use super::types::{SyncRequest, SyncResponse};
 
 /// Where `wrangler dev` serves the backend locally.
 pub const DEFAULT_SERVER: &str = "http://127.0.0.1:8787";
 
-/// The server address: `IM_SYNC_URL` when set, else the local default.
-pub fn server_url() -> String {
-    std::env::var("IM_SYNC_URL").unwrap_or_else(|_| DEFAULT_SERVER.to_string())
+/// The server address: `IM_SYNC_URL` when set (and non-empty), else `[sync]
+/// server` from the config, else the local default.
+pub fn server_url(config: &Config) -> String {
+    let from_env = std::env::var("IM_SYNC_URL").unwrap_or_default();
+    let from_env = from_env.trim();
+    if !from_env.is_empty() {
+        return from_env.to_string();
+    }
+    config
+        .sync
+        .server
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .unwrap_or(DEFAULT_SERVER)
+        .to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]

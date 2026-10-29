@@ -33,14 +33,16 @@ fn reset_guard(pending: usize, interactive: bool) -> Result<()> {
                  them — sync first, or run it in a terminal to confirm"
             );
         } else {
-            bail!("`im :sync --reset` needs an interactive terminal to confirm resetting the local database");
+            bail!(
+                "`im :sync --reset` needs an interactive terminal to confirm resetting the local database"
+            );
         }
     }
     Ok(())
 }
 
 pub async fn sync_command(pool: &SqlitePool, config: &Config, reset: bool) -> Result<()> {
-    let server = server_url();
+    let server = server_url(config);
     let slots = TrackerSlots::from_config(config);
     let interactive = atty::is(atty::Stream::Stdin);
 
@@ -131,7 +133,9 @@ async fn maybe_resurrect(pool: &SqlitePool, offer: &Resurrect, interactive: bool
         .unwrap_or_else(|| "an unknown time".to_string());
     let device = offer.device.as_deref().unwrap_or("another device");
     if !interactive {
-        eprintln!("A {name} was deleted on {device} at {when}; run `im :sync` in a terminal to keep a copy.");
+        eprintln!(
+            "A {name} was deleted on {device} at {when}; run `im :sync` in a terminal to keep a copy."
+        );
         return Ok(());
     }
     if !cliclack::confirm(format!(

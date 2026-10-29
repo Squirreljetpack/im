@@ -12,15 +12,10 @@ class_name = "UserSyncDO"
 tag = "v1"
 new_sqlite_classes = ["UserSyncDO"]
 
-# User accounts. The id below is a placeholder for local development: run
-# `wrangler d1 create im-sync-auth` and paste the real id before deploying.
+# User accounts. `wrangler dev` keeps a local copy of this database under
+# `.wrangler/state`; deploys use the D1 instance below.
 [[d1_databases]]
 binding = "AUTH_DB"
 database_name = "im-sync-auth"
-database_id = "local-placeholder-im-sync-auth"
+database_id = "f1303edc-22de-4a34-aa12-0b2f51cd181c"
 migrations_dir = "migrations"
-
-# Local development only. Production sets the real signing key with
-# `wrangler secret put JWT_SECRET`.
-[vars]
-JWT_SECRET = "dev-only-secret-change-me"

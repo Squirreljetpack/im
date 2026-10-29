@@ -126,7 +126,7 @@ pub async fn execute_command<W: Write>(
 
         Command::Clear { date } => maintenance::clear_moods(pool, config, date, tui).await,
 
-        Command::Auth { sub } => auth::auth_command(pool, sub).await,
+        Command::Auth { sub } => auth::auth_command(pool, config, sub).await,
 
         Command::Sync { reset } => sync::sync_command(pool, config, reset).await,
     }
