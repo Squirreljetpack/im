@@ -207,6 +207,43 @@ async fn migrate_sync_tables(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
+    // A scheduled task's state lives in its row's `count` (`-1` unmarked, `0`
+    // failed, `1` done), which is NOT NULL. Fold any NULL rows an earlier
+    // build left behind into the unmarked sentinel and restore the constraint
+    // SQLite cannot re-add in place.
+    let not_null: Option<i64> = sqlx::query_scalar(
+        "SELECT \"notnull\" FROM pragma_table_info('todo_completions') WHERE name = 'count'",
+    )
+    .fetch_optional(pool)
+    .await?;
+    if not_null == Some(0) {
+        sqlx::query(
+            r#"
+            CREATE TABLE todo_completions_cells (
+                id      TEXT PRIMARY KEY,
+                todo_id TEXT NOT NULL REFERENCES todos(id) ON DELETE CASCADE,
+                time    INTEGER NOT NULL DEFAULT (unixepoch()),
+                count   INTEGER NOT NULL DEFAULT 1
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "INSERT INTO todo_completions_cells (id, todo_id, time, count)
+             SELECT id, todo_id, time, COALESCE(count, {}) FROM todo_completions",
+            SCHEDULED_UNMARKED
+        )))
+        .execute(pool)
+        .await?;
+        sqlx::query("DROP TABLE todo_completions")
+            .execute(pool)
+            .await?;
+        sqlx::query("ALTER TABLE todo_completions_cells RENAME TO todo_completions")
+            .execute(pool)
+            .await?;
+    }
+
     Ok(())
 }
 
@@ -286,6 +323,9 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
             id      TEXT PRIMARY KEY,
             todo_id TEXT NOT NULL REFERENCES todos(id) ON DELETE CASCADE,
             time    INTEGER NOT NULL DEFAULT (unixepoch()),
+            -- A scheduled task's state: 1 done, 0 failed, -1 not marked.
+            -- Un-marking writes -1 instead of deleting the row, whose id is
+            -- derived from the task.
             count   INTEGER NOT NULL DEFAULT 1
         )
         "#,
@@ -483,6 +523,51 @@ mod tests {
     fn delete_database_tolerates_missing_files() {
         let dir = tempfile::tempdir().unwrap();
         delete_database(&dir.path().join("never-existed.db")).unwrap();
+    }
+
+    /// An unmarked scheduled completion left as NULL by an earlier build is
+    /// folded into the sentinel, and the column keeps its NOT NULL constraint.
+    #[tokio::test]
+    async fn a_null_scheduled_state_is_folded_into_the_sentinel() {
+        let pool = test_pool().await.unwrap();
+        sqlx::query("INSERT INTO todos (id, name) VALUES ('t', 'walk')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DROP TABLE todo_completions")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE todo_completions (
+                 id TEXT PRIMARY KEY,
+                 todo_id TEXT NOT NULL REFERENCES todos(id) ON DELETE CASCADE,
+                 time INTEGER NOT NULL DEFAULT (unixepoch()),
+                 count INTEGER DEFAULT 1
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO todo_completions (id, todo_id, count) VALUES ('c', 't', NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        migrate_sync_tables(&pool).await.unwrap();
+
+        let not_null: i64 = sqlx::query_scalar(
+            "SELECT \"notnull\" FROM pragma_table_info('todo_completions') WHERE name = 'count'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(not_null, 1);
+        let count: i32 = sqlx::query_scalar("SELECT count FROM todo_completions WHERE id = 'c'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, SCHEDULED_UNMARKED);
     }
 }
 

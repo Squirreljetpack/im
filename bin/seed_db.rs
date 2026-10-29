@@ -559,7 +559,7 @@ async fn seed_scheduled_tasks(
         None,
     )
     .await?;
-    set_scheduled_completion(pool, id, 1).await?;
+    set_scheduled_completion(pool, id, Some(1)).await?;
     // Failed: explicit entry of 0.
     let id = seed_task(
         pool,
@@ -574,7 +574,7 @@ async fn seed_scheduled_tasks(
         None,
     )
     .await?;
-    set_scheduled_completion(pool, id, 0).await?;
+    set_scheduled_completion(pool, id, Some(0)).await?;
     // Fully past (yesterday) — listed in @due (start < today_end).
     seed_task(
         pool,
@@ -689,9 +689,9 @@ async fn seed_task(
     target_count: i32,
     optional: bool,
     end_time: Option<i64>,
-) -> Result<i64> {
+) -> Result<im::db::Id> {
     let task = TaskObject {
-        id: None,       // row id auto-assigned by the db layer
+        id: None,       // row id assigned by the db layer
         short_id: None, // short id allocated by the db layer
         name: name.to_string(),
         body: body.to_string(),

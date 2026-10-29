@@ -143,6 +143,21 @@ pub async fn clear_moods(
     .fetch_all(&mut *tx)
     .await
     .context("Failed to read linked tracker entries")?;
+    let removed_moods: Vec<Id> =
+        sqlx::query_scalar("SELECT id FROM mood WHERE time >= ? AND time <= ?")
+            .bind(start_time)
+            .bind(end_time)
+            .fetch_all(&mut *tx)
+            .await
+            .context("Failed to read mood entries")?;
+    // Publish before the rows go: a delete carries a snapshot of what it
+    // removed, and that snapshot is only readable while the row exists.
+    for id in &removed_trackers {
+        crate::sync::events::delete(&mut tx, *id, "tracker").await?;
+    }
+    for id in &removed_moods {
+        crate::sync::events::delete(&mut tx, *id, "mood").await?;
+    }
     sqlx::query(
         "DELETE FROM tracker WHERE mood IN (SELECT id FROM mood WHERE time >= ? AND time <= ?)",
     )
@@ -151,24 +166,12 @@ pub async fn clear_moods(
     .execute(&mut *tx)
     .await
     .context("Failed to delete linked tracker entries")?;
-    for id in &removed_trackers {
-        crate::sync::events::delete(&mut tx, *id, "tracker").await?;
-    }
-
-    let removed_moods: Vec<Id> =
-        sqlx::query_scalar("SELECT id FROM mood WHERE time >= ? AND time <= ?")
-            .bind(start_time)
-            .bind(end_time)
-            .fetch_all(&mut *tx)
-            .await
-            .context("Failed to read mood entries")?;
     let res = sqlx::query("DELETE FROM mood WHERE time >= ? AND time <= ?")
         .bind(start_time)
         .bind(end_time)
         .execute(&mut *tx)
         .await
         .context("Failed to delete mood entries")?;
-
 
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(res.rows_affected() as usize)
@@ -328,7 +331,9 @@ pub async fn fetch_completions_between(
     end: i64,
 ) -> Result<Vec<CompletionRow>> {
     let rows = sqlx::query(
-        "SELECT time, count FROM todo_completions WHERE todo_id = ? AND time >= ? AND time <= ? ORDER BY time ASC",
+        "SELECT time, count FROM todo_completions \
+         WHERE todo_id = ? AND time >= ? AND time <= ? \
+         ORDER BY time ASC",
     )
     .bind(task_id)
     .bind(start)

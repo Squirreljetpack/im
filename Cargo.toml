@@ -42,7 +42,7 @@ serde_json = "1"
 toml = "1.1"
 
 # Entity ids: UUIDv7 (time-sortable, globally unique across devices)
-uuid = { version = "1", features = ["v7", "serde"] }
+uuid = { version = "1", features = ["v7", "v5", "serde"] }
 
 # Date/time
 humantime = "2"

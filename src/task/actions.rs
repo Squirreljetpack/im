@@ -68,16 +68,19 @@ pub async fn apply_accept_action(
     match action {
         AcceptAction::Complete => {
             if task.is_scheduled() {
-                crate::db::set_scheduled_completion(pool, task.id, 1).await?;
+                crate::db::set_scheduled_completion(pool, task.id, Some(1)).await?;
             } else {
                 apply_completion_delta(pool, task.id, 1).await?;
             }
         }
         AcceptAction::SetFailed => {
-            crate::db::set_scheduled_completion(pool, task.id, 0).await?;
+            crate::db::set_scheduled_completion(pool, task.id, Some(0)).await?;
         }
+        // Clear is scheduled-only (see `accept_action`): un-mark, do not
+        // delete. The row's id is derived from the task, so deleting it would
+        // spend that task's one death on a change of mind.
         AcceptAction::Clear => {
-            crate::db::reset_task_completions(pool, task.id, None).await?;
+            crate::db::set_scheduled_completion(pool, task.id, None).await?;
         }
         AcceptAction::Reset => reset_task_progress(pool, task).await?,
         AcceptAction::ResetConfirm | AcceptAction::CompletePrompt => {
@@ -87,13 +90,17 @@ pub async fn apply_accept_action(
     Ok(())
 }
 
-/// Reset a task's completion progress: scheduled/oneshot clear all
-/// completions; recurring resets only the current interval (earlier
-/// history survives).
+/// Reset a task's completion progress: a scheduled task is un-marked (its one
+/// row is a value, not a pile), oneshot counters are cleared, and a recurring
+/// task resets only the current interval so earlier history survives.
 pub async fn reset_task_progress(
     pool: &SqlitePool,
     task: &crate::db::TaskRow,
 ) -> anyhow::Result<()> {
+    if task.is_scheduled() {
+        crate::db::set_scheduled_completion(pool, task.id, None).await?;
+        return Ok(());
+    }
     let floor = interval_start(task, crate::date::now());
     crate::db::reset_task_completions(pool, task.id, floor).await?;
     Ok(())
