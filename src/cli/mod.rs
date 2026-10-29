@@ -96,9 +96,10 @@ pub enum Command {
         show: ViewVariant,
         horizon: TodayHorizon,
     },
-    /// `im --help` / `im -h` in the initial position (handled in
+    /// `im --help` / `im -h` / `im -vh` in the initial position (handled in
     /// `parse_cli`, before the command dispatchers — `parse_from` never sees
-    /// a help token). Handlers print the contents of `assets/help.txt`.
+    /// a help token). Handlers print the contents of `assets/help.txt` (or
+    /// `assets/vhelp.txt` when verbose).
     Help,
     /// `im :config [moods|colors]` — handlers open a config-style file in
     /// $VISUAL/$EDITOR via [`crate::editor::open_editor_at`]. With no
@@ -130,6 +131,30 @@ pub enum Command {
     Clear {
         date: Option<String>,
     },
+    /// `im auth <sub>` — the sync account this device is signed in as.
+    Auth {
+        sub: AuthSubcommand,
+    },
+    /// `im sync` — push the queued events and apply everything the other
+    /// devices wrote, asking about concurrent rewrites of text and about
+    /// parent cycles. `--reset` discards the local copy first and rebuilds it
+    /// from the server log.
+    Sync {
+        reset: bool,
+    },
+}
+
+/// Subcommands of `im auth`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthSubcommand {
+    /// `auth register` — create an account and sign this device in.
+    Register,
+    /// `auth login` — sign this device in to an existing account.
+    Login,
+    /// `auth status` — show the account this device is signed in as.
+    Status,
+    /// `auth logout` — forget the account on this device (local data stays).
+    Logout,
 }
 
 /// Subcommands of `im :db`.

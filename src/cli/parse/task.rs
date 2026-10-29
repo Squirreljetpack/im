@@ -62,7 +62,11 @@ pub(crate) fn parse_task_command(mut args: &[String]) -> anyhow::Result<Command>
             (false, Some(dur))
         };
         let prefill = if args.len() > 1 {
-            let joined = args[1..].join(" ");
+            let joined = args[1..]
+                .iter()
+                .map(|s| if s == ":" { "\n" } else { s.as_str() })
+                .collect::<Vec<_>>()
+                .join(" ");
             let trimmed = joined.trim();
             if trimmed.is_empty() {
                 None
@@ -115,7 +119,11 @@ pub(crate) fn parse_task_command(mut args: &[String]) -> anyhow::Result<Command>
     let name = if name_parts.is_empty() {
         None
     } else {
-        let trimmed = name_parts.join(" ");
+        let trimmed = name_parts
+            .iter()
+            .map(|s| if s == ":" { "\n" } else { s.as_str() })
+            .collect::<Vec<_>>()
+            .join(" ");
         let trimmed = trimmed.trim();
         if trimmed.is_empty() {
             None
@@ -271,7 +279,7 @@ fn parse_scheduled_task(args: &[String], body: Result<String, usize>) -> anyhow:
         // so the segment joins cleanly (plain words are kept verbatim).
         let trimmed = name_parts
             .iter()
-            .map(|w| w.strip_prefix(':').unwrap_or(w))
+            .map(|w| if w == ":" { "\n" } else { w.strip_prefix(':').unwrap_or(w) })
             .collect::<Vec<_>>()
             .join(" ");
         let trimmed = trimmed.trim();

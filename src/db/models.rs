@@ -1,5 +1,6 @@
 use sqlx::FromRow;
 
+use super::Id;
 use crate::types::TaskKind;
 
 /// A task as seen by the creation/edit flows. `id` is the stable row id
@@ -9,7 +10,7 @@ use crate::types::TaskKind;
 /// existing oneshot tasks once they are completed.
 #[derive(Debug, Clone)]
 pub struct TaskObject {
-    pub id: Option<i64>,
+    pub id: Option<Id>,
     pub short_id: Option<i64>,
     pub name: String,
     pub body: String,
@@ -24,7 +25,7 @@ pub struct TaskObject {
     pub end_time: Option<i64>,
     /// Parent task id (task tree); `None` for root-level tasks. Not
     /// settable through the CLI yet — creation always inserts root tasks.
-    pub parent: Option<i64>,
+    pub parent: Option<Id>,
 }
 
 impl TaskObject {
@@ -47,7 +48,7 @@ impl TaskObject {
 /// The task fields editable via the interactive edit flow.
 #[derive(Debug, Clone)]
 pub struct UpdateTaskObject {
-    pub id: i64,
+    pub id: Id,
     pub short_id: Option<i64>,
     pub name: String,
     pub body: String,
@@ -59,7 +60,7 @@ pub struct UpdateTaskObject {
     pub target_count: i32,
     pub optional: bool,
     pub end_time: Option<i64>,
-    pub parent: Option<i64>,
+    pub parent: Option<Id>,
 }
 
 /// A logged mood entry plus any linked tracker values.
@@ -78,7 +79,7 @@ pub struct EntryObject {
     pub score: Option<f32>,
     pub trackers: Vec<TrackerObject>,
     pub duration: Option<i64>,
-    pub todo_id: Option<i64>,
+    pub todo_id: Option<Id>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +101,17 @@ pub enum TrackerValue {
     Float(f64),
 }
 
+/// Rebuild a tracker value from its storage class and text form: the column
+/// is dynamically typed, so `typeof(score)` plus `CAST(score AS TEXT)` is the
+/// only lossless way to read it back.
+pub fn tracker_value(storage_class: &str, text: &str) -> TrackerValue {
+    match storage_class {
+        "integer" => TrackerValue::Integer(text.parse().unwrap_or_default()),
+        "real" => TrackerValue::Float(text.parse().unwrap_or_default()),
+        _ => TrackerValue::Text(text.to_string()),
+    }
+}
+
 impl std::fmt::Display for TrackerValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -114,7 +126,7 @@ impl std::fmt::Display for TrackerValue {
 /// view/interval context (the `completions` column comes from the query).
 #[derive(Debug, Clone, FromRow)]
 pub struct TaskRow {
-    pub id: i64,
+    pub id: Id,
     pub short_id: Option<i64>,
     pub name: String,
     pub body: String,
@@ -128,7 +140,7 @@ pub struct TaskRow {
     pub optional: i32,
     pub end_time: Option<i64>,
     /// Parent task id (task tree); `None` for root-level tasks.
-    pub parent: Option<i64>,
+    pub parent: Option<Id>,
     pub completions: Option<i32>,
     #[sqlx(default)]
     pub last_time: Option<i64>,
@@ -206,7 +218,7 @@ impl TaskRow {
 /// A mood row for the tracker/today views.
 #[derive(Debug, Clone)]
 pub struct MoodRow {
-    pub id: i64,
+    pub id: Id,
     pub mood: String,
     pub body: String,
     pub time: i64,
@@ -215,7 +227,7 @@ pub struct MoodRow {
     /// `ColorAxes::mood_color_cached`; `None` until first computed.
     pub score: Option<f32>,
     pub duration: Option<i64>,
-    pub todo_id: Option<i64>,
+    pub todo_id: Option<Id>,
 }
 
 /// A tracker row with the score decoded as text (the `score` column is a
@@ -225,11 +237,11 @@ pub struct MoodRow {
 /// field.
 #[derive(Debug, Clone)]
 pub struct TrackerEntryRow {
-    pub id: i64,
+    pub id: Id,
     pub tracker_type: String,
     pub score: String,
     pub time: i64,
-    pub mood: Option<i64>,
+    pub mood: Option<Id>,
 }
 
 /// One `GROUP BY type, typeof(score)` bucket over the `tracker` table, for
@@ -252,7 +264,7 @@ pub struct TrackerScoreKindRow {
 /// Recurring-task metadata used by the completion-dots tracker.
 #[derive(Debug, Clone)]
 pub struct RecurringTaskMeta {
-    pub id: i64,
+    pub id: Id,
     /// Recurrence anchor; interval slots are computed from it
     /// (`start_time + span * k`).
     pub start_time: Option<i64>,
@@ -275,7 +287,7 @@ pub struct CompletionRow {
 /// completion).
 #[derive(Debug, Clone)]
 pub struct PrunedTask {
-    pub id: i64,
+    pub id: Id,
     pub short_id: Option<i64>,
     pub name: String,
     pub reason: String,
@@ -286,7 +298,7 @@ pub struct PrunedTask {
 /// (`None` once the task is completed).
 #[derive(Debug, Clone)]
 pub struct TaskUpdateInfo {
-    pub id: i64,
+    pub id: Id,
     pub short_id: Option<i64>,
     pub name: String,
     pub target_count: i32,

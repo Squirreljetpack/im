@@ -382,9 +382,14 @@ pub fn task_label_color(task: &TaskRow, now: i64, overdue_color: CtColor) -> Opt
 mod tests {
     use super::*;
 
+    /// A fixed id for fixture rows (fixtures only need distinct, stable ids).
+    fn test_id(n: u128) -> crate::db::Id {
+        crate::db::Id(uuid::Uuid::from_u128(n))
+    }
+
     fn task_row(completions: Option<i32>) -> TaskRow {
         TaskRow {
-            id: 1,
+            id: test_id(1),
             short_id: Some(1),
             name: "t".to_string(),
             body: String::new(),
@@ -487,7 +492,7 @@ mod tests {
         let now = crate::date::now();
         let row =
             |st: i64, dur: i64, target: i32, optional: i32, completions: Option<i32>| TaskRow {
-                id: 1,
+                id: test_id(1),
                 short_id: Some(1),
                 name: "r".to_string(),
                 body: String::new(),
