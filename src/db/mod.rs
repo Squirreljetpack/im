@@ -344,13 +344,31 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
-    // Sync engine: credentials and cursors ('user_id', 'device_id',
-    // 'auth_token', 'last_server_version').
+    // Sync engine: the device id, pull cursor and clock ('device_id',
+    // 'cursor', 'last_own_stamp'). Wiping this table is what `im sync --reset`
+    // does — it rotates the device id and forgets how far it had read. The
+    // account is deliberately elsewhere: a reset is about the data, not about
+    // signing out.
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS _sync_state (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Sync engine: the account this database is signed in to. One row; the
+    // user id is only known once a register/login returned it, so a database
+    // seeded with a token alone leaves it NULL until the first account write.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS _sync_account (
+            id      INTEGER PRIMARY KEY CHECK (id = 1),
+            user_id TEXT,
+            token   TEXT NOT NULL
         )
         "#,
     )

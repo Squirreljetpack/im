@@ -19,7 +19,7 @@ mod tests;
 
 pub use client::{Account, AccountStatus, Client, DEFAULT_SERVER, server_url};
 pub use session::{SyncReport, sync_once};
-pub use state::{KEY_AUTH_TOKEN, KEY_DEVICE_ID, KEY_USER_ID, next_stamp, now_ms};
+pub use state::{KEY_DEVICE_ID, next_stamp, now_ms};
 pub use types::{
     CellEvent, CellValue, LogRow, MoodUpdate, Outcome, SyncRequest, SyncResponse, TaskUpdate,
     TrackerUpdate, Verdict, completion_field, mood_field, task_field, tracker_field,

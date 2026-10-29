@@ -12,10 +12,6 @@ use crate::db::Id;
 pub const KEY_DEVICE_ID: &str = "device_id";
 pub const KEY_CURSOR: &str = "cursor";
 pub const KEY_LAST_STAMP: &str = "last_own_stamp";
-/// Account credentials. They stay here until they move to the config file.
-pub const KEY_USER_ID: &str = "user_id";
-pub const KEY_AUTH_TOKEN: &str = "auth_token";
-
 /// Unix epoch milliseconds.
 pub fn now_ms() -> i64 {
     jiff::Timestamp::now().as_millisecond()
@@ -39,6 +35,50 @@ pub async fn set(conn: &mut SqliteConnection, key: &str, value: &str) -> Result<
     .execute(&mut *conn)
     .await
     .with_context(|| format!("Failed to store `{key}` in the sync state"))?;
+    Ok(())
+}
+
+/// The user id this database last signed in as, if it ever did.
+pub async fn account_user_id(conn: &mut SqliteConnection) -> Result<Option<String>> {
+    sqlx::query_scalar("SELECT user_id FROM _sync_account WHERE id = 1")
+        .fetch_optional(&mut *conn)
+        .await
+        .context("Failed to read the synced account")
+}
+
+pub async fn token(conn: &mut SqliteConnection) -> Result<Option<String>> {
+    sqlx::query_scalar("SELECT token FROM _sync_account WHERE id = 1")
+        .fetch_optional(&mut *conn)
+        .await
+        .context("Failed to read the session token")
+}
+
+/// Remember the account. A `None` user id keeps the one already stored (a
+/// device can be signed in with nothing but a token).
+pub async fn set_account(
+    conn: &mut SqliteConnection,
+    user_id: Option<&str>,
+    token: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO _sync_account (id, user_id, token) VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+             user_id = COALESCE(excluded.user_id, _sync_account.user_id),
+             token = excluded.token",
+    )
+    .bind(user_id)
+    .bind(token)
+    .execute(&mut *conn)
+    .await
+    .context("Failed to store the synced account")?;
+    Ok(())
+}
+
+pub async fn clear_account(conn: &mut SqliteConnection) -> Result<()> {
+    sqlx::query("DELETE FROM _sync_account")
+        .execute(&mut *conn)
+        .await
+        .context("Failed to clear the synced account")?;
     Ok(())
 }
 

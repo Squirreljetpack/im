@@ -10,10 +10,9 @@
 //!   poison the rest of the page.
 
 use anyhow::{Context, Result};
-use sqlx::Connection;
 use sqlx::{Row, SqliteConnection};
 
-use super::schema::{self, Class, KIND_ORDER};
+use super::schema::{self, KIND_ORDER};
 use super::types::{CellValue, DELETED, EXISTENCE, LogRow};
 use crate::db::Id;
 
@@ -362,7 +361,7 @@ mod tests {
                     schema::column(kind, name).is_some(),
                     "{kind}.{name} has no column"
                 );
-                if field.class == Class::Scalar {
+                if field.class == schema::Class::Scalar {
                     assert_eq!(schema::link(kind, name), None);
                 }
             }

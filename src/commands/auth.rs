@@ -54,8 +54,7 @@ pub async fn auth_command(pool: &SqlitePool, sub: AuthSubcommand) -> Result<()> 
         AuthSubcommand::Logout => {
             // The server keeps the events it already has; this device keeps
             // its data and simply stops syncing it.
-            session::state_remove(pool, crate::sync::KEY_AUTH_TOKEN).await?;
-            session::state_remove(pool, crate::sync::KEY_USER_ID).await?;
+            session::logout(pool).await?;
             println!("Signed out. Local data is untouched.");
         }
     }

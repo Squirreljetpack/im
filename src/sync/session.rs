@@ -13,16 +13,13 @@ use sqlx::{Connection, Row, SqliteConnection, SqlitePool};
 
 use super::apply::{self, Skip};
 use super::client::{Account, AccountStatus, Client, run_blocking};
-use super::state::{self, KEY_AUTH_TOKEN, KEY_USER_ID};
+use super::state;
 use super::schema;
 use super::types::{
     self, CellEvent, CellValue, EXISTENCE, LogRow, Outcome, SyncRequest, SyncResponse, Verdict,
 };
 use crate::db::{EventId, Id};
 use crate::tracker::TrackerSlots;
-
-/// How many rounds one `im sync` may make while its own replay queues work.
-const MAX_ROUNDS: usize = 4;
 
 /// What one round trip did.
 #[derive(Debug, Clone, Default)]
@@ -68,52 +65,46 @@ impl SyncReport {
     }
 }
 
-/// Read a `_sync_state` value.
-pub async fn state_get(pool: &SqlitePool, key: &str) -> Result<Option<String>> {
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("Failed to acquire a db connection")?;
-    state::get(&mut conn, key).await
-}
-
-/// Write a `_sync_state` value.
-pub async fn state_set(pool: &SqlitePool, key: &str, value: &str) -> Result<()> {
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("Failed to acquire a db connection")?;
-    state::set(&mut conn, key, value).await
-}
-
-/// Clear a `_sync_state` value.
-pub async fn state_remove(pool: &SqlitePool, key: &str) -> Result<()> {
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("Failed to acquire a db connection")?;
-    state::remove(&mut conn, key).await
-}
-
 /// Store the account a successful `im :auth register`/`login` returned.
 pub async fn store_account(pool: &SqlitePool, account: &Account) -> Result<()> {
     let mut conn = pool
         .acquire()
         .await
         .context("Failed to acquire a db connection")?;
-    let previous = state::get(&mut conn, KEY_USER_ID).await?;
+    let previous = state::account_user_id(&mut conn).await?;
     if previous.as_deref() != Some(account.user_id.as_str()) {
         // A different account: the cursor belonged to the other user's log.
         state::set_cursor(&mut conn, 0).await?;
     }
-    state::set(&mut conn, KEY_USER_ID, &account.user_id).await?;
-    state::set(&mut conn, KEY_AUTH_TOKEN, &account.token).await?;
-    Ok(())
+    state::set_account(&mut conn, Some(&account.user_id), &account.token).await
+}
+
+/// Sign a database in with a token someone else obtained (`im auth login` on a
+/// second machine hands the token over the wire, not the user id).
+pub async fn store_token(pool: &SqlitePool, token: &str) -> Result<()> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("Failed to acquire a db connection")?;
+    state::set_account(&mut conn, None, token).await
 }
 
 /// The signed-in account's token, if any.
 pub async fn signed_in(pool: &SqlitePool) -> Result<Option<String>> {
-    state_get(pool, KEY_AUTH_TOKEN).await
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("Failed to acquire a db connection")?;
+    state::token(&mut conn).await
+}
+
+/// Forget the account. Local data and the device identity are untouched.
+pub async fn logout(pool: &SqlitePool) -> Result<()> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("Failed to acquire a db connection")?;
+    state::clear_account(&mut conn).await
 }
 
 /// The connection-level device id (for callers that already hold one).
@@ -128,13 +119,13 @@ pub async fn sync_once(
     timeout: Duration,
     slots: &TrackerSlots,
 ) -> Result<SyncReport> {
-    let token = signed_in(pool)
-        .await?
-        .context("not logged in — run `im :auth login`")?;
     let mut conn = pool
         .acquire()
         .await
         .context("Failed to acquire a db connection")?;
+    let token = state::token(&mut *conn)
+        .await?
+        .context("not logged in — run `im :auth login`")?;
     let device = state::device_id(&mut *conn).await?;
     let cursor = state::cursor(&mut *conn).await?;
 
@@ -570,11 +561,10 @@ pub async fn reset_local_state(pool: &SqlitePool) -> Result<usize> {
             .await
             .with_context(|| format!("Failed to clear {table}"))?;
     }
-    // Credentials stay: a reset is about the data and the device identity, not
-    // about signing the user out.
-    sqlx::query("DELETE FROM _sync_state WHERE key NOT IN (?, ?)")
-        .bind(KEY_USER_ID)
-        .bind(KEY_AUTH_TOKEN)
+    // The account lives in its own table, so this is the whole reset: the
+    // device id rotates and the cursor and clock are forgotten, while the
+    // sign-in survives.
+    sqlx::query("DELETE FROM _sync_state")
         .execute(&mut *tx)
         .await
         .context("Failed to clear the sync state")?;
