@@ -212,6 +212,28 @@ pub async fn completion_count(conn: &mut SqliteConnection, id: Id, value: i32) -
     Ok(())
 }
 
+/// Emit the moment a completion row describes, for a row edited in place.
+pub async fn completion_time(conn: &mut SqliteConnection, id: Id) -> Result<()> {
+    let time: Option<i64> =
+        sqlx::query_scalar("SELECT time FROM todo_completions WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *conn)
+            .await
+            .context("Failed to read a completion's time")?;
+    if let Some(time) = time {
+        append(
+            conn,
+            id,
+            "completion",
+            completion_field::TIME,
+            Some(CellValue::int(time)),
+            None,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// Emit a delete. The row is removed by the caller; this keeps a snapshot of
 /// what it held, because that is the only place the content still exists once
 /// the row is gone.

@@ -90,8 +90,10 @@ async function sync(
   device: string,
   cursor: number,
   events: CellEvent[] = [],
+  page?: number,
 ): Promise<SyncResponse & { verdictFor: (index: number) => Verdict }> {
-  const response = await call("/api/sync", {
+  const query = page === undefined ? "" : `?page=${page}`;
+  const response = await call(`/api/sync${query}`, {
     method: "POST",
     token,
     body: { device_id: device, cursor, events },
@@ -548,5 +550,128 @@ describe("deletes and links", () => {
       cell(task, "task", "parent_id", { text: loser }, ago(600)),
     ]);
     expect(linked.verdicts[0]?.outcome).toBe("accepted");
+  });
+});
+
+describe("pages", () => {
+  it("only breaks between pushes, never inside one", async () => {
+    const account = await register("pager@example.com");
+    const task = "0190a5a0-0000-7000-8000-000000000101";
+    // A create is a burst of independent cells: the existence cell plus every
+    // populated field. Cut between them and a client could not insert the row.
+    await sync(account.token, "device-a", 0, [
+      ...create(
+        task,
+        "task",
+        [
+          ["name", { text: "written" }],
+          ["body", { text: "a body" }],
+          ["priority", { int: 3 }],
+          ["start_time", { int: 1_700_000_000 }],
+        ],
+        ago(5000),
+      ),
+    ]);
+
+    // A page of two would split that push in three places.
+    const first = await sync(account.token, "device-b", 0, [], 2);
+    expect(fields(first.events, task).sort()).toEqual(
+      ["", "body", "name", "priority", "start_time"].sort(),
+    );
+    expect(first.has_more).toBe(false);
+    expect(first.cursor).toBe(5);
+  });
+
+  it("delivers every push exactly once across pages", async () => {
+    const account = await register("pages@example.com");
+    const first = "0190a5a0-0000-7000-8000-000000000201";
+    const second = "0190a5a0-0000-7000-8000-000000000202";
+    await sync(account.token, "device-a", 0, [
+      ...create(first, "task", [["name", { text: "one" }]], ago(5000)),
+    ]);
+    await sync(account.token, "device-a", 0, [
+      ...create(second, "mood", [["mood", { text: "two" }]], ago(4000)),
+    ]);
+
+    let cursor = 0;
+    const seen: string[] = [];
+    for (;;) {
+      const page = await sync(account.token, "device-b", cursor, [], 2);
+      seen.push(...page.events.map((row) => `${row.entity_id}/${row.field}`));
+      cursor = page.cursor;
+      if (!page.has_more) {
+        break;
+      }
+    }
+    expect(seen).toHaveLength(4);
+    expect(new Set(seen).size).toBe(4);
+    expect(seen).toContain(`${first}/name`);
+    expect(seen).toContain(`${second}/mood`);
+  });
+});
+
+describe("superseded notices", () => {
+  it("tells the device whose cell lost, and keeps telling until it has read past", async () => {
+    const account = await register("notices@example.com");
+    const task = "0190a5a0-0000-7000-8000-000000000301";
+    const mine = await sync(account.token, "device-a", 0, [
+      ...create(task, "task", [["name", { text: "named" }], ["body", { text: "mine" }]], ago(9000)),
+    ]);
+    const myBody = mine.events.find((row) => row.field === "body");
+    expect(myBody).toBeDefined();
+
+    // Another device writes that cell later, so the earlier edit is replaced.
+    await sync(account.token, "device-b", 0, [
+      cell(task, "task", "body", { text: "theirs" }, ago(8000), "device-b"),
+    ]);
+
+    const firstRead = await sync(account.token, "device-a", 0, []);
+    expect(firstRead.superseded).toHaveLength(1);
+    expect(firstRead.superseded[0]).toMatchObject({
+      event_id: myBody?.event_id,
+      entity_id: task,
+      field: "body",
+      lost: { text: "mine" },
+    });
+    expect(firstRead.superseded[0]?.winner).toMatchObject({
+      device_id: "device-b",
+      value: { text: "theirs" },
+    });
+    // The winner is in the same response, so the client can apply and report
+    // in one pass.
+    expect(valueOf(firstRead.events, task, "body")).toEqual({ text: "theirs" });
+
+    // A lost response must not lose the explanation: the cursor did not move.
+    const reread = await sync(account.token, "device-a", 0, []);
+    expect(reread.superseded).toHaveLength(1);
+
+    // Reading past it is what retires it.
+    const caughtUp = await sync(account.token, "device-a", firstRead.cursor, []);
+    expect(caughtUp.superseded).toHaveLength(0);
+    const after = await sync(account.token, "device-a", caughtUp.cursor, []);
+    expect(after.superseded).toHaveLength(0);
+
+    // The winning device is not told anything: it did not lose.
+    const winnerRead = await sync(account.token, "device-b", 0, []);
+    expect(winnerRead.superseded).toHaveLength(0);
+  });
+
+  it("does not report a link repair as a lost edit", async () => {
+    const account = await register("quiet@example.com");
+    const parent = "0190a5a0-0000-7000-8000-000000000401";
+    const child = "0190a5a0-0000-7000-8000-000000000402";
+    await sync(account.token, "device-a", 0, [
+      ...create(parent, "task", [["name", { text: "parent" }]], ago(9000)),
+      ...create(child, "task", [["name", { text: "child" }]], ago(8900)),
+    ]);
+    await sync(account.token, "device-a", 0, [
+      cell(child, "task", "parent_id", { text: parent }, ago(8000)),
+    ]);
+    // The delete's cascade nulls the child's link: that is a repair the device
+    // learns about from the tombstone, not an edit it lost to a peer.
+    await sync(account.token, "device-a", 0, [remove(parent, "task", ago(7000))]);
+
+    const read = await sync(account.token, "device-a", 0, []);
+    expect(read.superseded).toHaveLength(0);
   });
 });
