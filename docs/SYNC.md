@@ -10,12 +10,11 @@ end — against a real deployment (§1) and entirely on one machine with Minifla
 
 - The commands are `im :auth …` and `im :sync`. A bare `im sync` (no colon) is
   entry text and logs a mood named "sync".
-- The server address comes from `IM_SYNC_URL` and defaults to
-  `http://127.0.0.1:8787`. It is read on every command and is **not** stored
-  with the account, so a shell without the variable silently talks to
-  localhost.
-- Sync is on `main` only; the latest release (v0.2.5) predates it. Build from
-  `main` or cut a release (§1.3).
+- The server address comes from `[sync] server` in the client config and
+  defaults to `http://127.0.0.1:8787`. It is **not** stored with the account:
+  signing in does not remember it. `IM_SYNC_URL` overrides the config for one
+  command, so a stale export wins over the config.
+- Sync ships from v0.2.6 on; v0.2.5 and earlier predate it.
 - A pre-sync database (v0.2.5) has INTEGER ids and is not migrated. Do not point
   a sync build at an old state dir; move the file aside first (appendix A).
 - `im :sync --reset` deletes every local row and rebuilds from the server log.
@@ -77,7 +76,10 @@ Failures worth recognizing:
 | 400 `password must be at least 8 characters` | pick a longer one |
 
 If `npm run deploy` rejects the config, `npx wrangler deploy --dry-run`
-validates it without uploading.
+validates it without uploading. Redeploying later keeps the same URL and the
+D1 rows and Durable Object logs behind it; only renaming the worker or moving
+to another account changes the URL. Keep the `[[migrations]]` tag `v1` —
+migration tags are append-only, and a deploy that drops one fails.
 
 Deploy the server from the same commit that built the clients; the wire format
 is small but moving.
@@ -129,10 +131,17 @@ For a prerelease, download `im-<target>.tar.xz` (or the Windows `.zip` /
 
 ### 1.3 Point both devices at the server and sign in
 
-On **each** device, in a shell that will run `im`:
+On **each** device, put the server in the client config (`~/.config/im/config.toml`;
+`dev.toml` for a debug build):
+
+```toml
+[sync]
+server = "https://im-sync.<your-subdomain>.workers.dev"
+```
+
+Then:
 
 ```sh
-export IM_SYNC_URL=https://im-sync.<your-subdomain>.workers.dev
 im :auth status              # "Not signed in (run `im :auth login`)."
 ```
 
@@ -146,10 +155,12 @@ im :auth register            # prompts for email + password (8+ chars)
 im :auth login               # same email, same password
 ```
 
-Both print the server they signed in to and suggest `im :sync`. The env var is
-not remembered — put the export in your shell profile, or prefix every `im`
-invocation. In a shell without it, `im :auth status` still reads the local
-sign-in and then reports that `http://127.0.0.1:8787` refused it.
+Both print the server they signed in to and suggest `im :sync`. Signing in does
+not record the URL: without `[sync] server` (or with `IM_SYNC_URL` set to
+something else) the same account talks to whatever that command resolves.
+`IM_SYNC_URL` is the per-command override, e.g.
+`IM_SYNC_URL=http://127.0.0.1:8787 im :sync` to point one run at a local
+server.
 
 A quick two-clients-on-one-machine variant of the whole section: keep the
 deployment and use two throwaway state dirs as in §2.2, with `IM_SYNC_URL`
@@ -305,7 +316,9 @@ im :sync
 im @                      # A's task is here
 ```
 
-No `IM_SYNC_URL` is needed: `127.0.0.1:8787` is the default. Notes:
+No URL override is needed when the config leaves `[sync] server` alone:
+`127.0.0.1:8787` is the default. If §1.3 put a deployed URL in the config, run
+these with `IM_SYNC_URL=http://127.0.0.1:8787` (or a separate dev config). Notes:
 
 - `XDG_STATE_HOME` is the Linux switch for "another device on this machine"
   (state is `$XDG_STATE_HOME/im/im.db`). On macOS, `dirs` has no state dir and
@@ -347,6 +360,7 @@ npx wrangler dev --persist-to /tmp/im-sync-local
 | Client database (release) | `$XDG_STATE_HOME/im/im.db`, else `~/.local/state/im/im.db` |
 | Client database (debug) | same directory, `im.dev.db` |
 | Client config | `~/.config/im/config.toml` (debug: `dev.toml`) |
+| Sync server | `[sync] server` in the client config; `IM_SYNC_URL` overrides |
 | Client log | `<state dir>/im.log` |
 | Server local state | `sync-server/.wrangler/state` (gitignored) |
 | Server config | `sync-server/wrangler.toml` |

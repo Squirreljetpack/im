@@ -13,7 +13,7 @@ Usage:
                                                         (see `im -vh`)
 
 Views:
-  im [@date]                                     today view
+  im @[date]                                     today view
   im @due[:t|:w]                                 due view
                                                         (today / tomorrow / this week)
   im @[:o|:O]                                    pending tasks
