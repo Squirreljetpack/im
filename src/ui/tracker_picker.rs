@@ -173,10 +173,14 @@ pub async fn run_trackers_app(config: &Config) -> Result<()> {
     mm.config_render(render_cfg);
     mm.config_tui(tui_cfg);
 
+    // The event loop's controller: a preview compute that lands after its
+    // frame was drawn nudges the loop with a tick so the pane repaints.
+    let event_tx = event_loop.controller();
+
     // The preview is built synchronously from the already-resolved palette,
-    // so the color axes are unused here.
+    // so the color axes (and the tick nudge) go unused here.
     let axes = Arc::new(OnceCell::new());
-    let previewer = Previewer::new(axes);
+    let previewer = Previewer::new(axes, event_tx);
     let preview_view = previewer.view();
     let help_previewer = previewer.clone();
 

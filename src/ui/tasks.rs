@@ -154,12 +154,17 @@ impl TasksApp {
         mm.config_render(render_cfg);
         mm.config_tui(tui_cfg);
 
+        // The event loop's controller: a preview compute that lands after its
+        // frame was drawn nudges the loop with a tick so the pane repaints.
+        let event_tx = event_loop.controller();
+
         let axes = Arc::new(tokio::sync::OnceCell::new());
 
         // Previewer: the event listener owns it (the `Preview` widget built
         // by `view()` holds its own clones of the shared string). A
-        // generation counter drops stale async results.
-        let previewer = Previewer::new(axes);
+        // generation counter drops stale async results, and the controller
+        // repaints the frame they land in.
+        let previewer = Previewer::new(axes, event_tx);
         let preview_view = previewer.view();
         // Clone for the PreviewSet handler below (the cursor handler moves
         // the original).
