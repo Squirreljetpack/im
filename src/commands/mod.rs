@@ -6,10 +6,12 @@ use std::io::Write;
 use crate::cli::{CliOpts, Command};
 use crate::config::Config;
 
+mod auth;
 mod diagnostics;
 mod edit_task;
 mod entry;
 mod maintenance;
+mod sync;
 mod task;
 mod update;
 
@@ -89,11 +91,17 @@ pub async fn execute_command<W: Write>(
         }
 
         Command::Help => {
-            // assets/help.txt is bundled via `include_str!` so the compiled
-            // binary always has the help text even when the working directory
-            // does not contain the assets directory.
+            // assets/help.txt and assets/vhelp.txt are bundled via
+            // `include_str!` so the compiled binary always has the help text
+            // even when the working directory does not contain the assets
+            // directory.
             const HELP: &str = include_str!("../../assets/help.txt");
-            out.write_all(HELP.as_bytes())?;
+            const VHELP: &str = include_str!("../../assets/vhelp.txt");
+            if opts.verbose() {
+                out.write_all(VHELP.as_bytes())?;
+            } else {
+                out.write_all(HELP.as_bytes())?;
+            }
             Ok(())
         }
 
@@ -117,5 +125,9 @@ pub async fn execute_command<W: Write>(
         }
 
         Command::Clear { date } => maintenance::clear_moods(pool, config, date, tui).await,
+
+        Command::Auth { sub } => auth::auth_command(pool, sub).await,
+
+        Command::Sync { reset } => sync::sync_command(pool, config, reset).await,
     }
 }

@@ -1,0 +1,358 @@
+//! Applying served cells.
+//!
+//! The server already names the winner of every cell, so applying a page is
+//! mostly writing values. Two things are deliberate:
+//!
+//! * a row is **materialised once**, from its existence cell plus the field
+//!   cells that arrived with it, in [`KIND_ORDER`] so a referrer's foreign keys
+//!   are satisfied;
+//! * a cell that cannot be written is skipped and reported, never allowed to
+//!   poison the rest of the page.
+
+use anyhow::{Context, Result};
+use sqlx::Connection;
+use sqlx::{Row, SqliteConnection};
+
+use super::schema::{self, Class, KIND_ORDER};
+use super::types::{CellValue, DELETED, EXISTENCE, LogRow};
+use crate::db::Id;
+
+/// What one page did.
+#[derive(Debug, Clone, Default)]
+pub struct Applied {
+    pub created: usize,
+    pub updated: usize,
+    pub deleted: usize,
+    /// Cells that could not be written.
+    pub skipped: Vec<Skip>,
+}
+
+/// One cell that was left alone.
+#[derive(Debug, Clone)]
+pub struct Skip {
+    pub entity_id: Id,
+    pub field: String,
+    pub reason: String,
+}
+
+/// Apply a page of served cells.
+pub async fn apply_rows(conn: &mut SqliteConnection, rows: &[LogRow]) -> Result<Applied> {
+    let mut applied = Applied::default();
+    materialise(&mut *conn, rows, &mut applied).await?;
+    for row in rows {
+        apply_cell(&mut *conn, row, &mut applied).await?;
+    }
+    // A task's short id is a local projection: a task that just appeared needs
+    // one, and a completion that landed can retire it.
+    for row in rows {
+        if row.cell.kind == "task" {
+            crate::db::sync_short_id(&mut *conn, row.cell.entity_id).await?;
+        }
+    }
+    Ok(applied)
+}
+
+/// Write every entity that appears for the first time, existence cell first.
+async fn materialise(
+    conn: &mut SqliteConnection,
+    rows: &[LogRow],
+    applied: &mut Applied,
+) -> Result<()> {
+    for kind in KIND_ORDER {
+        for row in rows {
+            if row.cell.kind != kind || row.cell.field != EXISTENCE {
+                continue;
+            }
+            if row.cell.value.as_ref().and_then(CellValue::as_text) == Some(DELETED) {
+                continue;
+            }
+            let entity = row.cell.entity_id;
+            let Some(table) = schema::table(kind) else {
+                continue;
+            };
+            if exists(&mut *conn, table, entity).await? {
+                continue;
+            }
+            let cells: Vec<&LogRow> = rows
+                .iter()
+                .filter(|candidate| {
+                    candidate.cell.entity_id == entity && candidate.cell.field != EXISTENCE
+                })
+                .collect();
+            match insert_entity(&mut *conn, kind, table, entity, &cells).await {
+                Ok(()) => applied.created += 1,
+                Err(error) => applied.skipped.push(Skip {
+                    entity_id: entity,
+                    field: EXISTENCE.to_string(),
+                    reason: format!("{error:#}"),
+                }),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One `INSERT` from the entity's existence cell and the fields that came with
+/// it. The domain tables have `NOT NULL` columns, so this cannot be done one
+/// cell at a time.
+async fn insert_entity(
+    conn: &mut SqliteConnection,
+    kind: &str,
+    table: &str,
+    entity: Id,
+    cells: &[&LogRow],
+) -> Result<()> {
+    let spec = schema::kind(kind).context("unknown kind")?;
+    for (name, field) in &spec.fields {
+        let populated = cells
+            .iter()
+            .any(|row| row.cell.field == *name && row.cell.value.is_some());
+        anyhow::ensure!(!field.required || populated, "missing required field {name}");
+    }
+
+    // A link is written with the row only when its referent is already here;
+    // otherwise the second pass applies it once every row exists. Completions
+    // come last in `KIND_ORDER`, so their `NOT NULL` task link is always
+    // available.
+    let mut included: Vec<&LogRow> = Vec::new();
+    for row in cells {
+        if let Some(link_kind) = schema::link(kind, &row.cell.field) {
+            let Some(target) = row.cell.value.as_ref().and_then(CellValue::as_text) else {
+                continue;
+            };
+            let Ok(target) = target.parse::<Id>() else {
+                continue;
+            };
+            let Some(link_table) = schema::table(link_kind) else {
+                continue;
+            };
+            if !exists(&mut *conn, link_table, target).await? {
+                continue;
+            }
+        }
+        included.push(row);
+    }
+
+    let mut builder = sqlx::QueryBuilder::new(format!("INSERT INTO \"{table}\" (id"));
+    for row in &included {
+        let column = schema::column(kind, &row.cell.field)
+            .with_context(|| format!("unknown field {}", row.cell.field))?;
+        builder.push(", \"").push(column).push("\"");
+    }
+    builder.push(") VALUES (").push_bind(entity);
+    for row in &included {
+        builder.push(", ");
+        match &row.cell.value {
+            Some(CellValue::Text(text)) => {
+                builder.push_bind(text.clone());
+            }
+            Some(CellValue::Int(number)) => {
+                builder.push_bind(*number);
+            }
+            Some(CellValue::Real(number)) => {
+                builder.push_bind(*number);
+            }
+            None => {
+                builder.push_bind(None::<String>);
+            }
+        }
+    }
+    builder.push(")");
+    builder
+        .build()
+        .execute(&mut *conn)
+        .await
+        .context("Failed to insert a served row")?;
+    Ok(())
+}
+
+/// Write one cell: a value, or the existence cell's `deleted` marker.
+async fn apply_cell(
+    conn: &mut SqliteConnection,
+    row: &LogRow,
+    applied: &mut Applied,
+) -> Result<()> {
+    let kind = row.cell.kind.as_str();
+    let entity = row.cell.entity_id;
+    let Some(table) = schema::table(kind) else {
+        applied.skipped.push(Skip {
+            entity_id: entity,
+            field: row.cell.field.clone(),
+            reason: format!("unknown kind {kind}"),
+        });
+        return Ok(());
+    };
+    let outcome = if row.cell.field == EXISTENCE {
+        if row.cell.value.as_ref().and_then(CellValue::as_text) == Some(DELETED) {
+            sqlx::query(sqlx::AssertSqlSafe(format!("DELETE FROM \"{table}\" WHERE id = ?")))
+                .bind(entity)
+                .execute(&mut *conn)
+                .await
+                .map(|result| {
+                    if result.rows_affected() > 0 {
+                        applied.deleted += 1;
+                    }
+                })
+        } else {
+            Ok(())
+        }
+    } else {
+        let Some(spec) = schema::field(kind, &row.cell.field) else {
+            applied.skipped.push(Skip {
+                entity_id: entity,
+                field: row.cell.field.clone(),
+                reason: format!("unknown field {}", row.cell.field),
+            });
+            return Ok(());
+        };
+        let column = schema::column(kind, &row.cell.field).unwrap_or(&row.cell.field);
+        // A scalar (tracker score) keeps the storage class the cell carries;
+        // everything else has one class per column.
+        let _ = spec.class;
+        let sql = format!("UPDATE \"{table}\" SET \"{column}\" = ? WHERE id = ?");
+        let result = match &row.cell.value {
+            Some(CellValue::Text(text)) => {
+                sqlx::query(sqlx::AssertSqlSafe(sql.clone())).bind(text).bind(entity).execute(&mut *conn).await
+            }
+            Some(CellValue::Int(number)) => {
+                sqlx::query(sqlx::AssertSqlSafe(sql.clone())).bind(number).bind(entity).execute(&mut *conn).await
+            }
+            Some(CellValue::Real(number)) => {
+                sqlx::query(sqlx::AssertSqlSafe(sql.clone())).bind(number).bind(entity).execute(&mut *conn).await
+            }
+            None => {
+                sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
+                    .bind(None::<String>)
+                    .bind(entity)
+                    .execute(&mut *conn)
+                    .await
+            }
+        };
+        result.and_then(|result| {
+            if result.rows_affected() > 0 {
+                applied.updated += 1;
+                Ok(())
+            } else {
+                applied.skipped.push(Skip {
+                    entity_id: entity,
+                    field: row.cell.field.clone(),
+                    reason: "no local row".to_string(),
+                });
+                Ok(())
+            }
+        })
+    };
+    if let Err(error) = outcome {
+        applied.skipped.push(Skip {
+            entity_id: entity,
+            field: row.cell.field.clone(),
+            reason: error.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// The `(type, time)` a tracker row currently holds, for slot bookkeeping.
+pub async fn tracker_slot_key(
+    conn: &mut SqliteConnection,
+    id: Id,
+) -> Result<Option<(String, i64)>> {
+    let row = sqlx::query("SELECT type, time FROM tracker WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await
+        .context("Failed to read a tracker's slot")?;
+    Ok(row.map(|row| (row.get("type"), row.get("time"))))
+}
+
+/// Collapse replace-mode tracker rows that landed in one slot.
+///
+/// The slot is `(type, time window)` on the configured grid, so it is not a
+/// link and the server cannot check it. The winner is the highest `(time, id)`
+/// rank — both parts are on the row itself and fixed at birth, so any two
+/// devices holding the same rows rank them the same way. The losers are deleted
+/// *with* an event: a delete is terminal, so an unpublished one would leave
+/// them alive on every peer.
+pub async fn dedup_tracker_slots(
+    conn: &mut SqliteConnection,
+    touched: &std::collections::HashSet<(String, (i64, i64))>,
+) -> Result<usize> {
+    let mut removed = 0;
+    for (tracker_type, (low, high)) in touched {
+        let rows: Vec<(Id, i64)> = sqlx::query_as(
+            "SELECT id, time FROM tracker
+              WHERE type = ? AND time >= ? AND time < ?
+              ORDER BY time DESC, id DESC",
+        )
+        .bind(tracker_type)
+        .bind(low)
+        .bind(high)
+        .fetch_all(&mut *conn)
+        .await
+        .context("Failed to read a tracker slot")?;
+        for (id, _) in rows.into_iter().skip(1) {
+            let deleted = sqlx::query("DELETE FROM tracker WHERE id = ?")
+                .bind(id)
+                .execute(&mut *conn)
+                .await
+                .context("Failed to drop a tracker slot loser")?;
+            if deleted.rows_affected() > 0 {
+                super::events::delete(&mut *conn, id, "tracker").await?;
+                removed += 1;
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// Whether a row exists: the only question `materialise` asks.
+async fn exists(conn: &mut SqliteConnection, table: &str, id: Id) -> Result<bool> {
+    let found: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT 1 FROM \"{table}\" WHERE id = ?"
+    )))
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await
+        .with_context(|| format!("Failed to look up a row in {table}"))?;
+    Ok(found.is_some())
+}
+
+/// Apply a single cell, for verdict repair.
+pub async fn apply_one(conn: &mut SqliteConnection, row: &LogRow) -> Result<()> {
+    let mut applied = Applied::default();
+    apply_cell(conn, row, &mut applied).await
+}
+
+/// Drop an entity's local row without a served death (a refused create).
+pub async fn forget(conn: &mut SqliteConnection, kind: &str, entity: Id) -> Result<()> {
+    let Some(table) = schema::table(kind) else {
+        return Ok(());
+    };
+    sqlx::query(sqlx::AssertSqlSafe(format!("DELETE FROM \"{table}\" WHERE id = ?")))
+        .bind(entity)
+        .execute(&mut *conn)
+        .await
+        .with_context(|| format!("Failed to drop a refused {kind}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_schema_field_has_a_column() {
+        for kind in KIND_ORDER {
+            let spec = schema::kind(kind).expect("kind");
+            for (name, field) in &spec.fields {
+                assert!(
+                    schema::column(kind, name).is_some(),
+                    "{kind}.{name} has no column"
+                );
+                if field.class == Class::Scalar {
+                    assert_eq!(schema::link(kind, name), None);
+                }
+            }
+        }
+    }
+}

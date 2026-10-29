@@ -1,13 +1,39 @@
 use anyhow::{Context, Result};
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use sqlx::Connection;
+use sqlx::sqlite::{SqliteConnection, SqlitePool, SqlitePoolOptions};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub async fn init_database(db_path: &Path) -> anyhow::Result<SqlitePool> {
+/// Open the database, replacing an unreadable file with a fresh one
+/// (`@@SYNC.md` §4.4). Returns the pool the rest of the run uses.
+pub async fn init_database(db_path: &Path) -> Result<SqlitePool> {
     // Ensure parent directory exists
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+
+    match open_database(db_path).await {
+        Ok(pool) => Ok(pool),
+        Err(err) if is_corruption(&err) => {
+            // Nothing inside the file is readable, so it cannot be repaired in
+            // place: keep the bytes for inspection, then start over. The
+            // credentials went to the quarantine copy with everything else, so
+            // syncing resumes after `im auth login`.
+            let quarantine = quarantine_database(db_path)?;
+            let pool = open_database(db_path).await?;
+            cba::ebog!(
+                "The database was unreadable; the damaged file was copied to {} and a fresh one was initialized. Sign in again to resume syncing.",
+                quarantine.display()
+            );
+            Ok(pool)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Open, probe and migrate the database file.
+async fn open_database(db_path: &Path) -> Result<SqlitePool> {
+    probe_database(db_path).await?;
 
     let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
     let pool = SqlitePoolOptions::new()
@@ -49,17 +75,83 @@ pub async fn init_database(db_path: &Path) -> anyhow::Result<SqlitePool> {
     Ok(pool)
 }
 
-/// Delete the database file and its `-wal`/`-shm` sidecar files (if any).
-/// Called after the user confirms removing an invalid database so a fresh
-/// one can be initialized in its place. Missing files (including sidecars
-/// from a WAL-mode db) are not an error.
-pub fn delete_database(db_path: &Path) -> Result<()> {
-    let mut targets = vec![db_path.to_path_buf()];
-    for suffix in ["-wal", "-shm"] {
-        let mut name = db_path.as_os_str().to_os_string();
-        name.push(suffix);
-        targets.push(PathBuf::from(name));
+/// Read the schema over a plain connection: a file that is not a SQLite
+/// database fails here at once, while a pool would retry its `after_connect`
+/// hooks until the acquire timeout.
+async fn probe_database(db_path: &Path) -> Result<()> {
+    let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
+    let mut conn = SqliteConnection::connect(&db_url)
+        .await
+        .with_context(|| format!("Failed to open {}", db_path.display()))?;
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sqlite_master")
+        .fetch_one(&mut conn)
+        .await
+        .with_context(|| format!("Failed to read the schema of {}", db_path.display()))?;
+    conn.close()
+        .await
+        .with_context(|| format!("Failed to close {}", db_path.display()))?;
+    Ok(())
+}
+
+/// Whether an error means the file is not a readable SQLite database.
+fn is_corruption(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        let Some(sqlx::Error::Database(db)) = cause.downcast_ref::<sqlx::Error>() else {
+            return false;
+        };
+        if db
+            .code()
+            .is_some_and(|code| code.starts_with("SQLITE_CORRUPT") || code == "SQLITE_NOTADB")
+        {
+            return true;
+        }
+        let message = db.message().to_lowercase();
+        message.contains("not a database") || message.contains("malformed")
+    })
+}
+
+/// Copy the database and its sidecars to `<file>.corrupt-<unix-seconds>.bak`
+/// and remove the originals. Nothing is removed unless every existing file was
+/// copied first, so a failed copy never costs the user the database.
+fn quarantine_database(db_path: &Path) -> Result<PathBuf> {
+    let backup = with_suffix(db_path, &format!(".corrupt-{}.bak", unix_seconds()));
+    for suffix in ["", "-wal", "-shm"] {
+        let source = with_suffix(db_path, suffix);
+        if !source.is_file() {
+            continue;
+        }
+        let target = with_suffix(&backup, suffix);
+        std::fs::copy(&source, &target).with_context(|| {
+            format!(
+                "Failed to copy the damaged database {} to {}",
+                source.display(),
+                target.display()
+            )
+        })?;
     }
+    delete_database(db_path)?;
+    Ok(backup)
+}
+
+/// Seconds since the Unix epoch, for naming backups.
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default()
+}
+
+/// `<path><suffix>`: the shape SQLite uses for a file and its sidecars.
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Delete the database file and its `-wal`/`-shm` sidecar files (if any).
+/// Missing files (including sidecars from a WAL-mode db) are not an error.
+pub fn delete_database(db_path: &Path) -> Result<()> {
+    let targets = ["", "-wal", "-shm"].map(|suffix| with_suffix(db_path, suffix));
 
     for path in targets {
         match std::fs::remove_file(&path) {
@@ -92,24 +184,50 @@ pub async fn test_pool() -> anyhow::Result<SqlitePool> {
 
     Ok(pool)
 }
+/// Bring an existing database onto the cell-based sync tables.
+///
+/// The outbox used to hold one opaque payload per event and the merge kept
+/// per-entity watermarks and kinds; cells replaced all three. A queued event of
+/// the old shape cannot be expressed as cells, so the outbox is dropped — the
+/// caller's next mutation refills it.
+async fn migrate_sync_tables(pool: &SqlitePool) -> anyhow::Result<()> {
+    let columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('_sync_events')")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+    if columns.iter().any(|column| column == "payload") {
+        sqlx::query("DROP TABLE _sync_events").execute(pool).await?;
+    }
+    for table in ["_sync_watermark", "_sync_entities"] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP TABLE IF EXISTS {table}"
+        )))
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
+}
 
 pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
+    migrate_sync_tables(pool).await?;
     // Create tables if they don't exist
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS mood (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            mood TEXT NOT NULL,
-            body TEXT NOT NULL DEFAULT '',
-            time INTEGER NOT NULL DEFAULT (unixepoch()),
+            id        TEXT PRIMARY KEY,
+            mood      TEXT NOT NULL,
+            body      TEXT NOT NULL DEFAULT '',
+            time      INTEGER NOT NULL DEFAULT (unixepoch()),
+            -- Local cache only: the ONNX embedding is never synced.
             embedding BLOB,
             -- Cached emotional-saliency score for the mood text (nullable;
-            -- backfilled by mood_color_cached). No migration: an existing
-            -- DB without the column is deleted by the user.
+            -- backfilled by mood_color_cached).
             score REAL,
             duration INTEGER,
             -- Optional link to a single task (1 task per mood).
-            todo_id INTEGER REFERENCES todos(id) ON DELETE SET NULL
+            todo_id   TEXT REFERENCES todos(id) ON DELETE SET NULL
         )
         "#,
     )
@@ -119,14 +237,13 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS tracker (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            type TEXT NOT NULL,
+            id    TEXT PRIMARY KEY,
+            type  TEXT NOT NULL,
             -- BLOB decltype = no type affinity: storage class is preserved
             -- exactly (integer/text/real) so sqlx can decode by value type.
             score BLOB NOT NULL CHECK (typeof(score) IN ('integer', 'text', 'real')),
-            time INTEGER NOT NULL DEFAULT (unixepoch()),
-            mood INTEGER,
-            FOREIGN KEY (mood) REFERENCES mood(id)
+            time  INTEGER NOT NULL DEFAULT (unixepoch()),
+            mood  TEXT REFERENCES mood(id) ON DELETE SET NULL
         )
         "#,
     )
@@ -136,26 +253,27 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS todos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            body TEXT NOT NULL DEFAULT '',
-            priority INTEGER NOT NULL DEFAULT 5,
-            -- User-facing short id: allocated by the db layer (first free
-            -- gap); NULL once the task is completed (oneshot) or for
-            -- recurring tasks done in the current interval.
-            short_id INTEGER UNIQUE,
-            -- Reserved for a name-derived embedding; never populated.
-            name_embedding BLOB,
-            start_time INTEGER,
+            id                      TEXT PRIMARY KEY,
+            name                    TEXT NOT NULL,
+            body                    TEXT NOT NULL DEFAULT '',
+            priority                INTEGER NOT NULL DEFAULT 5,
+            -- User-facing short id: local presentation only (never synced),
+            -- allocated by the db layer (first free gap); NULL once the task
+            -- is completed (oneshot) or for recurring tasks done in the
+            -- current interval.
+            short_id                INTEGER UNIQUE,
+            -- Reserved for a name-derived embedding; local only.
+            name_embedding          BLOB,
+            start_time              INTEGER,
             available_duration_secs INTEGER,
-            interval_secs INTEGER,
-            target_count INTEGER NOT NULL DEFAULT 0,
-            optional INTEGER NOT NULL DEFAULT 0,
-            end_time INTEGER,
+            interval_secs           INTEGER,
+            target_count            INTEGER NOT NULL DEFAULT 0,
+            optional                INTEGER NOT NULL DEFAULT 0,
+            end_time                INTEGER,
             -- Parent task id for the task tree (NULL = root-level task).
             -- Deleting a parent re-parents its children to root level
             -- (ON DELETE SET NULL) rather than cascading or failing.
-            parent INTEGER REFERENCES todos(id) ON DELETE SET NULL
+            parent                  TEXT REFERENCES todos(id) ON DELETE SET NULL
         )
         "#,
     )
@@ -165,11 +283,10 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS todo_completions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            todo_id INTEGER NOT NULL,
-            time INTEGER NOT NULL DEFAULT (unixepoch()),
-            count INTEGER NOT NULL DEFAULT 1,
-            FOREIGN KEY (todo_id) REFERENCES todos(id) ON DELETE CASCADE
+            id      TEXT PRIMARY KEY,
+            todo_id TEXT NOT NULL REFERENCES todos(id) ON DELETE CASCADE,
+            time    INTEGER NOT NULL DEFAULT (unixepoch()),
+            count   INTEGER NOT NULL DEFAULT 1
         )
         "#,
     )
@@ -181,6 +298,41 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         CREATE TABLE IF NOT EXISTS embedding_cache (
             text TEXT PRIMARY KEY,
             embedding BLOB NOT NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Sync engine: credentials and cursors ('user_id', 'device_id',
+    // 'auth_token', 'last_server_version').
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS _sync_state (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Sync engine: the outbox. A row here *is* an unsent cell — presence means
+    // pending, and the row is deleted once the server has judged it. `image` is
+    // the snapshot a delete carries, so the user can be offered a copy.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS _sync_events (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id   TEXT NOT NULL UNIQUE,
+            device_id  TEXT NOT NULL,
+            entity_id  TEXT NOT NULL,
+            kind       TEXT NOT NULL,
+            field      TEXT NOT NULL,
+            value      TEXT,
+            timestamp  INTEGER NOT NULL,
+            image      TEXT,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch())
         )
         "#,
     )
@@ -234,6 +386,12 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
 
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_sync_events_cell ON _sync_events(entity_id, field)",
+    )
+    .execute(pool)
+    .await?;
+
     log::debug!("Database migrations completed");
     Ok(())
 }
@@ -242,21 +400,56 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    /// A garbage db file must fail initialization quickly — the pool's
-    /// acquire timeout caps it instead of the 30s default hang.
+    /// The quarantine copies in a directory, newest name first.
+    fn quarantined(dir: &Path) -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.to_string_lossy().contains(".corrupt-"))
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// An unreadable db file is copied aside and replaced by a fresh one
+    /// (§4.4): the bytes survive for inspection, the schema is rebuilt.
     #[tokio::test]
-    async fn init_fails_fast_on_invalid_db() {
+    async fn a_corrupt_database_is_quarantined_and_recreated() {
         let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("invalid.db");
+        let db_path = dir.path().join("im.db");
         std::fs::write(&db_path, b"not a sqlite database").unwrap();
+        std::fs::write(dir.path().join("im.db-wal"), b"trailing frames").unwrap();
 
         let start = std::time::Instant::now();
-        let result = init_database(&db_path).await;
-        assert!(result.is_err(), "garbage db must fail initialization");
+        let pool = init_database(&db_path).await.unwrap();
         assert!(
-            start.elapsed() < Duration::from_secs(10),
-            "invalid db must fail fast, not hang on the pool acquire timeout"
+            start.elapsed() < Duration::from_secs(5),
+            "a corrupt db must be recognized without waiting for the pool timeout"
         );
+
+        // The db file is kept as `<file>.corrupt-<unix>.bak`. Its sidecar is
+        // copied next to it when SQLite has not already dropped the stale
+        // `-wal` while probing the file.
+        let backups: Vec<PathBuf> = quarantined(dir.path());
+        assert!(!backups.is_empty(), "the damaged file is kept aside");
+        let db_backup = backups
+            .iter()
+            .find(|path| path.to_string_lossy().ends_with(".bak"))
+            .expect("the db copy keeps the plain .bak name");
+        assert_eq!(std::fs::read(db_backup).unwrap(), b"not a sqlite database");
+
+        // The fresh database is usable and starts empty.
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM todos")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        pool.close().await;
+
+        // Reopening the healthy file quarantines nothing further.
+        let pool = init_database(&db_path).await.unwrap();
+        pool.close().await;
+        assert_eq!(quarantined(dir.path()).len(), backups.len());
     }
 
     /// A fresh path is created (parent dirs included) and initialized.
@@ -295,12 +488,14 @@ mod tests {
 
 mod embeddings;
 mod entries;
+mod ids;
 mod models;
 mod tasks;
 mod views;
 
 pub use embeddings::*;
 pub use entries::*;
+pub use ids::*;
 pub use models::*;
 pub use tasks::*;
 pub use views::*;
