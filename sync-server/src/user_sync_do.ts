@@ -575,7 +575,8 @@ export class UserSyncDO implements DurableObject {
    * client a row's existence without the `NOT NULL` fields that make it
    * insertable — the row would be skipped and then lost, since the cursor moves
    * past it. Everything a push appends shares one batch, so a full page is
-   * extended to the end of its last batch.
+   * extended to the last version of its last batch, however many rows that
+   * takes.
    */
   private pull(
     sql: Sql,
@@ -587,7 +588,7 @@ export class UserSyncDO implements DurableObject {
     // them — except at cursor 0, where there is no row that could.
     // A dead entity is served as its existence cell alone: nothing may write a
     // value into a row that no longer exists.
-    const query = (batchBound: boolean): string =>
+    const query = (bounded: boolean): string =>
       `SELECT r.entity_id, r.field, r.kind, r.value, r.timestamp, r.device_id,
               r.event_id, r.winner_version
          FROM sync_register r
@@ -597,12 +598,12 @@ export class UserSyncDO implements DurableObject {
                OR NOT EXISTS (SELECT 1 FROM sync_register e
                                WHERE e.entity_id = r.entity_id
                                  AND e.field = ? AND e.value = ?))
-          ${batchBound ? "AND (SELECT batch FROM sync_log l WHERE l.version = r.winner_version) <= ?" : ""}
+          ${bounded ? "AND r.winner_version <= ?" : ""}
         ORDER BY r.winner_version ASC
         LIMIT ?`;
     const params = (
       limit: number,
-      batch?: number,
+      through?: number,
     ): (string | number | null)[] => [
       cursor,
       cursor,
@@ -610,7 +611,7 @@ export class UserSyncDO implements DurableObject {
       EXISTENCE,
       EXISTENCE,
       DEAD,
-      ...(batch === undefined ? [] : [batch]),
+      ...(through === undefined ? [] : [through]),
       limit,
     ];
 
@@ -620,18 +621,21 @@ export class UserSyncDO implements DurableObject {
     const pageFull = rows.length === limit;
     if (pageFull) {
       const last = rows[rows.length - 1];
-      // SAFETY: the query selects one column, aliased `batch`.
-      const batch = sql.exec(
-        "SELECT batch FROM sync_log WHERE version = ?",
-        Number(last?.winner_version),
-      ).one() as { batch: number };
-      // The rest of that batch can be up to a full push, so the extension is
-      // allowed to overshoot the page size by one push's worth.
-      rows = sql
+      // Extend to the last version of the batch that delivered the cut, so the
+      // page ends where a push ended. Counting extra rows instead would rest on
+      // "a batch is one push", which a delete violates: its cascade appends a
+      // cell per affected neighbour in the same batch.
+      // SAFETY: the query selects one column, aliased `through`.
+      const through = sql
         .exec(
-          query(true),
-          ...params(limit + MAX_PUSH, Number(batch.batch)),
+          `SELECT MAX(version) AS through FROM sync_log
+            WHERE batch = (SELECT batch FROM sync_log WHERE version = ?)`,
+          Number(last?.winner_version),
         )
+        .one() as { through: number };
+      // A negative limit means none: the bound above is the whole cut.
+      rows = sql
+        .exec(query(true), ...params(-1, Number(through.through)))
         .toArray() as unknown as CellRow[];
     }
     // SAFETY: the query selects one column, aliased `version`.
