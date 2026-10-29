@@ -1,0 +1,62 @@
+{
+  "$comment": "Sync schema: the rules both sides obey. Rust reads it at compile time, the worker imports it at runtime. A field's class is its SQLite storage class; `link` names the kind it must point at; `immutable` means the cell may be written once, at create.",
+  "kinds": {
+    "task": {
+      "table": "todos",
+      "fields": {
+        "name": { "class": "text", "required": true },
+        "body": { "class": "text" },
+        "priority": { "class": "int" },
+        "start_time": { "class": "int" },
+        "available_duration_secs": { "class": "int" },
+        "interval_secs": { "class": "int" },
+        "target_count": { "class": "int" },
+        "optional": { "class": "int" },
+        "end_time": { "class": "int" },
+        "parent_id": { "class": "text", "column": "parent", "link": "task" }
+      },
+      "cascade": [
+        { "kind": "task", "field": "parent_id", "action": "set_null" },
+        { "kind": "mood", "field": "todo_id", "action": "set_null" },
+        { "kind": "completion", "action": "delete" }
+      ],
+      "subkind": {
+        "default": "oneshot",
+        "from": [
+          ["interval_secs", "recurring"],
+          ["available_duration_secs", "scheduled"]
+        ]
+      }
+    },
+    "mood": {
+      "table": "mood",
+      "fields": {
+        "mood": { "class": "text", "required": true },
+        "body": { "class": "text" },
+        "time": { "class": "int" },
+        "duration": { "class": "int" },
+        "todo_id": { "class": "text", "link": "task" }
+      },
+      "cascade": [{ "kind": "tracker", "field": "mood_id", "action": "set_null" }]
+    },
+    "tracker": {
+      "table": "tracker",
+      "fields": {
+        "type": { "class": "text", "required": true, "immutable": true },
+        "score": { "class": "scalar", "required": true },
+        "time": { "class": "int", "immutable": true },
+        "mood_id": { "class": "text", "column": "mood", "link": "mood" }
+      },
+      "cascade": []
+    },
+    "completion": {
+      "table": "todo_completions",
+      "fields": {
+        "todo_id": { "class": "text", "required": true, "link": "task" },
+        "time": { "class": "int" },
+        "count": { "class": "int" }
+      },
+      "cascade": []
+    }
+  }
+}
