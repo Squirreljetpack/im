@@ -364,7 +364,7 @@ dependencies = [
 
 [[package]]
 name = "cli_boilerplate_automation"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anstream",
  "anstyle",
@@ -1001,7 +1001,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1576,7 +1576,7 @@ dependencies = [
 
 [[package]]
 name = "im"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "atty",
@@ -1612,7 +1612,7 @@ dependencies = [
 
 [[package]]
 name = "im-dynamic"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "im",
  "mimalloc",
@@ -1926,7 +1926,7 @@ checksum = "fc04a4c58212d57930a24bf47d3fa87485264a3a054e9c10e042eb373573ad3c"
 
 [[package]]
 name = "matchmaker-lib"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -1979,7 +1979,7 @@ dependencies = [
 
 [[package]]
 name = "matchmaker-partial"
-version = "0.1.4"
+version = "0.1.7"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -1987,7 +1987,7 @@ dependencies = [
 
 [[package]]
 name = "matchmaker-partial-macros"
-version = "0.1.4"
+version = "0.1.7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2980,7 +2980,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2993,7 +2993,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3589,7 +3589,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.6",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4374,15 +4374,6 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets",
 ]

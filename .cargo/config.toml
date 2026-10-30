@@ -14,6 +14,12 @@ EMBED_MODEL = "nomic"
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=-crt-static"]
 
+# The ort-sys aarch64-apple-darwin archive carries CoreML provider objects that
+# reference onnxruntime::coreml::* symbols it never defines. im only ever uses
+# the CPU provider, so resolve them lazily instead of failing the link.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-undefined,dynamic_lookup"]
+
 # Publish the only crates.io-visible crate of the workspace.
 [alias]
 "@publish" = "publish -p jiff-english"

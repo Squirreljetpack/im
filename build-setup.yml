@@ -1,0 +1,28 @@
+# Steps injected into every `build-local-artifacts` job before `dist build`
+# (wired up by `github-build-setup` in dist-workspace.toml).
+
+- name: "Fetch git-lfs objects (vendored model)"
+  run: |
+    if ! command -v git-lfs > /dev/null 2>&1; then
+      apt-get update && apt-get install -y git-lfs
+    fi
+    # Container jobs mount the workspace from the host, where the files are
+    # owned by the runner user; git then refuses to touch the repo (dubious
+    # ownership). actions/checkout only whitelists it inside its own step's
+    # temp HOME, so re-whitelist it here for the git-lfs commands.
+    git config --global --add safe.directory "$(pwd)"
+    git lfs pull
+    # Fail fast: build.rs panics if the model is below MODEL_MIN_BYTES (100MB),
+    # which is exactly what a bare LFS pointer looks like.
+    size=$(wc -c < assets/model/embed.onnx)
+    if [ "$size" -lt 100000000 ]; then
+      echo "git-lfs failed to materialize assets/model/embed.onnx (size=$size)" >&2
+      exit 1
+    fi
+  shell: "bash"
+
+- name: "Set Windows MSVC linker flags"
+  if: "runner.os == 'Windows'"
+  run: |
+    echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=-C target-feature=-crt-static" >> $GITHUB_ENV
+  shell: "bash"
