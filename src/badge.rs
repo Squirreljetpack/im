@@ -306,8 +306,9 @@ pub fn recurring_window_badge(
     if crate::task::is_task_done(task.target_count, task.completions) {
         return ('✓', *colors.last().unwrap_or(&CtColor::Reset));
     }
-    // No expired state: today-view window rows carry the task's unscoped
-    // last completion in `end_time`, not the expiry.
+    // No expired state: the row is already scoped to one availability
+    // window, and its `window_end` is capped at the task's expiry, so
+    // `now >= window_end` covers the passed/expired case.
     let color = recurring_badge_color(
         count,
         task.target_count,

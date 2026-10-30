@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use sqlx::{FromRow, Row, SqlitePool};
+use sqlx::{Row, SqlitePool};
 
 use super::Id;
 use super::entries::fetch_completions_between;
@@ -353,7 +353,8 @@ fn settle(out: &mut Vec<(i64, i32, i32)>, groups: &mut Vec<(i64, i32)>, state: b
 /// math: a raw `start_time + duration >= period_start` comparison would
 /// degenerate to "every task ever started" for old start times. When
 /// `end_time` is set, the last window is truncated at the expiry and
-/// windows after it don't count.
+/// windows starting at or after it are skipped (their end would precede
+/// their start).
 fn recurring_windows_in_period(
     task: &TaskRow,
     period_start: i64,
@@ -394,6 +395,12 @@ fn recurring_windows_in_period(
         if w_start > period_end {
             break;
         }
+        // A window starting at or after the expiry is empty: truncation at
+        // `end_time` would put its end before its start. Windows are
+        // ascending, so the rest are too.
+        if task.end_time.is_some_and(|end| w_start >= end) {
+            break;
+        }
         let w_end_unbounded = w_start_z
             .checked_add(span)
             .map(|z| z.timestamp().as_second())
@@ -412,33 +419,22 @@ fn recurring_windows_in_period(
     windows
 }
 
-/// A recurring task row plus its unscoped last completion — the today-view
-/// window fetch returns it so each window row can carry the unscoped last
-/// in `end_time`.
-#[derive(Debug, FromRow)]
-struct RecurringTaskRow {
-    #[sqlx(flatten)]
-    task: TaskRow,
-    unscoped_last: Option<i64>,
-}
 
 /// Per-availability-window rows for every recurring task with a window
 /// intersecting `[period_start, period_end]` — the today-view recurring
-/// fetch (all variants). One [`RecurringWindow`] per intersecting window;
-/// the view decides whether to keep them all (All) or only the next per
-/// task (B). Completions are scoped per window's interval (sum + most
-/// recent completion time), matching the interval-scoped completion
-/// queries elsewhere (D8). Expired tasks (`end_time` passed before the
-/// period) are excluded, they have no windows in it.
+/// fetch. One [`RecurringWindow`] per intersecting window; the view
+/// decides whether to keep them all or only the earliest per task (see
+/// `recurring_window_scan`). Completions are scoped per window's interval
+/// (sum + most recent completion time), matching the interval-scoped
+/// completion queries elsewhere (D8). Expired tasks (`end_time` passed
+/// before the period) are excluded, they have no windows in it.
 pub async fn fetch_recurring_windows_for_period(
     pool: &SqlitePool,
     period_start: i64,
     period_end: i64,
 ) -> Result<Vec<RecurringWindow>> {
-    let tasks = sqlx::query_as::<_, RecurringTaskRow>(
-        r#"SELECT t.*, NULL AS completions, NULL AS last_time,
-                  (SELECT MAX(tc.time) FROM todo_completions tc
-                       WHERE tc.todo_id = t.id AND tc.count > 0) AS unscoped_last
+    let tasks = sqlx::query_as::<_, TaskRow>(
+        r#"SELECT t.*, NULL AS completions, NULL AS last_time
            FROM todos t
            WHERE t.interval_secs IS NOT NULL
            AND (t.end_time IS NULL OR t.end_time > ?)
@@ -452,8 +448,7 @@ pub async fn fetch_recurring_windows_for_period(
     .context("Failed to fetch recurring tasks for period")?;
 
     let mut windows = Vec::new();
-    for row in &tasks {
-        let task = &row.task;
+    for task in &tasks {
         let wins = recurring_windows_in_period(task, period_start, period_end);
         if wins.is_empty() {
             continue;
@@ -489,10 +484,6 @@ pub async fn fetch_recurring_windows_for_period(
             let mut task = task.clone();
             task.completions = Some(count);
             task.last_time = last_time;
-            // The window row's `end_time` carries the task's unscoped last
-            // completion (the today view doesn't use the expiry; the window
-            // geometry above was computed against the real end_time).
-            task.end_time = row.unscoped_last;
             windows.push(RecurringWindow {
                 task,
                 window_start: *w_start,

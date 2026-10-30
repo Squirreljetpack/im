@@ -28,10 +28,11 @@ fn date_line(ts: i64) -> Line<'static> {
     .alignment(Alignment::Right)
 }
 
-/// Build the preview pane lines for a task row. With `today`, the row is
-/// a today-view entry row: for recurring tasks `end_time` carries the
-/// unscoped last completion (not the expiry), so `last` is read from it
-/// and the `ends` field is skipped. `preview.show_last_when_done` controls
+/// Build the preview pane lines for a task row. `window` is the
+/// availability window of a today-view recurring row when a window row is
+/// selected: `next` is then scoped to that window (the following window
+/// opens one interval after it) and an active window also shows the time
+/// `remaining` until it closes. `preview.show_last_when_done` controls
 /// whether done rows still show their `last` field (`last:` is otherwise
 /// shown only while the task is not done). `tree` is the selected task's
 /// task tree (loaded on selection change): when the task has children,
@@ -45,8 +46,9 @@ fn date_line(ts: i64) -> Line<'static> {
 /// - the task name, indented, white, italic;
 /// - a blank line, then the fields (`id`, `priority`, `creation`/`due` for
 ///   oneshot, `start` for scheduled, and the recurring metadata (`next`,
-///   `interval`, `duration`, plus `ends`/`optional` when set / `duration`,
-///   `state`) as `field: value` lines with yellow lowercase field names;
+///   `remaining` while a window row is active, `interval`, `duration`, plus
+///   `ends`/`optional` when set / `state`) as `field: value` lines with
+///   yellow lowercase field names;
 /// - the progress bar for counted tasks (a blank line on each side), then
 ///   the body when nonempty (a blank line, then the body indented two
 ///   spaces), then the children subtree when the task has any (a blank
@@ -77,7 +79,7 @@ fn task_row_text(config: &crate::config::Config, task: &crate::db::TaskRow, body
 
 pub fn build_preview(
     task: &crate::db::TaskRow,
-    today: bool,
+    window: Option<&crate::db::RecurringWindow>,
     config: &crate::config::Config,
     linked_moods: &[crate::db::MoodRow],
     axes: Option<&crate::color::ColorAxes>,
@@ -136,16 +138,10 @@ pub fn build_preview(
         ]));
     }
     // The last completion on the task. Done rows show it only when
-    // `preview.show_last_when_done` is set (the default). Today-view
-    // recurring rows carry the unscoped last completion in `end_time`
-    // (their `last_time` is window-scoped); everywhere else `last_time` is
-    // unscoped for recurring rows too.
+    // `preview.show_last_when_done` is set (the default). Window rows carry
+    // the completion scoped to their interval in `last_time`.
     if !task.is_done() || config.preview.show_last_when_done {
-        let last = if today && task.is_recurring() {
-            task.end_time
-        } else {
-            task.last_time
-        };
+        let last = task.last_time;
         if let Some(last) = last {
             lines.push(field_line(
                 "last",
@@ -155,16 +151,23 @@ pub fn build_preview(
     }
 
     if task.is_recurring() {
-        // Recurring tasks show when the next interval opens instead of
-        // a fixed start time.
         if let Some(st) = task.start_time {
-            let now = date::now();
-            let next = match task.interval_span() {
-                Some(span) if crate::date::span_rough_seconds(span) > 0.0 => {
+            let next = match (window, task.interval_span()) {
+                // A window row scopes `next` to its own interval: the
+                // following window opens one interval after this row's
+                // window start.
+                (Some(w), Some(span)) if crate::date::span_rough_seconds(span) > 0.0 => {
+                    crate::date::interval_end_unix_secs(w.window_start, span, w.window_start)
+                        .unwrap_or(w.window_end)
+                }
+                // Otherwise the next interval opens at the end of the
+                // interval containing now (the anchor itself while it is
+                // still ahead).
+                (None, Some(span)) if crate::date::span_rough_seconds(span) > 0.0 => {
+                    let now = date::now();
                     if now <= st {
                         st
                     } else {
-                        // Next interval start = end of the current interval.
                         crate::date::interval_end_unix_secs(st, span, now).unwrap_or(st)
                     }
                 }
@@ -174,6 +177,20 @@ pub fn build_preview(
                 "next",
                 date::format_human_datetime(next, config.preview.named_months),
             ));
+        }
+        if let Some(w) = window {
+            let now = date::now();
+            if now >= w.window_start && now < w.window_end {
+                // Minute granularity, except for windows shorter than 10
+                // minutes, where seconds are needed to be useful.
+                let remaining = (w.window_end - now).max(0);
+                let granular = if w.window_end - w.window_start < 600 {
+                    remaining
+                } else {
+                    remaining - remaining % 60
+                };
+                lines.push(field_line("remaining", date::format_duration(granular)));
+            }
         }
     } else if task.is_scheduled() {
         // Scheduled tasks show the window start.
@@ -234,9 +251,7 @@ pub fn build_preview(
         if let Some(avail) = task.available_duration_secs {
             lines.push(field_line("duration", date::format_duration(avail)));
         }
-        // Today-view rows carry the unscoped last completion in `end_time`
-        // instead of the expiry — no `ends` field there.
-        if !today && let Some(ref s) = task.end_datetime(config.preview.named_months) {
+        if let Some(ref s) = task.end_datetime(config.preview.named_months) {
             lines.push(field_line("ends", s.clone()));
         }
         // The optional flag is only shown when the task is skippable.
@@ -568,26 +583,9 @@ mod tests {
     }
 
     #[test]
-    fn test_build_preview_today_recurring_last_from_end_time() {
+    fn test_build_preview_recurring_last_and_ends() {
         let task = recurring_row();
-        let lines = build_preview(&task, true, &config(), &[], None, None, None);
-        let fields = fields(&lines);
-        // `last` reads the unscoped completion carried in `end_time`, and
-        // the `ends` field is skipped (end_time is not the expiry here).
-        assert!(
-            fields.iter().any(
-                |f| f == &format!("last: {}", date::format_human_datetime(1_700_500_000, true))
-            ),
-            "expected last: from end_time, got {fields:?}"
-        );
-        assert!(!fields.iter().any(|f| f.starts_with("ends:")), "{fields:?}");
-    }
-
-    #[test]
-    fn test_build_preview_not_today_recurring_last_from_last_time() {
-        let task = recurring_row();
-        let lines = build_preview(&task, false, &config(), &[], None, None, None);
-        let fields = fields(&lines);
+        let fields = fields(&build_preview(&task, None, &config(), &[], None, None, None));
         assert!(
             fields.iter().any(
                 |f| f == &format!("last: {}", date::format_human_datetime(1_700_400_000, true))
@@ -601,13 +599,53 @@ mod tests {
         );
     }
 
+    /// A window row's preview is scoped to that window: `next` is the
+    /// following window's start, and only an active window shows a
+    /// `remaining` countdown.
     #[test]
-    fn test_build_preview_done_shows_last() {
-        let mut task = recurring_row();
-        task.completions = Some(1); // target 0 -> done
-        let fields = fields(&build_preview(
+    fn test_build_preview_recurring_window() {
+        let task = recurring_row();
+        let span = task.interval_span().unwrap();
+        let start = task.start_time.unwrap();
+        let window = crate::db::RecurringWindow {
+            task: task.clone(),
+            window_start: start,
+            window_end: start + 86_400,
+        };
+        let window_fields = fields(&build_preview(
             &task,
-            true,
+            Some(&window),
+            &config(),
+            &[],
+            None,
+            None,
+            None,
+        ));
+        let next = crate::date::interval_end_unix_secs(start, span, start).unwrap();
+        assert!(
+            window_fields
+                .iter()
+                .any(|f| f == &format!("next: {}", date::format_human_datetime(next, true))),
+            "expected window-scoped next:, got {window_fields:?}"
+        );
+        // The fixture window ended in 2023, so it is not active.
+        assert!(
+            !window_fields.iter().any(|f| f.starts_with("remaining:")),
+            "{window_fields:?}"
+        );
+
+        // An open window shows the time remaining until it closes.
+        let now = date::now();
+        let mut task = recurring_row();
+        task.start_time = Some(now - 3_600);
+        let window = crate::db::RecurringWindow {
+            task: task.clone(),
+            window_start: now - 3_600,
+            window_end: now + 3_600,
+        };
+        let active_fields = fields(&build_preview(
+            &task,
+            Some(&window),
             &config(),
             &[],
             None,
@@ -615,8 +653,19 @@ mod tests {
             None,
         ));
         assert!(
+            active_fields.iter().any(|f| f.starts_with("remaining: ")),
+            "expected remaining:, got {active_fields:?}"
+        );
+    }
+
+    #[test]
+    fn test_build_preview_done_shows_last() {
+        let mut task = recurring_row();
+        task.completions = Some(1); // target 0 -> done
+        let fields = fields(&build_preview(&task, None, &config(), &[], None, None, None));
+        assert!(
             fields.iter().any(
-                |f| f == &format!("last: {}", date::format_human_datetime(1_700_500_000, true))
+                |f| f == &format!("last: {}", date::format_human_datetime(1_700_400_000, true))
             ),
             "expected last: on a done row, got {fields:?}"
         );
@@ -910,12 +959,12 @@ mod tests {
                 .and_then(|l| l.spans.first())
                 .and_then(|s| s.style.fg)
         };
-        let lines = build_preview(&task, false, &cfg, &[], None, None, None);
+        let lines = build_preview(&task, None, &cfg, &[], None, None, None);
         assert_eq!(due_style(&lines), Some(Color::Yellow));
 
         // Overdue (end_time in the past): overdue color.
         task.end_time = Some(date::now() - 1);
-        let lines = build_preview(&task, false, &cfg, &[], None, None, None);
+        let lines = build_preview(&task, None, &cfg, &[], None, None, None);
         assert_eq!(due_style(&lines), Some(overdue));
     }
 
@@ -954,7 +1003,7 @@ mod tests {
         };
 
         let rendered: Vec<String> =
-            build_preview(&task, false, &config(), &[], None, None, Some(&tree))
+            build_preview(&task, None, &config(), &[], None, None, Some(&tree))
                 .iter()
                 .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
                 .collect();
@@ -976,7 +1025,7 @@ mod tests {
             },
         };
         let rendered: Vec<String> =
-            build_preview(&task, false, &config(), &[], None, None, Some(&bare))
+            build_preview(&task, None, &config(), &[], None, None, Some(&bare))
                 .iter()
                 .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
                 .collect();
@@ -1034,7 +1083,7 @@ mod tests {
             last_time: None,
         };
 
-        let lines = build_preview(&task, false, &config(), &[], None, Some(&parent), None);
+        let lines = build_preview(&task, None, &config(), &[], None, Some(&parent), None);
         let rendered: Vec<String> = lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
@@ -1053,7 +1102,7 @@ mod tests {
         done_parent.short_id = None;
         done_parent.completions = Some(1);
         done_parent.target_count = 1;
-        let lines = build_preview(&task, false, &config(), &[], None, Some(&done_parent), None);
+        let lines = build_preview(&task, None, &config(), &[], None, Some(&done_parent), None);
         let rendered: Vec<String> = lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
@@ -1065,7 +1114,7 @@ mod tests {
         assert_eq!(parent_line, "  parent: ✓ a very long par…");
 
         // No parent row → no `parent:` field.
-        let lines = build_preview(&task, false, &config(), &[], None, None, None);
+        let lines = build_preview(&task, None, &config(), &[], None, None, None);
         let rendered: Vec<String> = lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
@@ -1086,7 +1135,7 @@ mod tests {
             duration: None,
             todo_id: None,
         };
-        let lines = build_preview(&task, true, &config(), &[mood], None, None, None);
+        let lines = build_preview(&task, None, &config(), &[mood], None, None, None);
         let rendered: Vec<String> = lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
