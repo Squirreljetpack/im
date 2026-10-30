@@ -76,7 +76,7 @@ mimalloc = "0.1"
 dashmap = "6"
 strum = { version = "0.28", features = ["derive"] }
 strum_macros = "0.28"
-dirs = "6"
+dirs = "7"
 
 [dev-dependencies]
 # Integration tests still compute expected dates with chrono; the library
