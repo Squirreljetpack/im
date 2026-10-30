@@ -1,7 +1,7 @@
 name: macOS embed crash
 
-# Throwaway branch workflow: reproduce the `im :embed` segfault on arm64 macOS
-# and capture a symbolized backtrace. Not part of the release pipeline.
+# Throwaway branch workflow: reproduce the `im :embed` segfault that only
+# affects binaries linked with the macOS 14 SDK and run on macOS 26.
 
 on:
   workflow_dispatch:
@@ -16,13 +16,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  backtrace:
-    name: lldb (${{ matrix.os }})
+  build-14:
+    name: build on macos-14 (${{ matrix.variant }})
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, macos-26]
-    runs-on: ${{ matrix.os }}
+        variant: [flag, noflag]
+    runs-on: macos-14
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -34,81 +34,16 @@ jobs:
           sw_vers
           uname -m
           xcodebuild -version || true
-          size=$(wc -c < assets/model/embed.onnx)
-          echo "embed.onnx bytes: $size"
-          test "$size" -ge 100000000
+          test "$(wc -c < assets/model/embed.onnx)" -ge 100000000
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "."
-          key: backtrace
-
-      - name: Build with symbols
-        env:
-          CARGO_PROFILE_RELEASE_STRIP: "none"
-        run: cargo build --release -p im
-
-      - name: Run without debugger
-        continue-on-error: true
-        run: |
-          set +e
-          printf 'hello\n' | ./target/release/im :embed
-          echo "exit=$?"
-
-      - name: lldb backtrace
-        if: always()
-        run: |
-          set +e
-          sudo DevToolsSecurity -enable
-          printf 'hello\n' > /tmp/im-in.txt
-          lldb -b \
-            -o 'settings set target.input-path /tmp/im-in.txt' \
-            -o run \
-            -o 'bt all' \
-            -o 'frame select 1' \
-            -o 'register read pc lr sp x0 x1' \
-            -o quit \
-            -- ./target/release/im :embed 2>&1 | tee /tmp/im-lldb.txt
-          echo "===== lldb log ====="
-          tail -200 /tmp/im-lldb.txt
-
-      - name: Upload lldb log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: lldb-trace-${{ matrix.os }}
-          path: /tmp/im-lldb.txt
-          if-no-files-found: warn
-
-      - name: Upload binary
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: im-${{ matrix.os }}
-          path: target/release/im
-          if-no-files-found: warn
-
-  link-check:
-    name: link without dynamic_lookup (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-15, macos-26]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          lfs: true
-
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "."
-          key: no-dynamic-lookup
+          key: build14-${{ matrix.variant }}
 
       - name: Drop the aarch64-apple-darwin rustflags
+        if: matrix.variant == 'noflag'
         run: |
           python3 - <<'PY'
           import re
@@ -124,19 +59,73 @@ jobs:
           PY
           git diff -- .cargo/config.toml
 
-      - name: Link and capture undefined symbols
+      - name: Build with symbols
+        env:
+          CARGO_PROFILE_RELEASE_STRIP: "none"
+        run: cargo build --release -p im
+
+      - name: Inspect binary
+        run: |
+          file target/release/im
+          otool -l target/release/im | grep -A4 LC_BUILD_VERSION
+          echo "undefined symbols: $(nm -u target/release/im | wc -l)"
+          nm -m target/release/im | grep -i "weak external" | head -40 || true
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: im-14-${{ matrix.variant }}
+          path: target/release/im
+
+  run-26:
+    name: run on macos-26 (${{ matrix.variant }})
+    needs: build-14
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [flag, noflag]
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - name: Environment
+        run: |
+          sw_vers
+          uname -m
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: im-14-${{ matrix.variant }}
+          path: /tmp/im-14
+
+      - name: Run without debugger
         continue-on-error: true
         run: |
           set +e
-          cargo build --release -p im 2>&1 | tee /tmp/im-link.txt
-          echo "exit=${PIPESTATUS[0]}"
-          echo "===== unresolved ====="
-          grep -iE "undefined|symbol|error" /tmp/im-link.txt | tail -80
+          chmod +x /tmp/im-14/im
+          file /tmp/im-14/im
+          printf 'hello\n' | /tmp/im-14/im :embed
+          echo "exit=$?"
 
-      - name: Upload link log
+      - name: lldb backtrace
+        if: always()
+        run: |
+          set +e
+          sudo DevToolsSecurity -enable
+          printf 'hello\n' > /tmp/im-in.txt
+          lldb -b \
+            -o 'settings set target.input-path /tmp/im-in.txt' \
+            -o run \
+            -o 'bt all' \
+            -o 'frame select 1' \
+            -o quit \
+            -- /tmp/im-14/im :embed 2>&1 | tee /tmp/im-lldb.txt
+          echo "===== lldb log ====="
+          tail -120 /tmp/im-lldb.txt
+
+      - name: Upload lldb log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: link-log-${{ matrix.os }}
-          path: /tmp/im-link.txt
+          name: lldb-14-${{ matrix.variant }}
+          path: /tmp/im-lldb.txt
           if-no-files-found: warn
