@@ -152,18 +152,32 @@ pub fn recurring_available(task: &TaskRow, now: i64) -> bool {
     }
 }
 
+/// A row from the completed-on merge. Each row covers one interval with a
+/// completion in the day window (recurring tasks) or one task (everything
+/// else). `interval` is the span the task's sum and `last_time` are scoped to;
+/// `day_last` is the newest completion in the day within that interval — the
+/// row's time label and sort key. The task's `last_time` is the newest
+/// completion in `interval` (the preview's `last:`), which can fall outside
+/// the viewed day.
+pub struct CompletedOnRow {
+    pub task: TaskRow,
+    pub interval: Option<(i64, i64)>,
+    pub day_last: Option<i64>,
+}
+
 /// Tasks with a completion entry in `[day_start, day_end)` — the
-/// "completed today" fetch for the today view. A recurring row's completion
-/// sum is scoped to the interval containing its last completion in the day
-/// (tiling backward past `start_time`, so completions logged before a
-/// moved-forward start still count); other rows keep the day-window sum.
-/// `last_time` is the most recent completion timestamp within the day
-/// window (the time label + sort key for the merged row).
+/// "completed today" fetch for the today view. A recurring task yields one row
+/// per interval that has a completion in the day (tiling backward past
+/// `start_time`, so completions logged before a moved-forward start still
+/// count); the recurring sum is scoped to that interval. Other rows yield one
+/// row per task with the day-window sum. `day_last` is the newest in-day
+/// completion for the row's interval, while the task's `last_time` is the
+/// newest completion in that interval.
 pub async fn fetch_tasks_completed_on(
     pool: &SqlitePool,
     day_start: i64,
     day_end: i64,
-) -> Result<Vec<TaskRow>> {
+) -> Result<Vec<CompletedOnRow>> {
     let tasks = sqlx::query_as::<_, TaskRow>(
         r#"SELECT t.*, NULL AS completions, NULL AS last_time
            FROM todos t
@@ -181,45 +195,84 @@ pub async fn fetch_tasks_completed_on(
     .context("Failed to fetch tasks completed today")?;
 
     if tasks.is_empty() {
-        return Ok(tasks);
+        return Ok(Vec::new());
     }
 
     // All rows, not just the day's: a recurring row's interval can reach
     // outside the day window (and before `start_time`).
-    let rows = fetch_completions_for_tasks(pool, &tasks).await?;
-    Ok(tasks
-        .into_iter()
-        .map(|task| {
-            let rows = rows.get(&task.id).cloned().unwrap_or_default();
-            // The day-window last completion (the time label).
-            let last_time = rows
-                .iter()
-                .filter(|c| c.time >= day_start && c.time < day_end)
-                .map(|c| c.time)
-                .max();
-            let completions = if task.is_recurring() {
-                last_time.and_then(|at| {
-                    interval_containing_at(&task, at)
-                        .and_then(|(start, end)| completion_sum_between(&task, &rows, start, end))
-                })
-            } else {
-                // Non-recurring rows stay day-windowed: a oneshot's count is
-                // the day's completions, and a scheduled task holds one state
-                // row.
-                let day_rows: Vec<CompletionRow> = rows
-                    .iter()
-                    .filter(|c| c.time >= day_start && c.time < day_end)
-                    .cloned()
-                    .collect();
-                completion_sum(&task, &day_rows)
-            };
-            TaskRow {
-                completions,
-                last_time,
-                ..task
+    let by_task = fetch_completions_for_tasks(pool, &tasks).await?;
+    let mut completed = Vec::new();
+    for task in tasks {
+        let rows = by_task.get(&task.id).cloned().unwrap_or_default();
+        let day_rows: Vec<CompletionRow> = rows
+            .iter()
+            .filter(|c| c.time >= day_start && c.time < day_end)
+            .cloned()
+            .collect();
+
+        if task.is_recurring() {
+            // One row per interval: the display is per interval and the
+            // recurring-window fetch keys windows by interval too, so the
+            // merge can compare them directly. A completion before
+            // `start_time` belongs to a negative-index interval and still
+            // gets a row.
+            let mut groups: std::collections::BTreeMap<
+                Option<i64>,
+                (Option<(i64, i64)>, Vec<CompletionRow>),
+            > = std::collections::BTreeMap::new();
+            for c in &day_rows {
+                let interval = interval_containing_at(&task, c.time);
+                groups
+                    .entry(interval.map(|(start, _)| start))
+                    .or_insert_with(|| (interval, Vec::new()))
+                    .1
+                    .push(c.clone());
             }
-        })
-        .collect())
+            for (_, (interval, interval_day_rows)) in groups {
+                // A correction-only interval is not a completion.
+                if !interval_day_rows.iter().any(|c| c.count > 0) {
+                    continue;
+                }
+                let day_last = interval_day_rows.iter().map(|c| c.time).max();
+                let (scoped, last_time) = match interval {
+                    Some((start, end)) => (
+                        completion_sum_between(&task, &rows, start, end),
+                        rows.iter()
+                            .filter(|c| c.time >= start && c.time < end)
+                            .map(|c| c.time)
+                            .max(),
+                    ),
+                    // A recurring row without an anchor has no interval; fall
+                    // back to the day window.
+                    None => (completion_sum(&task, &interval_day_rows), day_last),
+                };
+                completed.push(CompletedOnRow {
+                    interval,
+                    day_last,
+                    task: TaskRow {
+                        completions: scoped,
+                        last_time,
+                        ..task.clone()
+                    },
+                });
+            }
+        } else {
+            // Non-recurring rows stay day-windowed: a oneshot's count is
+            // the day's completions, and a scheduled task holds one state
+            // row.
+            let day_last = day_rows.iter().map(|c| c.time).max();
+            completed.push(CompletedOnRow {
+                interval: None,
+                day_last,
+                task: TaskRow {
+                    completions: completion_sum(&task, &day_rows),
+                    last_time: day_last,
+                    ..task
+                },
+            });
+        }
+    }
+    Ok(completed)
 }
 
 /// Fetch completion events in `[start, end]` (inclusive) along with their task row,
@@ -348,7 +401,9 @@ fn settle(out: &mut Vec<(i64, i32, i32)>, groups: &mut Vec<(i64, i32)>, state: b
         // the moment before it.
         let mut owed = -net;
         while owed > 0 {
-            let Some(last) = standing.last_mut() else { break };
+            let Some(last) = standing.last_mut() else {
+                break;
+            };
             let taken = owed.min(last.1);
             last.1 -= taken;
             owed -= taken;
@@ -438,7 +493,6 @@ fn recurring_windows_in_period(
     }
     windows
 }
-
 
 /// Per-availability-window rows for every recurring task with a window
 /// intersecting `[period_start, period_end]` — the today-view recurring
@@ -552,7 +606,6 @@ pub async fn fetch_completions_for_tasks(
     }
     Ok(map)
 }
-
 
 /// Completion sum over `rows`; `None` when there are no rows (the SQL
 /// `SUM` over an empty set yields NULL — the `completions IS NULL` tests

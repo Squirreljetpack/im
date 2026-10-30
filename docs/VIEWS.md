@@ -28,7 +28,7 @@ The shared `ViewVariant` enum controls the three-stage view cycle (`All → A �
 ### Completion Scoping Rules
 - **Interval Scoping**: In the pending and done task views, completion sums for recurring tasks are scoped to their current recurrence interval.
 - **Window Scoping**: In the Today View, recurring availability windows scope completions to each window's respective interval.
-- **Completed-On Rows**: The Today View's completed-on merge scopes a recurring row's sum to the interval containing its last completion in the day. The interval may begin before `start_time` when it was moved forward: the recurrence chain tiles backward from the anchor, so the earlier completions still count.
+- **Completed-On Rows**: The Today View's completed-on merge yields one row per recurring interval that has a completion in the day, scoped to that interval. The interval may begin before `start_time` when it was moved forward: the recurrence chain tiles backward from the anchor, so the earlier completions still count. A completed-on row is added only when no displayed availability window already covers the same interval, so it can appear alongside the task's window rows (for example, a completion logged before a moved-forward start). The row's time label is the day's last completion in that interval, while `last_time` (the preview's `last:`) is the newest completion in the interval — it may fall on a later day when the interval crosses midnight.
 - **Unscoped History**: The `@done:O` (`ViewVariant::B`) view sums all historical completions across all time.
 - **`last_time` Timestamp**: Matches the scope of the completion sum. In task view fetches, recurring tasks carry the unscoped last completion timestamp for sorting and the preview pane's `last:` field.
 

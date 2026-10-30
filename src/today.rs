@@ -760,12 +760,9 @@ pub async fn fetch_today_entries(
                 now_ts,
                 day_start_epoch,
             );
-            let recurring_windows = crate::db::fetch_recurring_windows_for_period(
-                pool,
-                window_scan_start,
-                horizon_end,
-            )
-            .await?;
+            let recurring_windows =
+                crate::db::fetch_recurring_windows_for_period(pool, window_scan_start, horizon_end)
+                    .await?;
 
             let mut seen_recurring = std::collections::HashSet::new();
             for w in &recurring_windows {
@@ -797,23 +794,41 @@ pub async fn fetch_today_entries(
             }
 
             // 5. Tasks with a completion entry today (All only — B does not
-            // explicitly include tasks completed today): merged over the regular
-            // rows (dedup by task_id — the completed-today row wins, time = last
-            // completion timestamp). Recurring tasks with a per-window entry
-            // (step 4) are skipped.
+            // explicitly include tasks completed today). Each completed-on row
+            // covers one interval; add it only when no window row already
+            // covers that same interval. A task can therefore show its windows
+            // and a pre-start completion side by side. Non-recurring rows
+            // replace the task's regular row (time = the day's last
+            // completion; the task's `last_time` is the newest completion in
+            // the interval the preview is scoped to).
             if show == ViewVariant::All {
+                let window_intervals: std::collections::HashSet<(Id, i64)> = entries
+                    .iter()
+                    .filter_map(|e| Some((e.task_id?, e.recurring_window.as_ref()?.window_start)))
+                    .collect();
                 let completed_today =
                     crate::db::fetch_tasks_completed_on(pool, day_start_epoch, day_end_epoch)
                         .await?;
-                for task in &completed_today {
-                    if task.is_recurring() && entries.iter().any(|e| e.task_id == Some(task.id)) {
-                        continue;
+                for row in &completed_today {
+                    let task = &row.task;
+                    if task.is_recurring() {
+                        let covered = match row.interval {
+                            Some((start, _)) => window_intervals.contains(&(task.id, start)),
+                            // No interval to compare: keep the old rule of not
+                            // duplicating a task that already has a window.
+                            None => entries.iter().any(|e| {
+                                e.task_id == Some(task.id) && e.recurring_window.is_some()
+                            }),
+                        };
+                        if covered {
+                            continue;
+                        }
                     }
-                    let last_time = task.last_time.unwrap_or(now_ts);
+                    let row_time = row.day_last.unwrap_or(now_ts);
                     let entry = TodayEntry {
                         id: None,
-                        time: last_time,
-                        time_label: today_time_label(last_time, day_start_epoch),
+                        time: row_time,
+                        time_label: today_time_label(row_time, day_start_epoch),
                         kind: EntryKind::Task(task.kind()),
                         label: task.name.clone(),
                         body: task.body.clone(),
@@ -830,9 +845,13 @@ pub async fn fetch_today_entries(
                         linked_tasks: Vec::new(),
                         duration: None,
                     };
-                    match entries.iter_mut().find(|e| e.task_id == Some(task.id)) {
-                        Some(existing) => *existing = entry,
-                        None => entries.push(entry),
+                    if task.is_recurring() {
+                        entries.push(entry);
+                    } else {
+                        match entries.iter_mut().find(|e| e.task_id == Some(task.id)) {
+                            Some(existing) => *existing = entry,
+                            None => entries.push(entry),
+                        }
                     }
                 }
             }
