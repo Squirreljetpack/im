@@ -1,8 +1,8 @@
 name: macOS embed crash
 
-# Throwaway branch workflow: fat LTO drops compiler-rt's
-# ___isPlatformVersionAtLeast, and -undefined,dynamic_lookup turns that into a
-# null call at ORT env creation. Test forcing the symbol vs other LTO modes.
+# Throwaway branch workflow: fat LTO omits compiler-rt, leaving
+# ___isPlatformVersionAtLeast undefined. Test explicitly linking
+# libclang_rt.osx.a from the active Xcode toolchain.
 
 on:
   workflow_dispatch:
@@ -17,94 +17,51 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: build ${{ matrix.name }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: u-fat
-            lto: fat
-            flags: "-C link-arg=-Wl,-u,___isPlatformVersionAtLeast"
-          - name: u-fat-flag
-            lto: fat
-            flags: >-
-              -C link-arg=-Wl,-undefined,dynamic_lookup
-              -C link-arg=-Wl,-u,___isPlatformVersionAtLeast
-          - name: thin
-            lto: thin
-            flags: "-C link-arg=-Wl,-undefined,error"
-          - name: off
-            lto: "off"
-            flags: "-C link-arg=-Wl,-undefined,error"
-          - name: fat-strict
-            lto: fat
-            flags: "-C link-arg=-Wl,-undefined,error"
-            allow_failure: true
+  build-end:
+    name: build with compiler-rt as input
     runs-on: macos-26
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
           lfs: true
-
-      - name: Environment
-        run: |
-          sw_vers
-          test "$(wc -c < assets/model/embed.onnx)" -ge 100000000
-
+      - run: test "$(wc -c < assets/model/embed.onnx)" -ge 100000000
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "."
-          key: ${{ matrix.name }}
-
-      - name: Build with symbols
-        continue-on-error: ${{ matrix.allow_failure == true }}
+          key: crt-end
+      - name: Build
         env:
           CARGO_PROFILE_DIST_STRIP: "none"
-          CARGO_PROFILE_DIST_LTO: ${{ matrix.lto }}
-          RUSTFLAGS: ${{ matrix.flags }}
+          CARGO_PROFILE_DIST_LTO: fat
         run: |
-          set -o pipefail
-          cargo build --profile dist --target aarch64-apple-darwin -p im \
-            2>&1 | tee /tmp/im-build.txt
+          set -e
+          RT=$("$(xcrun --find clang)" -print-resource-dir)
+          RT=$RT/lib/darwin/libclang_rt.osx.a
+          ls -l "$RT"
+          export RUSTFLAGS="-C link-arg=$RT -C link-arg=-Wl,-undefined,error"
+          cargo build --profile dist --target aarch64-apple-darwin -p im
+          llvm-nm -m target/aarch64-apple-darwin/dist/im |
+            grep isPlatformVersionAtLeast || true
           mkdir -p /tmp/out
           cp target/aarch64-apple-darwin/dist/im /tmp/out/im
-          llvm-nm -m /tmp/out/im |
-            grep "isPlatformVersionAtLeast" || true
-
-      - name: Upload binary
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: im-${{ matrix.name }}
-          path: |
-            /tmp/out/im
-            /tmp/im-build.txt
-          if-no-files-found: warn
+          name: im-crt-end
+          path: /tmp/out/im
 
-  run:
-    name: run ${{ matrix.name }} on macos-26
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: u-fat
-          - name: u-fat-flag
-          - name: thin
-          - name: off
+  run-end:
+    name: run compiler-rt-as-input
+    needs: build-end
     runs-on: macos-26
     timeout-minutes: 20
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: im-${{ matrix.name }}
+          name: im-crt-end
           path: /tmp/im-test
-
-      - name: Run without debugger
+      - name: Run
         continue-on-error: true
         run: |
           set +e
@@ -112,31 +69,55 @@ jobs:
           printf 'hello\n' | /tmp/im-test/im :embed
           echo "exit=$?"
 
-      - name: lldb backtrace
-        if: always()
+  build-force:
+    name: build with force_load compiler-rt
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - run: test "$(wc -c < assets/model/embed.onnx)" -ge 100000000
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+          key: crt-force
+      - name: Build
+        env:
+          CARGO_PROFILE_DIST_STRIP: "none"
+          CARGO_PROFILE_DIST_LTO: fat
+        run: |
+          set -e
+          RT=$("$(xcrun --find clang)" -print-resource-dir)
+          RT=$RT/lib/darwin/libclang_rt.osx.a
+          ls -l "$RT"
+          export RUSTFLAGS="-C link-arg=-Wl,-force_load,$RT"
+          export RUSTFLAGS="$RUSTFLAGS -C link-arg=-Wl,-undefined,error"
+          cargo build --profile dist --target aarch64-apple-darwin -p im
+          llvm-nm -m target/aarch64-apple-darwin/dist/im |
+            grep isPlatformVersionAtLeast || true
+          mkdir -p /tmp/out
+          cp target/aarch64-apple-darwin/dist/im /tmp/out/im
+      - uses: actions/upload-artifact@v4
+        with:
+          name: im-crt-force
+          path: /tmp/out/im
+
+  run-force:
+    name: run force_load compiler-rt
+    needs: build-force
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: im-crt-force
+          path: /tmp/im-test
+      - name: Run
+        continue-on-error: true
         run: |
           set +e
-          sudo DevToolsSecurity -enable
-          printf 'hello\n' > /tmp/im-in.txt
-          cat > /tmp/lldb.cmds <<'EOF'
-          settings set target.input-path /tmp/im-in.txt
-          settings set interpreter.stop-command-source-on-error false
-          run
-          process status
-          register read pc lr sp x0 x1
-          image lookup -a $lr
-          thread backtrace all
-          bt all
-          quit
-          EOF
-          lldb -b -s /tmp/lldb.cmds -- /tmp/im-test/im :embed \
-            2>&1 | tee /tmp/im-lldb.txt
-          tail -80 /tmp/im-lldb.txt
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: lldb-${{ matrix.name }}
-          path: /tmp/im-lldb.txt
-          if-no-files-found: warn
+          chmod +x /tmp/im-test/im
+          printf 'hello\n' | /tmp/im-test/im :embed
+          echo "exit=$?"
