@@ -1,3 +1,10 @@
+## [0.2.8] - 2026-10-30
+
+### 🐛 Bug Fixes
+
+- *(macos)* Link compiler-rt explicitly under fat LTO, fixing a startup
+  segfault in ONNX Runtime environment creation (`im :embed`, `im :color`).
+
 ## [0.2.7] - 2026-10-30
 
 ### 🚀 Features
