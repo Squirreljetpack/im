@@ -32,14 +32,3 @@
     echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=-C target-feature=-crt-static" >> $GITHUB_ENV
 
 
-# The ort-sys aarch64-apple-darwin archive carries CoreML provider objects that
-# reference onnxruntime::coreml::* symbols it never defines; im only ever uses
-# the CPU provider, so those are resolved lazily instead of failing the link.
-# This has to travel through RUSTFLAGS because dist exports that variable, which
-# makes cargo ignore the [target.*] rustflags in .cargo/config.toml.
-- name: Resolve the unused CoreML symbols lazily
-  if: ${{ contains(matrix.targets, 'aarch64-apple-darwin') }}
-  shell: bash
-  run: |
-    flags="-C link-arg=-Wl,-undefined,dynamic_lookup"
-    echo "RUSTFLAGS=${RUSTFLAGS} ${flags}" >> $GITHUB_ENV
