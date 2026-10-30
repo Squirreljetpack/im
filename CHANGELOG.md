@@ -1,4 +1,22 @@
-## [Unreleased]
+## [0.2.6] - 2026-10-29
+
+### 🚀 Features (sync)
+
+- `im :auth register|login|status|logout` and `im :sync` (plus
+  `im :sync --reset`) sync a database against a Cloudflare Worker
+  (`sync-server/`): a per-user Durable Object holds the log, D1 the accounts.
+- Concurrent edits merge per field (last write wins) instead of per entity; a
+  push breaks at entity boundaries, so a create carries all of its cells.
+- Deletes are terminal and slot losers become tombstones, so two devices that
+  edit the same field converge instead of duplicating rows.
+- Entity ids are UUIDv7, so a row created on any device is unique without a
+  round trip; local `short_id`s stay a per-device projection.
+- The server address comes from `[sync] server` in the client config
+  (`IM_SYNC_URL` overrides it for one command); the account is stored apart
+  from the sync state, so `im :sync --reset` does not sign you out.
+- A database from an older version (INTEGER keys) is copied aside and
+  recreated empty instead of being written with the wrong key type; an
+  unreadable file is quarantined the same way.
 
 ### 💥 Breaking changes (tracker rework)
 
