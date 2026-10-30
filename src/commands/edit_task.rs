@@ -218,38 +218,36 @@ pub(super) async fn handle_task_edit(
                     interval_secs.map(|s| crate::date::format_span(&crate::date::db_to_span(s)));
                 if let Ok(s) = crate::prompts::prompt_interval(cur.as_deref()) {
                     let span = crate::date::parse_span(&s)?;
-                    interval_secs = Some(crate::date::span_to_db(&span));
+                    let packed = crate::date::span_to_db(&span);
+                    interval_secs = Some(packed);
+                    // A duration that no longer fits the new interval means
+                    // always available.
+                    available_duration_secs = crate::task::availability_within_interval(
+                        available_duration_secs,
+                        crate::date::db_span_rough_secs(packed),
+                    );
                 }
             }
             "available_duration" => {
                 let (interval_label, rough_secs) = if let Some(iv) = interval_secs {
-                    let span = crate::date::db_to_span(iv);
                     (
-                        crate::date::format_span(&span),
-                        Some(crate::date::span_rough_seconds(span) as i64),
+                        crate::date::format_span(&crate::date::db_to_span(iv)),
+                        Some(crate::date::db_span_rough_secs(iv)),
                     )
                 } else {
                     ("1 hour".to_string(), None)
                 };
                 let cur = available_duration_secs.map(crate::date::format_duration);
-                if let Ok(s) = crate::prompts::prompt_available_duration(
+                if let Ok(dur) = crate::prompts::prompt_available_duration(
                     &interval_label,
                     cur.as_deref(),
                     rough_secs,
                 ) {
-                    if s.trim().is_empty() {
-                        available_duration_secs = None;
-                    } else {
-                        let dur = crate::date::parse_duration_secs(&s)?;
-                        if let Some(limit) = rough_secs {
-                            if dur >= limit {
-                                available_duration_secs = None;
-                            } else {
-                                available_duration_secs = Some(dur);
-                            }
-                        } else {
-                            available_duration_secs = Some(dur);
-                        }
+                    // Blank means "always" for a recurring task, whose
+                    // availability can be unbounded. A scheduled window is
+                    // mandatory, so a blank answer keeps the current duration.
+                    if rough_secs.is_some() || dur.is_some() {
+                        available_duration_secs = dur;
                     }
                 }
             }
