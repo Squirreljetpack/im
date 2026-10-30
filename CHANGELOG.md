@@ -1,3 +1,28 @@
+## [0.2.9] - 2026-10-30
+
+### 🚀 Features
+
+- The recurring creation menu can edit start time, interval, and available
+  duration, and the scheduled menu start time and available duration, so a
+  value typed on the way in is corrected without cancelling. A duration at or
+  beyond the interval means unbounded availability (`always`) instead of a
+  validation error, editing the interval re-clamps the duration, and a blank
+  answer keeps a scheduled task's current duration.
+
+### 🐛 Bug Fixes
+
+- Today view: completed-on rows merge per interval instead of per task, so a
+  completion logged in an interval without an availability window — before a
+  moved-forward `start_time`, say — is no longer dropped when the task also
+  has window rows. Each row's sum, `last:` and time label are scoped to its
+  own interval.
+
+### 💥 Breaking changes
+
+- Utility commands moved under `:tool` (`:tool config|embed|mood|clear`) and
+  account commands under `:sync` (`:sync register|login|status|logout`).
+
+
 ## [0.2.8] - 2026-10-30
 
 ### 🐛 Bug Fixes
