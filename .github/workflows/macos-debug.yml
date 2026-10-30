@@ -98,9 +98,11 @@ jobs:
           printf 'hello\n' > /tmp/im-in.txt
           lldb -b \
             -o 'settings set target.input-path /tmp/im-in.txt' \
+            -o 'settings set interpreter.stop-command-source-on-error false' \
             -o run \
             -o 'process status' \
             -o 'register read pc lr sp x0 x1' \
+            -o 'image lookup -a $lr' \
             -o 'thread backtrace all' \
             -o 'bt all' \
             -o quit \
@@ -139,9 +141,11 @@ jobs:
           printf 'hello\n' > /tmp/im-in.txt
           lldb -b \
             -o 'settings set target.input-path /tmp/im-in.txt' \
+            -o 'settings set interpreter.stop-command-source-on-error false' \
             -o run \
             -o 'process status' \
             -o 'register read pc lr sp x0 x1' \
+            -o 'image lookup -a $lr' \
             -o 'thread backtrace all' \
             -o 'bt all' \
             -o quit \
