@@ -9,9 +9,11 @@ Ukrainian. It is intentionally a small pattern language, not natural-language
 parsing. All examples below were verified against the actual parser with a
 fixed base of **2024-03-14 12:34:56 UTC (a Thursday)**; month-clamp and
 same-day examples use the stated base. The port reproduces chrono-english's
-grammar and error strings exactly, with three additions: `eod`/`end`/`start`
-time specifiers, `hence`/`later` interval markers, and a normalized 12-hour
-clock (`12am` = midnight, `12pm` = noon).
+grammar and error strings exactly, with four additions: `eod`/`end`/`start`
+time specifiers, the interval markers
+(`ago`/`past`/`hence`/`next`/`future`/`after`/`later`/`from <base>`), a
+normalized 12-hour clock (`12am` = midnight, `12pm` = noon), and day-name
+keywords snapping to the start of their day instead of the base time-of-day.
 
 ## Grammar in one line
 
@@ -21,14 +23,16 @@ date-part  := now|today|yesterday|tomorrow|y|yesterweek
             | [next|last] (weekday | month | day month | day/month)
             | [next|last] month-name day | day month-name [year]
             | year | year-month-day | day/month[/year] | month-name day[, year]
-            | [+|-]N unit ["ago"|"hence"|"later"] | -N
+            | [+|-]N unit [marker] | N unit "from" [date-part] [time-part] | -N
 time-part  := H[:MM[:SS[.ffff]]] [am|pm|Z|±HH[:MM]] | H.MM [am|pm] | H [am|pm]
             | eod | end | start
 ```
 
 ## Lexical rules
 
-- Weekdays, months, time units, `ago`/`hence`/`later` and `eod`/`end`/`start`
+- Weekdays, months, time units, the markers
+  `ago`/`past`/`hence`/`next`/`future`/`after`/`later`/`from` and
+  `eod`/`end`/`start`
   are case-insensitive (`friday` = `FRIDAY`, `EOD` = `eod`). Weekday and
   month names match as **initial substrings** of the full name, minimum
   three letters (`mon`, `mond`, `monday`, `tues`, `decemb`, `sept` all
@@ -128,13 +132,19 @@ Without a year these are relative: they default to the current year and
 | --- | --- | --- |
 | `3h` / `3 hours` | 2024-03-14 15:34:56 | seconds/minutes/hours: **keep base time-of-day** |
 | `3 hours ago` | 2024-03-14 09:34:56 | `ago` negates (case-insensitive) |
-| `3 hours later` | 2024-03-14 15:34:56 | `later`/`hence` = explicit future, keep sign |
+| `3 hours later` | 2024-03-14 15:34:56 | `later` keeps the sign (delta) |
 | `-3h` | 2024-03-14 09:34:56 | leading `-` negates |
 | `2d` / `2 days` | 2024-03-16 12:34:56 | days/weeks: **keep base time-of-day** when no time given |
 | `2 days 03:00` | 2024-03-16 03:00 | day/weeks may take an explicit time part |
 | `2 days ago 15:00` | 2024-03-12 15:00 | |
 | `2 days later 15:00` | 2024-03-16 15:00 | marker + time part |
-| `3 days hence` | 2024-03-17 12:34:56 | `hence` = `later` |
+| `3 days hence` / `3 days next` / `3 days future` | 2024-03-17 00:00 | future, **snapped to the day start** |
+| `3 days past` | 2024-03-11 00:00 | past, **snapped to the day start** |
+| `3 days after` | 2024-03-17 12:34:56 | future, delta |
+| `3 days from now` | 2024-03-17 12:34:56 | shift the operand (`now`) → delta |
+| `3 days from today` | 2024-03-17 00:00 | shift the operand (`today`, midnight) → midnight |
+| `3 days from 2pm` | 2024-03-17 14:00 | shift the operand (`2pm` today) → 14:00 |
+| `1 week past 9am` | 2024-03-07 09:00 | an explicit time part wins over the snap |
 | `-1 week` | 2024-03-07 12:34:56 | |
 | `-3` | 2024-03-11 12:34:56 | bare negative number = that many **days** ago (`-3` = 3 days ago, never a year) |
 | `3 weeks` | 2024-04-04 12:34:56 | |
@@ -169,6 +179,27 @@ The sign marker is the sole sign control: `-2 days ago` and `-2 days hence`
 are **errors** (the leading `-` already consumed the sign). A leading `-`
 must always be consumed: `-3pm`, `-march`, `-yesterday`, `-eod` are errors.
 Compound intervals (`3 months 2 days`, `1 hour 30 minutes`) are **errors**.
+
+The marker picks both the direction and the alignment:
+
+| marker | direction | missing time part |
+| --- | --- | --- |
+| (none) | future | base time-of-day |
+| `ago` | past | base time-of-day |
+| `past` | past | **00:00 of the day** |
+| `after` / `later` | future | base time-of-day |
+| `hence` / `next` / `future` | future | **00:00 of the day** |
+
+So `3 days past` is `3 days ago` aligned to the day, and `3 days hence` is
+`3 days later` aligned to the day; an explicit time part (`3 days past 9am`)
+or day aligner (`3 days hence eod`) overrides the snap. Second-class units
+have no day to name, so `3 hours hence` is simply `3 hours` (`3 hours later`).
+
+`N unit from <base>` is the explicit-base form: the operand is resolved as a
+date expression (defaulting to today when it is a bare time) and the interval
+is added to it, which is how the operand's own alignment carries over.
+Nothing may follow the operand (`3 days from now 9am` → trailing characters),
+and `from` needs an operand (`3 days from` → error).
 
 ## Times
 

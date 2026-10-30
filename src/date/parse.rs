@@ -81,6 +81,26 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_datetime_day_keywords_align_to_day_start() {
+        // Day-name keywords name a whole day, so a start time of "today"
+        // means the beginning of today, not the current instant.
+        for expr in ["today", "yesterday", "tomorrow", "yesterday start"] {
+            let ts = parse_datetime(expr, crate::date::DATE_DIALECT).unwrap();
+            assert_eq!(ts, crate::date::day_start(ts), "{} not day-aligned", expr);
+        }
+        // `now` is the instant itself, and interval forms stay offsets from
+        // it (git's parser draws the same line).
+        let now = crate::date::now();
+        let parsed_now = parse_datetime("now", crate::date::DATE_DIALECT).unwrap();
+        assert!((parsed_now - now).abs() <= 2, "now drifted by {}", parsed_now - now);
+        let ago = parse_datetime("3 days ago", crate::date::DATE_DIALECT).unwrap();
+        assert!(
+            (ago - (now - 3 * 86_400)).abs() <= 2,
+            "3 days ago is not a 3-day offset from now"
+        );
+    }
+
+    #[test]
     fn test_parse_datetime_jiff_english_extensions() {
         // eod/end/start and hence/later are available everywhere a
         // @<time>/@<date> argument is accepted.
