@@ -1,3 +1,21 @@
+## [0.2.7] - 2026-10-30
+
+### 🚀 Features
+
+- `im :color` without a mood lists every anchor mood of the moods file with
+  a swatch of its color, one per line; `im :color <mood>` keeps the full
+  pipeline diagnostic.
+- Today view: `[today_view] swap_all_and_due_recurring_task_views` trades the
+  `All` and `Due` recurring-task displays. `Due` is anchored at now (earliest
+  window intersecting the horizon, skipping closed windows), and previews are
+  scoped to the row's window instead of sharing the whole day.
+- No phantom availability windows past a recurring task's expiry, and
+  today-view `ends` shows the task's real expiry again.
+
+### 🐛 Bug Fixes
+
+- *(embedding)* Pin the CPU EP on macOS
+
 ## [0.2.6] - 2026-10-29
 
 ### 🚀 Features (sync)
