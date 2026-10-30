@@ -1,8 +1,8 @@
 name: macOS embed crash
 
-# Throwaway branch workflow: isolate the `im :embed` segfault that affects the
-# cargo-dist release artifact (built on macOS 14 / SDK 14.5) when run on
-# macOS 26.
+# Throwaway branch workflow: isolate the `im :embed` segfault in the
+# cargo-dist release artifact. Dist inherits release but sets fat LTO and
+# codegen-units=1; bisect which one turns the null call on.
 
 on:
   workflow_dispatch:
@@ -17,13 +17,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-dist:
-    name: dist build on ${{ matrix.os }}
+  build:
+    name: build ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, macos-26]
-    runs-on: ${{ matrix.os }}
+        include:
+          - name: dist
+            profile: dist
+            extra: ""
+          - name: release-lto-fat
+            profile: release
+            extra: "CARGO_PROFILE_RELEASE_LTO=fat"
+          - name: release-cgu1
+            profile: release
+            extra: "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1"
+    runs-on: macos-26
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -33,52 +42,53 @@ jobs:
       - name: Environment
         run: |
           sw_vers
-          xcodebuild -version || true
           test "$(wc -c < assets/model/embed.onnx)" -ge 100000000
 
       - uses: dtolnay/rust-toolchain@stable
       - name: Toolchain
         run: rustc -Vv
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "."
-          key: dist-${{ matrix.os }}
+          key: ${{ matrix.name }}
 
-      - name: Build dist profile with symbols
+      - name: Build with symbols
         env:
           CARGO_PROFILE_DIST_STRIP: "none"
+          CARGO_PROFILE_RELEASE_STRIP: "none"
         run: |
-          cargo build --profile dist --target aarch64-apple-darwin -p im
-          file target/aarch64-apple-darwin/dist/im
-          otool -l target/aarch64-apple-darwin/dist/im |
-            grep -A4 LC_BUILD_VERSION
+          set -e
+          export ${{ matrix.extra }}
+          cargo build --profile ${{ matrix.profile }} \
+            --target aarch64-apple-darwin -p im
+          mkdir -p /tmp/out
+          cp target/aarch64-apple-darwin/${{ matrix.profile }}/im /tmp/out/im
+          file /tmp/out/im
+          shasum -a 256 /tmp/out/im
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: im-dist-${{ matrix.os }}
-          path: target/aarch64-apple-darwin/dist/im
+          name: im-${{ matrix.name }}
+          path: /tmp/out/im
 
-  run-26:
-    name: run on macos-26 (${{ matrix.name }})
-    needs: build-dist
+  run:
+    name: run ${{ matrix.name }} on macos-26
+    needs: build
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: dist-14
-            artifact: im-dist-macos-14
-          - name: dist-26
-            artifact: im-dist-macos-26
+          - name: dist
+          - name: release-lto-fat
+          - name: release-cgu1
     runs-on: macos-26
     timeout-minutes: 20
     steps:
-      - name: Environment
-        run: sw_vers
-
       - uses: actions/download-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
+          name: im-${{ matrix.name }}
           path: /tmp/im-test
 
       - name: Run without debugger
@@ -86,7 +96,6 @@ jobs:
         run: |
           set +e
           chmod +x /tmp/im-test/im
-          file /tmp/im-test/im
           printf 'hello\n' | /tmp/im-test/im :embed
           echo "exit=$?"
 
@@ -96,67 +105,56 @@ jobs:
           set +e
           sudo DevToolsSecurity -enable
           printf 'hello\n' > /tmp/im-in.txt
-          lldb -b \
-            -o 'settings set target.input-path /tmp/im-in.txt' \
-            -o 'settings set interpreter.stop-command-source-on-error false' \
-            -o run \
-            -o 'process status' \
-            -o 'register read pc lr sp x0 x1' \
-            -o 'image lookup -a $lr' \
-            -o 'thread backtrace all' \
-            -o 'bt all' \
-            -o quit \
-            -- /tmp/im-test/im :embed 2>&1 | tee /tmp/im-lldb.txt
+          cat > /tmp/lldb.cmds <<'EOF'
+          settings set target.input-path /tmp/im-in.txt
+          settings set interpreter.stop-command-source-on-error false
+          run
+          process status
+          register read pc lr sp x0 x1
+          image lookup -a $lr
+          thread backtrace all
+          bt all
+          quit
+          EOF
+          lldb -b -s /tmp/lldb.cmds -- /tmp/im-test/im :embed \
+            2>&1 | tee /tmp/im-lldb.txt
           tail -160 /tmp/im-lldb.txt
 
-      - name: Upload lldb log
+      - name: Crash report
+        if: always()
+        run: |
+          set +e
+          sleep 5
+          # shellcheck disable=SC2012
+          f=$(ls -t ~/Library/Logs/DiagnosticReports/im*.ips \
+            2>/dev/null | head -1)
+          echo "report: $f"
+          [ -n "$f" ] || exit 0
+          cp "$f" /tmp/im-crash.ips
+          python3 - "$f" <<'PY'
+          import json, sys
+          lines = open(sys.argv[1]).read().splitlines()
+          body = json.loads("\n".join(lines[1:]))
+          print("exception:", body.get("exception"))
+          imgs = body.get("usedImages", [])
+          th = body["threads"][body.get("faultingThread", 0)]
+          print("thread:", th.get("name") or th.get("queue") or "?")
+          for fr in th["frames"][:40]:
+              img = imgs[fr["imageIndex"]]
+              print(
+                  f'{img.get("name", "?"):24}'
+                  f' off=0x{fr.get("imageOffset", 0):x}'
+                  f' {fr.get("symbol", "?")}'
+                  f' +{fr.get("symbolLocation", 0)}'
+              )
+          PY
+
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: lldb-${{ matrix.name }}
-          path: /tmp/im-lldb.txt
-          if-no-files-found: warn
-
-  run-official:
-    name: run official v0.2.7 asset on macos-26
-    runs-on: macos-26
-    timeout-minutes: 20
-    steps:
-      - name: Download official release asset
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p /tmp/im-official
-          gh release download v0.2.7 -R Squirreljetpack/im \
-            -p 'im-aarch64-apple-darwin.tar.xz' -D /tmp/im-official
-          tar -xJf /tmp/im-official/im-aarch64-apple-darwin.tar.xz \
-            -C /tmp/im-official
-          chmod +x /tmp/im-official/im-aarch64-apple-darwin/im
-          shasum -a 256 /tmp/im-official/im-aarch64-apple-darwin/im
-
-      - name: lldb register state
-        run: |
-          set +e
-          sudo DevToolsSecurity -enable
-          printf 'hello\n' > /tmp/im-in.txt
-          lldb -b \
-            -o 'settings set target.input-path /tmp/im-in.txt' \
-            -o 'settings set interpreter.stop-command-source-on-error false' \
-            -o run \
-            -o 'process status' \
-            -o 'register read pc lr sp x0 x1' \
-            -o 'image lookup -a $lr' \
-            -o 'thread backtrace all' \
-            -o 'bt all' \
-            -o quit \
-            -- /tmp/im-official/im-aarch64-apple-darwin/im :embed \
-            2>&1 | tee /tmp/im-lldb.txt
-          tail -160 /tmp/im-lldb.txt
-
-      - name: Upload lldb log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: lldb-official
-          path: /tmp/im-lldb.txt
+          path: |
+            /tmp/im-lldb.txt
+            /tmp/im-crash.ips
           if-no-files-found: warn
