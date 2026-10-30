@@ -153,10 +153,11 @@ pub fn recurring_available(task: &TaskRow, now: i64) -> bool {
 }
 
 /// Tasks with a completion entry in `[day_start, day_end)` — the
-/// "completed today" fetch for the today view. The completions sum is
-/// scoped to the recurring task's current interval (so the badge matches
-/// the regular recurring fetch, D8); non-recurring rows keep the unscoped
-/// sum. `last_time` is the most recent completion timestamp within the day
+/// "completed today" fetch for the today view. A recurring row's completion
+/// sum is scoped to the interval containing its last completion in the day
+/// (tiling backward past `start_time`, so completions logged before a
+/// moved-forward start still count); other rows keep the day-window sum.
+/// `last_time` is the most recent completion timestamp within the day
 /// window (the time label + sort key for the merged row).
 pub async fn fetch_tasks_completed_on(
     pool: &SqlitePool,
@@ -183,18 +184,37 @@ pub async fn fetch_tasks_completed_on(
         return Ok(tasks);
     }
 
-    let rows = fetch_completions_in_window(pool, &tasks, day_start, day_end).await?;
-    let now = crate::date::now();
+    // All rows, not just the day's: a recurring row's interval can reach
+    // outside the day window (and before `start_time`).
+    let rows = fetch_completions_for_tasks(pool, &tasks).await?;
     Ok(tasks
         .into_iter()
         .map(|task| {
             let rows = rows.get(&task.id).cloned().unwrap_or_default();
-            // Scoped sum for recurring (current interval), full otherwise.
-            let scoped = scoped_completion_sum(&task, &rows, now);
             // The day-window last completion (the time label).
-            let last_time = rows.iter().map(|c| c.time).max();
+            let last_time = rows
+                .iter()
+                .filter(|c| c.time >= day_start && c.time < day_end)
+                .map(|c| c.time)
+                .max();
+            let completions = if task.is_recurring() {
+                last_time.and_then(|at| {
+                    interval_containing_at(&task, at)
+                        .and_then(|(start, end)| completion_sum_between(&task, &rows, start, end))
+                })
+            } else {
+                // Non-recurring rows stay day-windowed: a oneshot's count is
+                // the day's completions, and a scheduled task holds one state
+                // row.
+                let day_rows: Vec<CompletionRow> = rows
+                    .iter()
+                    .filter(|c| c.time >= day_start && c.time < day_end)
+                    .cloned()
+                    .collect();
+                completion_sum(&task, &day_rows)
+            };
             TaskRow {
-                completions: scoped,
+                completions,
                 last_time,
                 ..task
             }
@@ -533,45 +553,6 @@ pub async fn fetch_completions_for_tasks(
     Ok(map)
 }
 
-/// Completion rows of the given tasks within `[start, end)` (`todo_id` →
-/// rows, by time).
-async fn fetch_completions_in_window(
-    pool: &SqlitePool,
-    tasks: &[TaskRow],
-    start: i64,
-    end: i64,
-) -> Result<std::collections::HashMap<Id, Vec<CompletionRow>>> {
-    let mut map = std::collections::HashMap::new();
-    if tasks.is_empty() {
-        return Ok(map);
-    }
-    let ids: Vec<Id> = tasks.iter().map(|t| t.id).collect();
-    let sql = format!(
-        "SELECT todo_id, time, count FROM todo_completions \
-         WHERE todo_id IN ({}) AND time >= ? AND time < ? \
-         ORDER BY time ASC",
-        ids.iter().map(|_| "?").collect::<Vec<_>>().join(",")
-    );
-    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
-    for id in &ids {
-        q = q.bind(id);
-    }
-    let rows = q
-        .bind(start)
-        .bind(end)
-        .fetch_all(pool)
-        .await
-        .context("Failed to fetch task completions")?;
-    for row in rows {
-        map.entry(row.get::<Id, _>("todo_id"))
-            .or_insert_with(Vec::new)
-            .push(CompletionRow {
-                time: row.get("time"),
-                count: row.get("count"),
-            });
-    }
-    Ok(map)
-}
 
 /// Completion sum over `rows`; `None` when there are no rows (the SQL
 /// `SUM` over an empty set yields NULL — the `completions IS NULL` tests
@@ -583,6 +564,25 @@ fn completion_sum(task: &TaskRow, rows: &[CompletionRow]) -> Option<i32> {
         None
     } else {
         task.normalize_completions(Some(rows.iter().map(|c| c.count).sum()))
+    }
+}
+
+/// Completion sum over the rows in `[start, end)`; `None` when none fall in
+/// the range.
+fn completion_sum_between(
+    task: &TaskRow,
+    rows: &[CompletionRow],
+    start: i64,
+    end: i64,
+) -> Option<i32> {
+    let scoped: Vec<&CompletionRow> = rows
+        .iter()
+        .filter(|c| c.time >= start && c.time < end)
+        .collect();
+    if scoped.is_empty() {
+        None
+    } else {
+        task.normalize_completions(Some(scoped.iter().map(|c| c.count).sum()))
     }
 }
 
@@ -601,6 +601,16 @@ fn scoped_completion_sum(task: &TaskRow, rows: &[CompletionRow], now: i64) -> Op
         }
         None => completion_sum(task, rows),
     }
+}
+
+/// The `[start, end)` interval containing `at` for a recurring task. Unlike
+/// [`crate::task::interval_start`], `at` may precede `start_time`: the chain
+/// tiles backward from the anchor, so a completion logged before a
+/// moved-forward start still belongs to the interval that ends at it. `None`
+/// for non-recurring tasks.
+fn interval_containing_at(task: &TaskRow, at: i64) -> Option<(i64, i64)> {
+    let (start, span) = (task.start_time?, task.interval_span()?);
+    crate::date::interval_slot_unix_secs(start, span, at)
 }
 
 /// The most recent moment whose progress still stands. A moment whose

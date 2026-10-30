@@ -1581,6 +1581,7 @@ dependencies = [
  "chrono",
  "cli_boilerplate_automation",
  "cliclack",
+ "console",
  "crossterm 0.29.0",
  "dashmap",
  "dirs",
