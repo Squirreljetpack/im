@@ -1,8 +1,8 @@
 name: macOS embed crash
 
-# Throwaway branch workflow: isolate the `im :embed` segfault in the
-# cargo-dist release artifact. Dist inherits release but sets fat LTO and
-# codegen-units=1; bisect which one turns the null call on.
+# Throwaway branch workflow: fat LTO drops compiler-rt's
+# ___isPlatformVersionAtLeast, and -undefined,dynamic_lookup turns that into a
+# null call at ORT env creation. Test forcing the symbol vs other LTO modes.
 
 on:
   workflow_dispatch:
@@ -23,15 +23,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: dist
-            profile: dist
-            extra: ""
-          - name: release-lto-fat
-            profile: release
-            extra: "CARGO_PROFILE_RELEASE_LTO=fat"
-          - name: release-cgu1
-            profile: release
-            extra: "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1"
+          - name: u-fat
+            lto: fat
+            flags: "-C link-arg=-Wl,-u,___isPlatformVersionAtLeast"
+          - name: u-fat-flag
+            lto: fat
+            flags: >-
+              -C link-arg=-Wl,-undefined,dynamic_lookup
+              -C link-arg=-Wl,-u,___isPlatformVersionAtLeast
+          - name: thin
+            lto: thin
+            flags: "-C link-arg=-Wl,-undefined,error"
+          - name: off
+            lto: "off"
+            flags: "-C link-arg=-Wl,-undefined,error"
+          - name: fat-strict
+            lto: fat
+            flags: "-C link-arg=-Wl,-undefined,error"
+            allow_failure: true
     runs-on: macos-26
     timeout-minutes: 60
     steps:
@@ -45,8 +54,6 @@ jobs:
           test "$(wc -c < assets/model/embed.onnx)" -ge 100000000
 
       - uses: dtolnay/rust-toolchain@stable
-      - name: Toolchain
-        run: rustc -Vv
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -54,24 +61,29 @@ jobs:
           key: ${{ matrix.name }}
 
       - name: Build with symbols
+        continue-on-error: ${{ matrix.allow_failure == true }}
         env:
           CARGO_PROFILE_DIST_STRIP: "none"
-          CARGO_PROFILE_RELEASE_STRIP: "none"
+          CARGO_PROFILE_DIST_LTO: ${{ matrix.lto }}
+          RUSTFLAGS: ${{ matrix.flags }}
         run: |
-          set -e
-          export ${{ matrix.extra }}
-          cargo build --profile ${{ matrix.profile }} \
-            --target aarch64-apple-darwin -p im
+          set -o pipefail
+          cargo build --profile dist --target aarch64-apple-darwin -p im \
+            2>&1 | tee /tmp/im-build.txt
           mkdir -p /tmp/out
-          cp target/aarch64-apple-darwin/${{ matrix.profile }}/im /tmp/out/im
-          file /tmp/out/im
-          shasum -a 256 /tmp/out/im
+          cp target/aarch64-apple-darwin/dist/im /tmp/out/im
+          llvm-nm -m /tmp/out/im |
+            grep "isPlatformVersionAtLeast" || true
 
       - name: Upload binary
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: im-${{ matrix.name }}
-          path: /tmp/out/im
+          path: |
+            /tmp/out/im
+            /tmp/im-build.txt
+          if-no-files-found: warn
 
   run:
     name: run ${{ matrix.name }} on macos-26
@@ -80,9 +92,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: dist
-          - name: release-lto-fat
-          - name: release-cgu1
+          - name: u-fat
+          - name: u-fat-flag
+          - name: thin
+          - name: off
     runs-on: macos-26
     timeout-minutes: 20
     steps:
@@ -118,43 +131,12 @@ jobs:
           EOF
           lldb -b -s /tmp/lldb.cmds -- /tmp/im-test/im :embed \
             2>&1 | tee /tmp/im-lldb.txt
-          tail -160 /tmp/im-lldb.txt
-
-      - name: Crash report
-        if: always()
-        run: |
-          set +e
-          sleep 5
-          # shellcheck disable=SC2012
-          f=$(ls -t ~/Library/Logs/DiagnosticReports/im*.ips \
-            2>/dev/null | head -1)
-          echo "report: $f"
-          [ -n "$f" ] || exit 0
-          cp "$f" /tmp/im-crash.ips
-          python3 - "$f" <<'PY'
-          import json, sys
-          lines = open(sys.argv[1]).read().splitlines()
-          body = json.loads("\n".join(lines[1:]))
-          print("exception:", body.get("exception"))
-          imgs = body.get("usedImages", [])
-          th = body["threads"][body.get("faultingThread", 0)]
-          print("thread:", th.get("name") or th.get("queue") or "?")
-          for fr in th["frames"][:40]:
-              img = imgs[fr["imageIndex"]]
-              print(
-                  f'{img.get("name", "?"):24}'
-                  f' off=0x{fr.get("imageOffset", 0):x}'
-                  f' {fr.get("symbol", "?")}'
-                  f' +{fr.get("symbolLocation", 0)}'
-              )
-          PY
+          tail -80 /tmp/im-lldb.txt
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: lldb-${{ matrix.name }}
-          path: |
-            /tmp/im-lldb.txt
-            /tmp/im-crash.ips
+          path: /tmp/im-lldb.txt
           if-no-files-found: warn
