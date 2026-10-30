@@ -7,7 +7,7 @@ use crate::cli::CliOpts;
 use crate::config::Config;
 use crate::global;
 
-/// `:embed` — read one text line at a time from stdin, print the embedding
+/// `:tool embed` — read one text line at a time from stdin, print the embedding
 /// vector for each line as space-separated floats.
 ///
 /// Diagnostic tool: uses raw text (no `im ` prefix) so users can probe
@@ -26,7 +26,7 @@ pub fn print_embeddings<R: BufRead, W: Write>(reader: &mut R, out: &mut W) -> Re
     Ok(())
 }
 
-/// `:color [mood]` — with a mood, the full pipeline diagnostic; without
+/// `:tool mood [mood]` — with a mood, the full pipeline diagnostic; without
 /// one, the mood palette: every anchor mood of the moods file with a swatch
 /// of its colour, one per line.
 pub(super) fn diagnose_color<W: Write>(

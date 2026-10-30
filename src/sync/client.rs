@@ -111,7 +111,7 @@ impl Client {
             .filter(|_| authorized)
             .map(|token| format!("Bearer {token}"));
         if authorized && authorization.is_none() {
-            bail!("not logged in — run `im :auth login`");
+            bail!("not logged in — run `im :sync login`");
         };
 
         // Status codes are read by hand so the server's `{ error }` message

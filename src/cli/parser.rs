@@ -125,7 +125,8 @@ pub fn parse_from(args: Vec<String>) -> anyhow::Result<Command> {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        BODY_DELIMITER, ConfigTarget, DbSubcommand, TrackerItem, TrackerPeriod,
+        BODY_DELIMITER, ConfigTarget, DbSubcommand, SyncSubcommand, ToolSubcommand, TrackerItem,
+        TrackerPeriod,
     };
     use super::*;
     use crate::types::{Entry, Task, TaskKind, TaskRef, ViewMode};
@@ -1566,19 +1567,19 @@ mod tests {
 
     #[test]
     fn test_parse_embed() {
-        let cmd = parse_from(args(&[":embed"])).unwrap();
-        assert_eq!(cmd, Command::Embed);
+        let cmd = parse_from(args(&[":tool", "embed"])).unwrap();
+        assert_eq!(cmd, Command::Tool(ToolSubcommand::Embed));
     }
 
     #[test]
     fn test_parse_score() {
-        let cmd = parse_from(args(&[":score", "happy", "sad"])).unwrap();
+        let cmd = parse_from(args(&[":tool", "score", "happy", "sad"])).unwrap();
         match cmd {
-            Command::Score { start, end } => {
+            Command::Tool(ToolSubcommand::Score { start, end }) => {
                 assert_eq!(start, "happy");
                 assert_eq!(end, "sad");
             }
-            _ => panic!("Expected Score command"),
+            _ => panic!("Expected Score subcommand"),
         }
     }
 
@@ -1718,77 +1719,87 @@ mod tests {
 
     #[test]
     fn test_parse_config() {
-        let cmd = parse_from(args(&[":config"])).unwrap();
-        assert_eq!(
-            cmd,
-            Command::Config {
-                target: ConfigTarget::Main
-            }
-        );
+        let cmd = parse_from(args(&[":tool", "config"])).unwrap();
+        assert_eq!(cmd, Command::Tool(ToolSubcommand::Config { target: None }));
     }
 
     #[test]
     fn test_parse_config_c_alias() {
         let cmd = parse_from(args(&[":c"])).unwrap();
-        assert_eq!(
-            cmd,
-            Command::Config {
-                target: ConfigTarget::Main
-            }
-        );
-    }
-
-    #[test]
-    fn test_parse_config_rejects_unknown_subcommand() {
-        let result = parse_from(args(&[":config", "extra"]));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_config_rejects_extra_args() {
-        let result = parse_from(args(&[":config", "colors", "extra"]));
-        assert!(result.is_err());
+        assert_eq!(cmd, Command::Tool(ToolSubcommand::Config { target: None }));
     }
 
     #[test]
     fn test_parse_config_moods() {
-        let cmd = parse_from(args(&[":config", "moods"])).unwrap();
+        let cmd = parse_from(args(&[":tool", "config", "moods"])).unwrap();
         assert_eq!(
             cmd,
-            Command::Config {
-                target: ConfigTarget::Moods
-            }
+            Command::Tool(ToolSubcommand::Config {
+                target: Some(ConfigTarget::Moods)
+            })
         );
         let cmd = parse_from(args(&[":c", "moods"])).unwrap();
         assert_eq!(
             cmd,
-            Command::Config {
-                target: ConfigTarget::Moods
-            }
+            Command::Tool(ToolSubcommand::Config {
+                target: Some(ConfigTarget::Moods)
+            })
         );
     }
 
     #[test]
     fn test_parse_config_colors() {
-        let cmd = parse_from(args(&[":config", "colors"])).unwrap();
+        let cmd = parse_from(args(&[":tool", "config", "colors"])).unwrap();
         assert_eq!(
             cmd,
-            Command::Config {
-                target: ConfigTarget::Colors
-            }
+            Command::Tool(ToolSubcommand::Config {
+                target: Some(ConfigTarget::Colors)
+            })
         );
         let cmd = parse_from(args(&[":c", "colors"])).unwrap();
         assert_eq!(
             cmd,
-            Command::Config {
-                target: ConfigTarget::Colors
-            }
+            Command::Tool(ToolSubcommand::Config {
+                target: Some(ConfigTarget::Colors)
+            })
         );
     }
 
     #[test]
+    fn test_parse_sync() {
+        assert_eq!(
+            parse_from(args(&[":sync"])).unwrap(),
+            Command::Sync {
+                sub: None,
+                reset: false
+            }
+        );
+        assert_eq!(
+            parse_from(args(&[":sync", "--reset"])).unwrap(),
+            Command::Sync {
+                sub: None,
+                reset: true
+            }
+        );
+        for (name, sub) in [
+            ("register", SyncSubcommand::Register),
+            ("login", SyncSubcommand::Login),
+            ("status", SyncSubcommand::Status),
+            ("logout", SyncSubcommand::Logout),
+        ] {
+            assert_eq!(
+                parse_from(args(&[":sync", name])).unwrap(),
+                Command::Sync {
+                    sub: Some(sub),
+                    reset: false
+                }
+            );
+        }
+    }
+
+    #[test]
     fn test_parse_moods_retired() {
-        // `:moods` is retired in favor of `:config moods`.
+        // `:moods` is retired in favor of `:tool config moods`.
         let result = parse_from(args(&[":moods"]));
         assert!(result.is_err());
     }
@@ -1807,61 +1818,42 @@ mod tests {
     #[test]
     fn test_parse_db_prune() {
         let cmd = parse_from(args(&[":db", "prune"])).unwrap();
-        assert_eq!(
-            cmd,
-            Command::Db {
-                sub: DbSubcommand::Prune
-            }
-        );
+        assert_eq!(cmd, Command::Db(DbSubcommand::Prune));
     }
 
     #[test]
     fn test_parse_db_backfill() {
         let cmd = parse_from(args(&[":db", "backfill"])).unwrap();
-        assert_eq!(
-            cmd,
-            Command::Db {
-                sub: DbSubcommand::Backfill
+        assert_eq!(cmd, Command::Db(DbSubcommand::Backfill));
+    }
+
+    #[test]
+    fn test_parse_mood() {
+        let cmd = parse_from(args(&[":tool", "mood", "drained"])).unwrap();
+        match cmd {
+            Command::Tool(ToolSubcommand::Mood { mood }) => assert_eq!(mood, vec!["drained"]),
+            _ => panic!("Expected Mood subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_parse_mood_multword() {
+        let cmd = parse_from(args(&[":tool", "mood", "mood", "drained"])).unwrap();
+        match cmd {
+            Command::Tool(ToolSubcommand::Mood { mood }) => {
+                assert_eq!(mood, vec!["mood", "drained"])
             }
-        );
-    }
-
-    #[test]
-    fn test_parse_db_rejects_bad_forms() {
-        // The old :prune spelling is gone.
-        assert!(parse_from(args(&[":prune"])).is_err());
-        // Bare :db and unknown subcommands error with usage hints.
-        assert!(parse_from(args(&[":db"])).is_err());
-        assert!(parse_from(args(&[":db", "wat"])).is_err());
-        assert!(parse_from(args(&[":db", "prune", "extra"])).is_err());
-        assert!(parse_from(args(&[":db", "backfill", "extra"])).is_err());
-    }
-
-    #[test]
-    fn test_parse_color() {
-        let cmd = parse_from(args(&[":color", "drained"])).unwrap();
-        match cmd {
-            Command::Color { mood } => assert_eq!(mood.as_deref(), Some("drained")),
-            _ => panic!("Expected Color command"),
+            _ => panic!("Expected Mood subcommand"),
         }
     }
 
     #[test]
-    fn test_parse_color_multword() {
-        let cmd = parse_from(args(&[":color", "mood", "drained"])).unwrap();
+    fn test_parse_bare_mood_lists_palette() {
+        // Bare :tool mood has no mood to diagnose - it lists the anchor palette.
+        let cmd = parse_from(args(&[":tool", "mood"])).unwrap();
         match cmd {
-            Command::Color { mood } => assert_eq!(mood.as_deref(), Some("mood drained")),
-            _ => panic!("Expected Color command"),
-        }
-    }
-
-    #[test]
-    fn test_parse_bare_color_lists_palette() {
-        // Bare :color has no mood to diagnose - it lists the anchor palette.
-        let cmd = parse_from(args(&[":color"])).unwrap();
-        match cmd {
-            Command::Color { mood } => assert_eq!(mood, None),
-            _ => panic!("Expected Color command"),
+            Command::Tool(ToolSubcommand::Mood { mood }) => assert!(mood.is_empty()),
+            _ => panic!("Expected Mood subcommand"),
         }
     }
 
@@ -2105,26 +2097,31 @@ mod tests {
 
     #[test]
     fn test_parse_clear() {
-        let cmd = parse_from(args(&[":clear"])).unwrap();
-        assert_eq!(cmd, Command::Clear { date: None });
+        let cmd = parse_from(args(&[":tool", "clear"])).unwrap();
+        assert_eq!(cmd, Command::Tool(ToolSubcommand::Clear { date: vec![] }));
 
-        let cmd = parse_from(args(&[":clear", "@2024-03-20"])).unwrap();
+        let cmd = parse_from(args(&[":tool", "clear", "@2024-03-20"])).unwrap();
         assert_eq!(
             cmd,
-            Command::Clear {
-                date: Some("2024-03-20".to_string())
-            }
+            Command::Tool(ToolSubcommand::Clear {
+                date: vec!["@2024-03-20".to_string()]
+            })
         );
 
-        let cmd = parse_from(args(&[":clear", "2024-03-20"])).unwrap();
+        let cmd = parse_from(args(&[":tool", "clear", "2024-03-20"])).unwrap();
         assert_eq!(
             cmd,
-            Command::Clear {
-                date: Some("2024-03-20".to_string())
-            }
+            Command::Tool(ToolSubcommand::Clear {
+                date: vec!["2024-03-20".to_string()]
+            })
         );
 
-        let cmd = parse_from(args(&[":clear", "@"])).unwrap();
-        assert_eq!(cmd, Command::Clear { date: None });
+        let cmd = parse_from(args(&[":tool", "clear", "@"])).unwrap();
+        assert_eq!(
+            cmd,
+            Command::Tool(ToolSubcommand::Clear {
+                date: vec!["@".to_string()]
+            })
+        );
     }
 }

@@ -1,6 +1,6 @@
 [moods]
 
-# Mood-to-color anchors live in this file. Generate it by calling `im :config moods`.
+# Mood-to-color anchors live in this file. Generate it by calling `im :tool config moods`.
 # source = "moods.toml"
 
 # Instruction prefix for embedding model

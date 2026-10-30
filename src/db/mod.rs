@@ -18,7 +18,7 @@ pub async fn init_database(db_path: &Path) -> Result<SqlitePool> {
             // Nothing inside the file is readable, so it cannot be repaired in
             // place: keep the bytes for inspection, then start over. The
             // credentials went to the quarantine copy with everything else, so
-            // syncing resumes after `im auth login`.
+            // syncing resumes after `im :sync login`.
             let quarantine = quarantine_database(db_path)?;
             let pool = open_database(db_path).await?;
             cba::ebog!(
@@ -415,7 +415,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     .await?;
 
     // Sync engine: the device id, pull cursor and clock ('device_id',
-    // 'cursor', 'last_own_stamp'). Wiping this table is what `im sync --reset`
+    // 'cursor', 'last_own_stamp'). Wiping this table is what `im :sync --reset`
     // does — it rotates the device id and forgets how far it had read. The
     // account is deliberately elsewhere: a reset is about the data, not about
     // signing out.

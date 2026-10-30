@@ -6316,7 +6316,7 @@ async fn test_clear_command() {
     assert_eq!(count, 1);
 
     // Clear entries for today (non-interactive mode in tests)
-    let clear_cmd = parse_from(vec![":clear".to_string()]).unwrap();
+    let clear_cmd = parse_from(vec![":tool".to_string(), "clear".to_string()]).unwrap();
     execute_command(
         clear_cmd,
         &pool,
@@ -6335,27 +6335,16 @@ async fn test_clear_command() {
     assert_eq!(count_after, 0);
 }
 
-/// `:db doctor` parse: exactly `:db doctor`; extra args, a bare `:db`, and
-/// unknown subcommands are usage errors.
+/// `:db doctor` parses to the Doctor subcommand. Usage errors are covered by
+/// the subprocess tests in `tests/cli_groups.rs` because clap exits during
+/// parsing.
 #[test]
 fn test_db_doctor_parse() {
     let cmd = parse_from(vec![":db".to_string(), "doctor".to_string()]).unwrap();
     assert!(matches!(
         cmd,
-        im::cli::Command::Db {
-            sub: im::cli::DbSubcommand::Doctor
-        }
+        im::cli::Command::Db(im::cli::DbSubcommand::Doctor)
     ));
-    assert!(
-        parse_from(vec![
-            ":db".to_string(),
-            "doctor".to_string(),
-            "extra".to_string()
-        ])
-        .is_err()
-    );
-    assert!(parse_from(vec![":db".to_string()]).is_err());
-    assert!(parse_from(vec![":db".to_string(), "bogus".to_string()]).is_err());
 }
 
 /// `:db doctor` non-interactive safety: mismatched entries are surfaced but

@@ -45,18 +45,18 @@ src/
   logger.rs     cba `bog`/env_logger setup
   prompts.rs    interactive cliclack prompts
 
-  cli/          handwritten CLI grammar (no clap crate)
+  cli/          CLI grammar: handwritten free-form commands, clap for `:` groups
     mod.rs      CliOpts, Command, CLI-only tracker syntax types
     parser.rs   parse_args, parse_cli, parse_from and parser tests
-    parse/      entry, task, view, update, tracker, and special grammars
+    parse/      entry, task, view, update, tracker, special, and clap group grammars
 
   commands/     command orchestration and write flows
     mod.rs      execute_command and TTY/non-TTY dispatch
     entry.rs    mood/tracker entry writes
     task.rs     oneshot, recurring, and scheduled creation
     update.rs   task completion updates
-    maintenance.rs  clear, :db prune/:db backfill/:db doctor, config/moods editing
-    diagnostics.rs  :embed and :color utilities
+    maintenance.rs  :tool clear, :db prune/:db backfill/:db doctor, config/moods editing
+    diagnostics.rs  :tool embed and :tool mood utilities
 
   config/       serde configuration sections
     mod.rs      Config and normalization
@@ -128,7 +128,7 @@ handler-level output (confirmations, grid titles).
 (`ebog!`/`wbog!`/`ibog!`, printed to stdout). `log::*` is piped to the **log
 file only** (`Target::Pipe`) and must not be used for user-facing messages.
 Exceptions: interactive prompts and TUIs write to stderr (cliclack), and
-`:color` writes to the caller's `out`.
+`:tool mood` writes to the caller's `out`.
 
 ---
 
@@ -140,7 +140,7 @@ Exceptions: interactive prompts and TUIs write to stderr (cliclack), and
 
 **config.rs** — `Config` (serde, `deny_unknown_fields`, per-field defaults).
 Mood anchors live in a separate moods file named by `[moods] source`
-(default: the bundled `assets/moods.toml`); `im :moods` opens it in `$EDITOR`.
+(default: the bundled `assets/moods.toml`); `im :tool config moods` opens it in `$EDITOR`.
 `Config::init` (called from main) drops tracker names that collide with CLI
 syntax and falls back to the default palette when `tasks.colors` has fewer
 than 3 entries.
@@ -219,20 +219,33 @@ jiff with the local time zone.
 
 ## 5. CLI parsing (cli/)
 
-Manual parser, no clap crate. `parse_args()` (from `env::args`) and
-`parse_from(Vec<String>)` (unit-testable). A leading `-q`/`-v` flag run is
-stripped into `CliOpts { qv: [u8; 2] }` counts; `-h`/`--help` in the initial
-position short-circuits to `Command::Help`; after the first non-flag token
-everything is command text. Named `:`-subcommands accept the same flag
-(`im :auth --help`), except the bare tracker grids (`im :`, `im :week`),
-whose arguments are all tracker ids. `parse_from` dispatches on `args[0]`:
+The free-form grammar is handwritten. `parse_args()` (from `env::args`) and
+`parse_from(Vec<String>)` (unit-testable) share it. A leading `-q`/`-v` flag run
+is stripped into `CliOpts { qv: [u8; 2] }` counts; `-h`/`--help` in the initial
+position short-circuits to `Command::Help` (the bundled `assets/help.txt` or
+`assets/vhelp.txt`); after the first non-flag token everything is command text.
+
+The named groups `:tool`, `:db`, and `:sync` are clap parsers. `:tool` and
+`:db` derive `Parser` directly on their subcommand enums in `cli/mod.rs`;
+`:sync` uses `SyncCli` in `parse/groups.rs` because `--reset` belongs to the
+group rather than to an account subcommand. `parse_from` forwards the tokens
+after the group name to the matching parser, with `bin_name` set so usage and
+help spell the command as `im :tool`, `im :db`, or `im :sync`. Clap handles
+`--help` and usage errors by printing and exiting (0 for help, 2 for errors)
+before any database or config work; only successful parses become a `Command`. The doc comments on
+`ToolSubcommand`, `DbSubcommand`, `SyncSubcommand`, and `ConfigTarget` are the
+user-facing help text. `:c` is rewritten to `:tool config` before clap sees it.
+The bare tracker grids (`im :`, `im :week`) take no clap flags because their
+arguments are all tracker ids.
+
+`parse_from` dispatches on `args[0]`:
 
 | Input | Command |
 | --- | --- |
 | (no args) | `Today { date: None }` — today view |
 | `@<date>` | `Today { date: Some(date) }` — today view anchored to that day (parsed by the handler with `DATE_DIALECT`) |
 | `--help` / `-h` | `Help` — bundled `assets/help.txt` via `include_str!` |
-| `:<command> --help` / `-h` | `Help` — same text, on any named subcommand |
+| `:tool` / `:db` / `:sync` | clap parses the group; `--help` prints its own help and exits |
 | plain words (`happy`, `good ...`) | `Entry { mood, trackers, .. }` — mood entry; trackers as `-type score` |
 | `..` (bare, at the end) | opens the body editor |
 | `!` (bare) | `Task { OneShot, name: None, body: None }` — interactive oneshot creation |
@@ -247,14 +260,16 @@ whose arguments are all tracker ids. `parse_from` dispatches on `args[0]`:
 | `- words… [count]` | `Update { Query(words), count }` — unique oneshot task whose name contains the words in order |
 | `-` alone | `TasksEdit` — stub ("not yet implemented") |
 | `:` / `:week\|month\|year` / `:` + ids | `Tracker { period, items }` — dot-sequence tracker views (`:g` bails "not yet implemented") |
-| `:embed` | `Embed` — stdin lines → one 768-dim vector per line |
-| `:score "start" "end"` | `Score` — stub (`todo!()`) |
-| `:config` | `Config` — opens the live config in `$VISUAL`/`$EDITOR` |
-| `:db prune` | `Db { Prune }` — prunes expired/completed tasks, clears the embedding cache |
-| `:db backfill` | `Db { Backfill }` — computes and persists missing mood embeddings + saliency scores |
-| `:db doctor` | `Db { Doctor }` — prunes tracker entries whose storage class no longer matches the configured kind |
-| `:color [mood]` | `Color` — full mood-color pipeline diagnostic; bare lists the anchor palette with swatches |
-| `:clear [@date]` | `Clear` — deletes that day's mood entries (interactive confirm) |
+| `:tool embed` | `Tool(Embed)` — stdin lines → one 768-dim vector per line |
+| `:tool score "start" "end"` | `Tool(Score)` — stub (`todo!()`) |
+| `:tool config [moods\|colors]` / `:c …` | `Tool(Config)` — opens the live config, moods file, or colors file in `$VISUAL`/`$EDITOR` |
+| `:tool mood [mood]` | `Tool(Mood)` — full mood-color pipeline diagnostic; bare lists the anchor palette with swatches |
+| `:tool clear [@date]` | `Tool(Clear)` — deletes that day's mood entries (interactive confirm) |
+| `:sync` / `:sync --reset` | `Sync { sub: None, reset }` — exchange events with the other devices; `--reset` rebuilds the local copy from the server log |
+| `:sync register\|login\|status\|logout` | `Sync { sub: Some(Register\|Login\|Status\|Logout) }` — the account this device syncs with |
+| `:db prune` | `Db(Prune)` — prunes expired/completed tasks, clears the embedding cache |
+| `:db backfill` | `Db(Backfill)` — computes and persists missing mood embeddings + saliency scores |
+| `:db doctor` | `Db(Doctor)` — prunes tracker entries whose storage class no longer matches the configured kind |
 
 Tracker names cannot begin with `@` (reserved for recurring ids). Tabs in
 mood/name fields are an error (output is tab-separated).
@@ -289,9 +304,12 @@ mood/name fields are an error (output is tab-separated).
 - **Db** — `:db prune` (completed/expired tasks + embedding cache),
   `:db backfill` (missing embeddings/scores), `:db doctor` (storage-class
   mismatches; interactive confirm).
-- **Clear** — deletes a day's mood/tracker entries (interactive confirm).
-- **Color / Embed** — pipeline diagnostic / stdin-lines embedding dump;
-  **Score** — stub.
+- **Tool** — `:tool clear` deletes a day's mood/tracker entries (interactive
+  confirm), `:tool mood` / `:tool embed` are pipeline diagnostic /
+  stdin-lines embedding dump, `:tool config` opens a config-style file, and
+  `:tool score` is a stub.
+- **Sync** — `:sync` exchanges events; `register|login|status|logout` manage
+  the account this device syncs with.
 
 ---
 
@@ -428,7 +446,7 @@ L2-normalized difference from a neutral base embedding.
 - **Blend** (`weights_to_color`): saliency-gated weighted Oklab blend of the
   contributing basis colors; `None` → neutral baseline.
 - **Render** (`mood_color_cached`): per-mood cache, prefers stored embedding
-  BLOBs and backfills legacy rows; `:color [mood]` (`diagnose_color`) prints
+  BLOBs and backfills legacy rows; `:tool mood [mood]` (`diagnose_color`) prints
   every intermediate value, or the anchor palette with swatches for each
   mood.
 
@@ -465,7 +483,7 @@ stripped after editing.
 
 ## 14. Deferred / intentionally out of scope
 
-- `:score` — stub (`todo!()`); `:g` grid view — not implemented.
+- `:tool score` — stub (`todo!()`); `:g` grid view — not implemented.
 - No CLI flags for view variants: the `@[:o|:O]` / `@done[:o|:O]` suffixes
   (`ViewVariant`) cover the former toggles (env vars removed).
 - No DB migrations — delete the dev DB on schema changes.

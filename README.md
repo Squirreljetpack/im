@@ -95,18 +95,13 @@ Trackers and grids:
                                                         period defaults to "week"
 
 Other:
-  im :config | :c [file]                         open the config in $VISUAL / $EDITOR
-                                                        file: moods | colors
+  im :tool embed|mood|clear|..                   (see `im :tool --help`)
+  im :tool config | :c [moods|colors]            open the config in $VISUAL / $EDITOR
   im -                                           browse trackers
-  im :embed                                      embed stdin lines (one vector/line)
-  im :color [mood]                               palette swatches / mood diagnostic
-  im :clear [@<date>]                            clear all mood entries from a day
   im :db prune|backfill|doctor                   database utilities
 
-Sync:
-  im :auth register|login|status|logout          manage this device's syncing account 
-  im :sync                                       push local changes, pull remote changes
-  im :sync --reset                               rebuild database from remote state
+  im :sync [register|login|status|logout]        setup/manage/run sync 
+
 
 Flags:
   im -q | -v <command>                           quiet / verbose; flags go first
@@ -134,7 +129,7 @@ npm install -g @squirreljetpack/im
 
 ## Configuration
 
-Run `im :config` to open the configuration file in your `$EDITOR` or `$VISUAL`.
+Run `im :tool config` to open the configuration file in your `$EDITOR` or `$VISUAL`.
 
 The default locations are in order:
 
@@ -150,7 +145,7 @@ The default locations are in order:
 
 ##### Trackers
 
-Trackers are defined in your configuration (`im :config`); each `[tracker.<name>]`
+Trackers are defined in your configuration (`im :tool config`); each `[tracker.<name>]`
 section is logged through `im -<name> <value>` (no value for `null` trackers):
 
 - Kinds: `text`, `integer`, `float`, `duration` (strings like `6m 30s`), `null` (timestamp/count markers — requires an interval).

@@ -12,7 +12,7 @@ use crate::editor::open_editor_at;
 use crate::global;
 use crate::paths::{colors_path, default_config_path};
 
-/// `im :clear [@date]` — clear/delete all mood entries from that day.
+/// `im :tool clear [@date]` — clear/delete all mood entries from that day.
 /// If interactive, confirm first, showing the computed date.
 pub(super) async fn clear_moods(
     pool: &SqlitePool,
@@ -333,7 +333,7 @@ pub(super) async fn db_doctor(pool: &SqlitePool, config: &Config, tui: bool) -> 
     Ok(())
 }
 
-/// `im :config` — open the active config in $VISUAL/$EDITOR.
+/// `im :tool config` — open the active config in $VISUAL/$EDITOR.
 ///
 /// If the on-disk config doesn't exist yet (common on first run with the
 /// release profile), copy the bundled `assets/config.toml` straight to the
@@ -364,7 +364,7 @@ pub(super) async fn edit_config() -> Result<()> {
     open_editor_at(path)
 }
 
-/// `im :config moods` — open the moods file (`[moods] source`, relative to
+/// `im :tool config moods` — open the moods file (`[moods] source`, relative to
 /// the config directory) in $VISUAL/$EDITOR.
 ///
 /// Like [`edit_config`], a missing file is created from the bundled moods
@@ -374,7 +374,7 @@ pub(super) async fn edit_config() -> Result<()> {
 pub(super) async fn edit_moods(config: &Config) -> Result<()> {
     if config.moods.source.as_os_str().is_empty() {
         cba::wbog!(
-            "im :config moods needs a moods file, but [moods] source is unset: add \
+            "im :tool config moods needs a moods file, but [moods] source is unset: add \
              source = \"moods.toml\" to the [moods] section of your config"
         );
         return Ok(());
@@ -400,7 +400,7 @@ pub(super) async fn edit_moods(config: &Config) -> Result<()> {
     open_editor_at(&path)
 }
 
-/// `im :config colors` — open the colors file (`colors.toml`) in
+/// `im :tool config colors` — open the colors file (`colors.toml`) in
 /// $VISUAL/$EDITOR.
 ///
 /// Like [`edit_config`], a missing file is created from the bundled colors

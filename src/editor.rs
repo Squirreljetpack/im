@@ -9,8 +9,9 @@ use anyhow::{Context, Result};
 /// exits with a non-zero status.
 ///
 /// Used by both the mood/body editor (passing a tempfile path) and the
-/// `im :config` command (passing the live config path). The body editor
-/// reads back the file after save; `:config` just hands control to the editor.
+/// `im :tool config` command (passing the live config path). The body editor
+/// reads back the file after save; `:tool config` just hands control to the
+/// editor.
 pub fn open_editor_at(path: &Path) -> Result<()> {
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
