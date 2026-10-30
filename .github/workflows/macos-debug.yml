@@ -65,7 +65,7 @@ jobs:
             ${target:+--target $target} -p im
           dir="target/${target:+$target/}${{ matrix.profile }}"
           ls -l "$dir/im"
-          llvm-nm -m "$dir/im" | grep isPlatformVersionAtLeast
+          nm -m "$dir/im" | grep isPlatformVersionAtLeast
           mkdir -p /tmp/out
           cp "$dir/im" /tmp/out/im
 
