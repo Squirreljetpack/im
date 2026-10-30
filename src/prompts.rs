@@ -191,7 +191,7 @@ pub fn prompt_interval(default: Option<&str>) -> Result<String> {
     use cliclack::input;
 
     let raw: String = input("Interval between task occurrences:")
-        .placeholder("1 day 2 hours")
+        .placeholder("1 day")
         .default_input(default.unwrap_or(""))
         .validate(|input: &String| {
             if input.is_empty() {

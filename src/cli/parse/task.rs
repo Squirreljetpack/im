@@ -47,35 +47,40 @@ pub(crate) fn parse_task_command(mut args: &[String]) -> anyhow::Result<Command>
             prefill: None,
             available_duration: None,
             parent,
-            pick_duration: false,
+            interval: None,
         }));
     }
 
-    // `! %<duration> [name]` → recurring creation
+    // `! %<interval> [[:]<name>]` → recurring creation. The interval is the
+    // recurring field, so it is what `%` prefills; the available duration
+    // (how long each occurrence stays open) is prompted in the flow. A `:`
+    // word opens the name section exactly as it does for `! @…`, which also
+    // lets the interval span words (`! %1 day :exercise`); without one, only
+    // the first word is the interval and every word after it is the name.
     if args[0].starts_with('%') {
-        let (pick_duration, available_duration) = if args[0] == "%" {
-            (true, None)
-        } else {
-            let rest = &args[0][1..];
-            let dur = crate::date::parse_duration_secs(rest)
-                .with_context(|| format!("Invalid recurring task duration: '{}'", rest))?;
-            (false, Some(dur))
-        };
-        let prefill = if args.len() > 1 {
-            let joined = args[1..]
-                .iter()
-                .map(|s| if s == ":" { "\n" } else { s.as_str() })
-                .collect::<Vec<_>>()
-                .join(" ");
-            let trimmed = joined.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
+        let name_start = args.iter().position(|w| w.starts_with(':')).unwrap_or(1);
+        let interval_words = &args[..name_start];
+        let raw = {
+            let mut s = interval_words[0]
+                .strip_prefix('%')
+                .unwrap_or(&interval_words[0])
+                .to_string();
+            for w in &interval_words[1..] {
+                if !s.is_empty() {
+                    s.push(' ');
+                }
+                s.push_str(w);
             }
-        } else {
-            None
+            s
         };
+        let interval = if raw.is_empty() {
+            None
+        } else {
+            crate::date::parse_span(&raw)
+                .with_context(|| format!("Invalid recurring task interval: '{}'", raw))?;
+            Some(raw)
+        };
+        let prefill = join_name(&args[name_start..]);
         return Ok(Command::Task(Task {
             task_type: TaskKind::Recurring,
             name: None,
@@ -83,10 +88,21 @@ pub(crate) fn parse_task_command(mut args: &[String]) -> anyhow::Result<Command>
             date: None,
             body,
             prefill,
-            available_duration,
+            available_duration: None,
             parent: None,
-            pick_duration,
+            interval,
         }));
+    }
+
+    // `! :<name> %<interval>` → the interval opens the command, so a `%`
+    // word inside the name section is not an interval.
+    if args[0].starts_with(':') && args.iter().skip(1).any(|w| w.starts_with('%')) {
+        cba::ebog!(
+            "@recurring";
+            "The interval must precede the name section (found '{}')",
+            args[0]
+        );
+        anyhow::bail!("The interval must come first: use `! %<interval> [[:]<name>]`");
     }
 
     // `! @ ...` (bare `@`) → scheduled task creation (e.g. `! @`, `! @ :name %1h`)
@@ -158,8 +174,25 @@ pub(crate) fn parse_task_command(mut args: &[String]) -> anyhow::Result<Command>
         prefill: None,
         available_duration: None,
         parent,
-        pick_duration: false,
+        interval: None,
     }))
+}
+
+/// Join the words of a `:`-marked name section: a bare `:` becomes a
+/// newline, a `:` prefix on a word is its marker and is stripped, and plain
+/// words are kept verbatim.
+fn join_name(words: &[String]) -> Option<String> {
+    let joined = words
+        .iter()
+        .map(|w| if w == ":" { "\n" } else { w.strip_prefix(':').unwrap_or(w) })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let trimmed = joined.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn parse_parent_task_ref(arg: &str) -> anyhow::Result<Option<TaskRef>> {
@@ -272,23 +305,7 @@ fn parse_scheduled_task(args: &[String], body: Result<String, usize>) -> anyhow:
         )
     };
 
-    let name = if name_parts.is_empty() {
-        None
-    } else {
-        // Every word in the name segment may carry a `:` marker — strip it
-        // so the segment joins cleanly (plain words are kept verbatim).
-        let trimmed = name_parts
-            .iter()
-            .map(|w| if w == ":" { "\n" } else { w.strip_prefix(':').unwrap_or(w) })
-            .collect::<Vec<_>>()
-            .join(" ");
-        let trimmed = trimmed.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    };
+    let name = join_name(name_parts);
 
     let available_duration = if duration.is_empty() {
         None
@@ -323,6 +340,6 @@ fn parse_scheduled_task(args: &[String], body: Result<String, usize>) -> anyhow:
         prefill: None,
         available_duration,
         parent: None,
-        pick_duration: false,
+        interval: None,
     }))
 }

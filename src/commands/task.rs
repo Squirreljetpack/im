@@ -67,7 +67,7 @@ pub(super) async fn create_task_command(
     let prefill = task.prefill;
     let parent = task.parent;
     let available_duration = task.available_duration;
-    let pick_duration = task.pick_duration;
+    let interval = task.interval;
 
     match task_type {
         TaskKind::Oneshot => {
@@ -306,19 +306,11 @@ pub(super) async fn create_task_command(
         }
         TaskKind::Recurring => {
             // Create new recurring task via interactive flow, with an
-            // optional pre-filled name from `im ! %<duration> <name>` and an optional
-            // body from the body delimiter (editor only when the delimiter
-            // is bare — no delimiter means no body).
-            create_recurring_task(
-                pool,
-                config,
-                opts,
-                prefill,
-                body,
-                available_duration,
-                pick_duration,
-            )
-            .await?;
+            // optional pre-filled name and interval from
+            // `im ! %<interval> <name>` and an optional body from the body
+            // delimiter (editor only when the delimiter is bare — no
+            // delimiter means no body).
+            create_recurring_task(pool, config, opts, prefill, body, interval).await?;
         }
         TaskKind::Scheduled => {
             // Scheduled task creation: `! @<time> [:name] [%<duration>]`.
@@ -382,8 +374,7 @@ async fn create_recurring_task(
     _opts: &CliOpts,
     prefill: Option<String>,
     body: Result<String, usize>,
-    cl_duration: Option<i64>,
-    _pick_duration: bool,
+    cl_interval: Option<String>,
 ) -> Result<()> {
     use crate::date::{parse_duration_secs, parse_span};
 
@@ -402,20 +393,20 @@ async fn create_recurring_task(
     // 2. Start time (prompted before menu)
     let start_time = crate::prompts::prompt_start_time("Start time:", None)?;
 
-    // 3. Duration / interval (prompted before menu)
-    let interval_str = crate::prompts::prompt_interval(None)?;
+    // 3. Interval (prompted before menu unless `! %<interval>` prefilled it)
+    let interval_str = match cl_interval {
+        Some(i) => {
+            cliclack::log::info(format!("Interval: {i}"))?;
+            i
+        }
+        None => crate::prompts::prompt_interval(None)?,
+    };
     let interval_span = parse_span(&interval_str)?;
     let interval_rough_secs = crate::date::span_rough_seconds(interval_span) as i64;
 
-    // 4. Available duration (prompted before menu)
-    let available_duration_secs: Option<i64> = if let Some(dur) = cl_duration {
-        cliclack::log::info(format!("Available duration: {}", format_duration(dur)))?;
-        if dur >= interval_rough_secs {
-            None
-        } else {
-            Some(dur)
-        }
-    } else {
+    // 4. Available duration (prompted before menu); blank or anything at
+    //    least as long as the interval means always available.
+    let available_duration_secs: Option<i64> = {
         let avail_str = crate::prompts::prompt_available_duration(
             &interval_str,
             None,

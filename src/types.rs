@@ -195,12 +195,14 @@ pub struct Task {
     /// `None` for a root-level task. Resolved to a row id at creation time.
     pub parent: Option<TaskRef>,
     /// Available duration in seconds for scheduled creation
-    /// (`! @<time>; …; %<duration>`) or recurring creation (`! %<duration>`);
-    /// carried into the interactive flow so the duration prompt can be skipped
-    /// when it came from the command line.
+    /// (`! @<time>; …; %<duration>`); carried into the interactive flow so the
+    /// duration prompt can be skipped when it came from the command line.
     pub available_duration: Option<Epoch>,
-    /// `true` when a bare `%` was passed on recurring creation (`! %`) to prompt for the duration.
-    pub pick_duration: bool,
+    /// Recurrence interval prefill for interactive recurring creation
+    /// (`! %<interval> [name]`), validated at CLI parse time and kept in its
+    /// original form so calendar units (`1 month`) survive into the flow.
+    /// `None` on a bare `! %`, which prompts for the interval.
+    pub interval: Option<String>,
 }
 
 #[cfg(test)]

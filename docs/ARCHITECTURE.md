@@ -26,8 +26,8 @@ and variable month lengths are handled correctly; see "4. Date & duration".
 
 `+<parent>` is accepted but ignored for recurring and scheduled task
   creation. A leading `+…` task_ref parses for every `im !` command, but the
-  recurring (`! %<duration> [name]`) and scheduled (`! @…`) creation flows do
-  not attach a parent — the parsed ref is dropped silently. This is
+  recurring (`! %<interval> [[:]name]`) and scheduled (`! @…`) creation flows
+  do not attach a parent — the parsed ref is dropped silently. This is
   intentional.
 
 
@@ -223,13 +223,16 @@ Manual parser, no clap crate. `parse_args()` (from `env::args`) and
 `parse_from(Vec<String>)` (unit-testable). A leading `-q`/`-v` flag run is
 stripped into `CliOpts { qv: [u8; 2] }` counts; `-h`/`--help` in the initial
 position short-circuits to `Command::Help`; after the first non-flag token
-everything is command text. `parse_from` dispatches on `args[0]`:
+everything is command text. Named `:`-subcommands accept the same flag
+(`im :auth --help`), except the bare tracker grids (`im :`, `im :week`),
+whose arguments are all tracker ids. `parse_from` dispatches on `args[0]`:
 
 | Input | Command |
 | --- | --- |
 | (no args) | `Today { date: None }` — today view |
 | `@<date>` | `Today { date: Some(date) }` — today view anchored to that day (parsed by the handler with `DATE_DIALECT`) |
 | `--help` / `-h` | `Help` — bundled `assets/help.txt` via `include_str!` |
+| `:<command> --help` / `-h` | `Help` — same text, on any named subcommand |
 | plain words (`happy`, `good ...`) | `Entry { mood, trackers, .. }` — mood entry; trackers as `-type score` |
 | `..` (bare, at the end) | opens the body editor |
 | `!` (bare) | `Task { OneShot, name: None, body: None }` — interactive oneshot creation |
