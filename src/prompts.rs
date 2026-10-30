@@ -8,6 +8,33 @@ use anyhow::Result;
 
 use crate::db::Id;
 
+/// Muted gray shared with the ratatui views (`Color::DarkGray`). cliclack's
+/// default theme styles placeholder text with `dim()` alone, which most
+/// terminals render as barely different from normal text; an explicit bright
+/// black (ANSI 8) reads as muted everywhere.
+fn muted() -> console::Style {
+    console::Style::new().black().bright().dim()
+}
+
+/// Renders placeholder and hint text in muted gray instead of the default
+/// dimmed style.
+struct MutedHints;
+
+impl cliclack::Theme for MutedHints {
+    fn placeholder_style(&self, state: &cliclack::ThemeState) -> console::Style {
+        match state {
+            cliclack::ThemeState::Cancel => console::Style::new().hidden(),
+            _ => muted(),
+        }
+    }
+}
+
+/// Installs the process-wide prompt theme. Called once at startup so every
+/// cliclack prompt inherits the muted placeholder style.
+pub fn install_theme() {
+    cliclack::set_theme(MutedHints);
+}
+
 /// Maximum allowed task priority. Anything higher is rejected at ingestion
 /// time (cliclack validation in `prompt_priority`). Lower bound is 1 — zero
 /// and negative priorities are not meaningful.

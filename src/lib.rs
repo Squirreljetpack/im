@@ -29,6 +29,8 @@ pub async fn run_app() {
 
     bog::init_bogger(true, false);
 
+    prompts::install_theme();
+
     let cli = cli::parse_args().__ebog();
 
     let [q, v] = cli.opts.qv;

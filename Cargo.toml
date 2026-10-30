@@ -58,6 +58,8 @@ crossterm = { version = "0.29", features = ["serde", "event-stream"] }
 atty = "0.2"
 
 cliclack = "0.5"
+# Pinned to cliclack's own `console` so the custom prompt theme styles match.
+console = "0.16"
 ratatui = "0.30"
 
 # Embeddings: nomic-embed-text-v1.5 INT8 QDQ ONNX via ONNX Runtime (ort)
