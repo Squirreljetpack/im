@@ -1,8 +1,4 @@
-name: macOS embed crash
-
-# Throwaway branch workflow: verify that build.rs linking libclang_rt.osx.a
-# keeps ___isPlatformVersionAtLeast defined under fat LTO, and that the
-# resulting binary runs on macOS 26.
+name: official v0.2.8 check
 
 on:
   workflow_dispatch:
@@ -12,97 +8,26 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: macos-debug-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  build:
-    name: build ${{ matrix.name }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: dist-14
-            os: macos-14
-            profile: dist
-            target: aarch64-apple-darwin
-          - name: dist-26
-            os: macos-26
-            profile: dist
-            target: aarch64-apple-darwin
-          - name: release-26
-            os: macos-26
-            profile: release
-            target: ""
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          lfs: true
-
-      - name: Environment
-        run: |
-          sw_vers
-          test "$(wc -c < assets/model/embed.onnx)" -ge 100000000
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "."
-          key: ${{ matrix.name }}
-
-      - name: Build with symbols
-        env:
-          CARGO_PROFILE_DIST_STRIP: "none"
-          CARGO_PROFILE_RELEASE_STRIP: "none"
-        run: |
-          set -e
-          target="${{ matrix.target }}"
-          cargo build --profile ${{ matrix.profile }} \
-            ${target:+--target $target} -p im
-          dir="target/${target:+$target/}${{ matrix.profile }}"
-          ls -l "$dir/im"
-          nm -m "$dir/im" | grep isPlatformVersionAtLeast
-          mkdir -p /tmp/out
-          cp "$dir/im" /tmp/out/im
-
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: im-${{ matrix.name }}
-          path: /tmp/out/im
-
-  run:
-    name: run ${{ matrix.name }} on macos-26
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: dist-14
-          - name: dist-26
-          - name: release-26
+  official:
+    name: run official v0.2.8 on macos-26
     runs-on: macos-26
     timeout-minutes: 20
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: im-${{ matrix.name }}
-          path: /tmp/im-test
-
-      - name: Embed
+      - name: Run release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          chmod +x /tmp/im-test/im
-          printf 'hello\n' | /tmp/im-test/im :embed > /tmp/im-out.txt
-          echo "exit=$?"
-          wc -w /tmp/im-out.txt
-
-      - name: Color
-        run: |
-          /tmp/im-test/im :color "glad i got the protocol working" \
-            > /tmp/im-color.txt
-          echo "exit=$?"
-          cat /tmp/im-color.txt
+          set -e
+          mkdir -p /tmp/im
+          gh release download v0.2.8 -R Squirreljetpack/im \
+            -p 'im-aarch64-apple-darwin.tar.xz' -D /tmp/im
+          tar -xJf /tmp/im/im-aarch64-apple-darwin.tar.xz -C /tmp/im
+          bin=/tmp/im/im-aarch64-apple-darwin/im
+          file "$bin"
+          printf 'hello\n' | "$bin" :embed > /tmp/embed.txt
+          echo "embed_exit=$?"
+          wc -w /tmp/embed.txt
+          "$bin" :color "glad i got the protocol working" > /tmp/color.txt
+          echo "color_exit=$?"
+          cat /tmp/color.txt
