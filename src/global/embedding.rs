@@ -46,6 +46,28 @@ pub struct Embedder {
     tokenizer: Tokenizer,
 }
 
+/// Build a session builder pinned to the CPU execution provider.
+///
+/// The prebuilt ONNX Runtime artifacts enabled by `download-binaries` default
+/// to ort's `MaxEfficiency` auto-device policy, which maps to an NPU/CoreML
+/// execution provider on macOS and crashes on these graphs
+/// (pykeio/ort#666). Both bundled models run on the CPU, so pin the CPU EP
+/// instead. `load-dynamic` builds don't enable the auto-device API, so there
+/// is nothing to override there.
+fn cpu_session_builder(
+    env: &ort::environment::Environment,
+) -> Result<ort::session::builder::SessionBuilder> {
+    #[allow(unused_mut)]
+    let mut builder = Session::builder(env).context("Failed to build ORT session builder")?;
+    #[cfg(feature = "download-binaries")]
+    {
+        builder = builder
+            .with_auto_device(ort::session::builder::AutoDevicePolicy::PreferCPU)
+            .map_err(|e| anyhow::anyhow!("Failed to select the CPU execution provider: {e}"))?;
+    }
+    Ok(builder)
+}
+
 impl Embedder {
     /// Load the bundled embedding model and tokenizer.
     pub fn load() -> Result<Self> {
@@ -63,12 +85,10 @@ impl Embedder {
         let env = ort::init()
             .build()
             .context("Failed to build ORT environment")?;
-        let embed = Session::builder(&env)
-            .context("Failed to build ORT session builder")?
+        let embed = cpu_session_builder(&env)?
             .commit_from_memory(EMBED_ONNX)
             .context("Failed to load embedded embed.onnx session")?;
-        let saliency = Session::builder(&env)
-            .context("Failed to build ORT session builder")?
+        let saliency = cpu_session_builder(&env)?
             .commit_from_memory(SALIENCY_ONNX)
             .context("Failed to load embedded saliency_adaptor.onnx session")?;
 
