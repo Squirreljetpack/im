@@ -1208,24 +1208,28 @@ mod tests {
         let day_start = 1_700_000_000;
         let mut config = Config::default();
 
-        let mut pushups_tracker = TrackerSetting::default();
-        pushups_tracker.kind = TrackerKind::Integer;
-        pushups_tracker.interval = Some(TrackerInterval {
-            anchor: day_start,
-            span: jiff::Span::new().days(1),
-            cumulative: true,
-        });
+        let pushups_tracker = TrackerSetting {
+            kind: TrackerKind::Integer,
+            interval: Some(TrackerInterval {
+                anchor: day_start,
+                span: jiff::Span::new().days(1),
+                cumulative: true,
+            }),
+            ..Default::default()
+        };
         config
             .tracker
             .insert("pushups".to_string(), pushups_tracker);
 
-        let mut water_tracker = TrackerSetting::default();
-        water_tracker.kind = TrackerKind::Null;
-        water_tracker.interval = Some(TrackerInterval {
-            anchor: day_start,
-            span: jiff::Span::new().days(1),
-            cumulative: true,
-        });
+        let water_tracker = TrackerSetting {
+            kind: TrackerKind::Null,
+            interval: Some(TrackerInterval {
+                anchor: day_start,
+                span: jiff::Span::new().days(1),
+                cumulative: true,
+            }),
+            ..Default::default()
+        };
         config.tracker.insert("water".to_string(), water_tracker);
 
         // Insert two pushups entries and two water entries on day_start

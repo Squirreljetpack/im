@@ -110,42 +110,6 @@ pub fn prompt_target_count() -> Result<i32> {
     Ok(raw.trim().parse::<i32>().unwrap_or(0))
 }
 
-/// Prompt for an optional parent task reference (`+<id>` / `+<words>` / `+` / blank-none).
-pub fn prompt_parent_id() -> Result<Option<crate::types::TaskRef>> {
-    use cliclack::input;
-
-    let raw: String = input("(Optional) Parent:")
-        .placeholder("none")
-        .default_input("")
-        .interact()
-        .map_err(|e| anyhow::anyhow!("Prompt cancelled: {}", e))?;
-
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    if trimmed == "+" {
-        return Ok(Some(crate::types::TaskRef::Pick));
-    }
-    let without_plus = trimmed.strip_prefix('+').unwrap_or(trimmed).trim();
-    if without_plus.is_empty() {
-        return Ok(Some(crate::types::TaskRef::Pick));
-    }
-    // All-digits input is always an id reference — never a word query —
-    // even when no task holds that id (e.g. `+0`).
-    if without_plus.chars().all(|c| c.is_ascii_digit()) {
-        let n = without_plus
-            .parse::<i64>()
-            .map_err(|_| anyhow::anyhow!("Invalid task id: '{without_plus}'"))?;
-        return Ok(Some(crate::types::TaskRef::Id(n)));
-    }
-    let words = without_plus
-        .split_whitespace()
-        .map(String::from)
-        .collect::<Vec<_>>();
-    Ok(Some(crate::types::TaskRef::Words(words)))
-}
-
 /// Prompt for a task's user-facing short id in the editor.
 pub async fn prompt_short_id(
     pool: &sqlx::SqlitePool,
@@ -185,7 +149,7 @@ pub async fn prompt_short_id(
         if Some(new_short) == current_short {
             return Ok(current_short);
         }
-        if let Some((existing_id, _)) =
+        if let Some(existing_id) =
             crate::db::fetch_task_id_by_short_id(pool, new_short).await?
             && existing_id != current_id
         {
@@ -194,18 +158,6 @@ pub async fn prompt_short_id(
         }
         return Ok(Some(new_short));
     }
-}
-
-/// Confirm attaching the new task under `name` as its parent. The parent id
-/// was typed explicitly, so the default is yes — this is a double-check
-/// that the id names the intended task.
-pub fn prompt_attach_parent(name: &str) -> Result<bool> {
-    use cliclack::confirm;
-
-    confirm(format!("Attach to task: {}?", name))
-        .initial_value(true)
-        .interact()
-        .map_err(|e| anyhow::anyhow!("Prompt cancelled: {}", e))
 }
 
 /// Prompt for a task name (required, no tabs, trimmed). The duplicate-name

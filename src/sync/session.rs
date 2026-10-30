@@ -147,12 +147,12 @@ pub async fn sync_once(
         .acquire()
         .await
         .context("Failed to acquire a db connection")?;
-    let token = state::token(&mut *conn)
+    let token = state::token(&mut conn)
         .await?
         .context("not logged in — run `im :auth login`")?;
-    let device = state::device_id(&mut *conn).await?;
+    let device = state::device_id(&mut conn).await?;
 
-    let batch = outbox(&mut *conn).await?;
+    let batch = outbox(&mut conn).await?;
     let request = SyncRequest {
         device_id: device,
         cursor: pull.cursor,
@@ -184,7 +184,7 @@ pub async fn sync_once(
     // in the database — a create still being built is not, so it holds the fence
     // back and the next run is re-served the cells above it. That is what lets a
     // held create stay in memory.
-    let mut tx = (&mut *conn).begin().await.context("Failed to start a sync round")?;
+    let mut tx = conn.begin().await.context("Failed to start a sync round")?;
     let applied = apply::apply_rows(&mut tx, &response.events, &mut pull.pending).await?;
     let fence = if response.has_more {
         pull.pending.fence(response.cursor)
@@ -620,7 +620,7 @@ pub async fn resurrect(pool: &SqlitePool, offer: &Resurrect) -> Result<Option<Id
             },
         });
     }
-    let mut tx = (&mut *conn)
+    let mut tx = conn
         .begin()
         .await
         .context("Failed to start the resurrection")?;
@@ -669,7 +669,7 @@ pub async fn reset_local_state(pool: &SqlitePool) -> Result<usize> {
         .acquire()
         .await
         .context("Failed to acquire a db connection")?;
-    let mut tx = (&mut *conn)
+    let mut tx = conn
         .begin()
         .await
         .context("Failed to start the reset transaction")?;

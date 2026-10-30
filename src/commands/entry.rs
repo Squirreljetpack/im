@@ -313,26 +313,6 @@ pub(super) async fn record_entry(
     // to attach to, so a tracker-only line can only carry a payload.
     if let Some(task_ref) = task_ref {
         let task_id = match task_ref {
-            TaskRef::Id(short_id) => {
-                let Some((id, _name)) =
-                    crate::db::fetch_task_id_by_short_id(pool, short_id).await?
-                else {
-                    anyhow::bail!("No task with short id {short_id} exists");
-                };
-                id
-            }
-            TaskRef::Words(words) => {
-                let matches = crate::db::fetch_task_matching_words(pool, &words).await?;
-                match matches.len() {
-                    0 => anyhow::bail!("No task found matching query '{}'", words.join(" ")),
-                    1 => matches[0].id,
-                    n => anyhow::bail!(
-                        "Multiple tasks match query '{}' (found {})",
-                        words.join(" "),
-                        n
-                    ),
-                }
-            }
             TaskRef::Pick => {
                 if !atty::is(atty::Stream::Stdin) {
                     anyhow::bail!("Picking a task to link requires an interactive terminal");
@@ -344,6 +324,7 @@ pub(super) async fn record_entry(
                     .map(|(id, _)| id)
                     .ok_or_else(|| anyhow::anyhow!("Cancelled"))?
             }
+            task_ref => super::refs::resolve_task_ref(pool, &task_ref).await?,
         };
 
         if let Some(delta) = entry_count {

@@ -11,6 +11,7 @@ mod diagnostics;
 mod edit_task;
 mod entry;
 mod maintenance;
+mod refs;
 mod sync;
 mod task;
 mod update;

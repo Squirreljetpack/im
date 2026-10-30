@@ -396,17 +396,15 @@ async fn apply_cell(
                     .await
             }
         };
-        result.and_then(|result| {
+        result.map(|result| {
             if result.rows_affected() > 0 {
                 applied.updated += 1;
-                Ok(())
             } else {
                 applied.skipped.push(Skip {
                     entity_id: entity,
                     field: row.cell.field.clone(),
                     reason: "no local row".to_string(),
                 });
-                Ok(())
             }
         })
     };

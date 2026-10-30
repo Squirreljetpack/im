@@ -1122,7 +1122,6 @@ async fn resolve_link_target(kind: LinkKind, typed: &str) -> Option<Id> {
         .await
         .ok()
         .flatten()
-        .map(|(id, _)| id)
 }
 
 /// Edit the selected entry: task/mood bodies and text-tracker payloads

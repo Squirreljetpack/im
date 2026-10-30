@@ -101,11 +101,10 @@ async fn get_i64(conn: &mut SqliteConnection, key: &str) -> Result<i64> {
 /// The device id, allocated on first use. It names this copy of the database
 /// for echo suppression and error attribution, so a reset rotates it.
 pub async fn device_id(conn: &mut SqliteConnection) -> Result<Id> {
-    if let Some(existing) = get(&mut *conn, KEY_DEVICE_ID).await? {
-        if let Ok(id) = existing.parse::<Id>() {
+    if let Some(existing) = get(&mut *conn, KEY_DEVICE_ID).await?
+        && let Ok(id) = existing.parse::<Id>() {
             return Ok(id);
         }
-    }
     let id = Id::new();
     set(&mut *conn, KEY_DEVICE_ID, &id.to_string()).await?;
     Ok(id)

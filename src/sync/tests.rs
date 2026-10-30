@@ -123,7 +123,7 @@ async fn a_served_create_materialises_a_row_with_its_local_projection() {
 
     let target = test_pool().await.expect("in-memory db");
     let applied = apply::apply_rows(
-        &mut *target.acquire().await.unwrap(),
+        &mut target.acquire().await.unwrap(),
         &page,
         &mut apply::Pending::default(),
     )
@@ -153,7 +153,7 @@ async fn a_served_cell_updates_without_recreating() {
     let create = queued(&source).await;
     let target = test_pool().await.expect("in-memory db");
     apply::apply_rows(
-        &mut *target.acquire().await.unwrap(),
+        &mut target.acquire().await.unwrap(),
         &create,
         &mut apply::Pending::default(),
     )
@@ -167,7 +167,7 @@ async fn a_served_cell_updates_without_recreating() {
     update_todo_body(&source, id, "after").await.expect("edit");
     let edit = queued(&source).await;
     let applied = apply::apply_rows(
-        &mut *target.acquire().await.unwrap(),
+        &mut target.acquire().await.unwrap(),
         &edit,
         &mut apply::Pending::default(),
     )
@@ -193,7 +193,7 @@ async fn a_served_delete_takes_the_dependants_with_it() {
 
     let target = test_pool().await.expect("in-memory db");
     apply::apply_rows(
-        &mut *target.acquire().await.unwrap(),
+        &mut target.acquire().await.unwrap(),
         &create,
         &mut apply::Pending::default(),
     )
@@ -207,7 +207,7 @@ async fn a_served_delete_takes_the_dependants_with_it() {
         .filter(|row| row.cell.entity_id == parent && row.cell.field == EXISTENCE)
         .collect();
     apply::apply_rows(
-        &mut *target.acquire().await.unwrap(),
+        &mut target.acquire().await.unwrap(),
         &delete,
         &mut apply::Pending::default(),
     )
@@ -244,7 +244,7 @@ async fn a_cell_for_a_row_that_never_appeared_is_skipped() {
         },
     };
     let applied = apply::apply_rows(
-        &mut *pool.acquire().await.unwrap(),
+        &mut pool.acquire().await.unwrap(),
         &[orphan],
         &mut apply::Pending::default(),
     )
