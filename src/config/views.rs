@@ -149,6 +149,13 @@ pub struct TodayViewConfig {
     /// behavior yet).
     #[serde(default)]
     pub coalesce_completions: bool,
+    /// Swap which today-view variant lists every recurring availability
+    /// window: by default `All` lists every window intersecting the view
+    /// period and `Due` only the current/next window per task; with this
+    /// set, `All` keeps just the current/next window and `Due` lists every
+    /// window. Past-anchored days always list every window.
+    #[serde(default)]
+    pub swap_all_and_due_recurring_task_views: bool,
     #[serde(default)]
     pub tui_priority_style: StyleSetting,
     #[serde(default)]

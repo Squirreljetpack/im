@@ -55,6 +55,12 @@ named_months = true
 # Merge a task's adjacent completion entries into a single done row
 # in the today view.
 coalesce_completions = true
+# Swap which variant lists every recurring availability window: by default
+# All lists every window intersecting the view period and Due only the
+# current/next window per task; when true, All keeps just the current/next
+# window and Due lists every window. Past-anchored days always list every
+# window.
+swap_all_and_due_recurring_task_views = false
 # Optional styling for priority and time columns in today view TUI.
 # tui_priority_style = { fg = "dark_gray" }
 # tui_time_style = { fg = "white" }

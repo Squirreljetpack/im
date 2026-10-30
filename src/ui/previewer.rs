@@ -94,7 +94,8 @@ impl Previewer {
         let event_tx = self.event_tx.clone();
         tokio::spawn(async move {
             let lines = if let Some(task_id) = entry.task_id {
-                let task_opt = if let Some(w) = &entry.recurring_window {
+                let window = entry.recurring_window.clone();
+                let task_opt = if let Some(w) = &window {
                     Some(w.task.clone())
                 } else if let Some(task) = &entry.task {
                     Some(task.clone())
@@ -148,7 +149,7 @@ impl Previewer {
                     }
                     build_preview(
                         &task,
-                        true,
+                        window.as_ref(),
                         &config,
                         &linked_moods,
                         axes,
@@ -214,7 +215,7 @@ impl Previewer {
             }
             let lines = build_preview(
                 &task,
-                false,
+                None,
                 &config,
                 &linked_moods,
                 axes,

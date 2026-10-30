@@ -231,6 +231,34 @@ fn recurring_window_time(w: &crate::db::RecurringWindow, now: i64) -> i64 {
     }
 }
 
+/// Period start and per-task dedupe for the recurring-window scan: a
+/// window row is kept for every window intersecting `[scan_start,
+/// period_end]` unless the returned flag is set, in which case only the
+/// earliest window per task survives (windows arrive grouped per task,
+/// ascending).
+///
+/// Past-anchored days always scan from the anchored day start and keep
+/// every window (historical agenda). Otherwise `All` lists every
+/// intersecting window by default and `B` only the earliest window
+/// intersecting `(now, horizon_end]`; `[today_view]
+/// swap_all_and_due_recurring_task_views` swaps the two displays. A
+/// current/next scan starts at `now`, so closed windows are skipped while
+/// a still-open window (started before now) counts.
+fn recurring_window_scan(
+    show: ViewVariant,
+    past_anchor: bool,
+    swap: bool,
+    now: i64,
+    day_start: i64,
+) -> (i64, bool) {
+    let every_window = past_anchor || ((show == ViewVariant::All) != swap);
+    if every_window {
+        (day_start, false)
+    } else {
+        (day_start.max(now), true)
+    }
+}
+
 /// Today-view sort: timed entries first (by timestamp ascending); then the
 /// no-time group (undated oneshots) by priority descending, then by
 /// untruncated availability end ascending.
@@ -300,14 +328,19 @@ pub struct TodayFetch {
 ///
 /// `show` selects what is displayed:
 /// - `All`: moods, trackers, open tasks, scheduled tasks, recurring windows,
-///   and tasks completed today. On a day anchored before today the open
-///   oneshots are only those created in the view window, timestamped by
-///   their creation moment (plus any with a completion entry that day).
+///   and tasks completed today. Recurring windows are all the ones
+///   intersecting the view period by default (`[today_view]
+///   swap_all_and_due_recurring_task_views` swaps this display with `B`'s;
+///   past-anchored days always list every window). On a day anchored before
+///   today the open oneshots are only those created in the view window,
+///   timestamped by their creation moment (plus any with a completion entry
+///   that day).
 /// - `A` ("journal"): moods, trackers, and completion events in the horizon (displaying
 ///   completions instead of tasks, with cumulative completion counts).
 /// - `B` ("tasks"): tasks only (no moods/trackers), showing overdue/due oneshot tasks,
-///   scheduled tasks, and the next recurring window per task (without explicitly merging
-///   completed-today tasks).
+///   scheduled tasks, and the current/next recurring window per task by default
+///   (every window when the swap is set; past-anchored days always list every
+///   window), without explicitly merging completed-today tasks.
 pub async fn fetch_today_entries(
     pool: &SqlitePool,
     config: &Config,
@@ -712,19 +745,31 @@ pub async fn fetch_today_entries(
                 });
             }
 
-            // 4. Recurring tasks: one entry per availability window intersecting
-            // the period (all variants; interval-aware availability-window overlap
-            // — VIEWS.md). Each window's completions / last completion are scoped
-            // to its own interval, so time, done state, and badge are per window.
-            // `B` keeps only the next (earliest) window per task.
-            let recurring_windows =
-                crate::db::fetch_recurring_windows_for_period(pool, day_start_epoch, horizon_end)
-                    .await?;
+            // 4. Recurring tasks: one entry per listed availability window
+            // (interval-aware availability-window overlap — VIEWS.md). Each
+            // window's completions / last completion are scoped to its own
+            // interval, so time, done state, and badge are per window. `All`
+            // lists every intersecting window and `B` only the current/next
+            // one per task, unless `[today_view]
+            // swap_all_and_due_recurring_task_views` swaps the two displays;
+            // past-anchored days always list every window.
+            let (window_scan_start, earliest_only) = recurring_window_scan(
+                show,
+                past_anchor,
+                config.today_view.swap_all_and_due_recurring_task_views,
+                now_ts,
+                day_start_epoch,
+            );
+            let recurring_windows = crate::db::fetch_recurring_windows_for_period(
+                pool,
+                window_scan_start,
+                horizon_end,
+            )
+            .await?;
 
             let mut seen_recurring = std::collections::HashSet::new();
             for w in &recurring_windows {
-                // B: only the next recurring window per task.
-                if show == ViewVariant::B && !seen_recurring.insert(w.task.id) {
+                if earliest_only && !seen_recurring.insert(w.task.id) {
                     continue;
                 }
                 let time = recurring_window_time(w, now_ts);
@@ -849,6 +894,43 @@ mod tests {
     /// A fixed id for fixture rows (fixtures only need distinct, stable ids).
     fn test_id(n: u128) -> Id {
         Id(uuid::Uuid::from_u128(n))
+    }
+
+    #[test]
+    fn test_recurring_window_scan() {
+        let (now, day) = (1_000, 100);
+        // Past anchors always scan the anchored day and keep every window.
+        assert_eq!(
+            recurring_window_scan(ViewVariant::All, true, true, now, day),
+            (day, false)
+        );
+        assert_eq!(
+            recurring_window_scan(ViewVariant::B, true, false, now, day),
+            (day, false)
+        );
+        // Default: All lists every window, B only the current/next one.
+        assert_eq!(
+            recurring_window_scan(ViewVariant::All, false, false, now, day),
+            (day, false)
+        );
+        assert_eq!(
+            recurring_window_scan(ViewVariant::B, false, false, now, day),
+            (now, true)
+        );
+        // The swap flips the two displays.
+        assert_eq!(
+            recurring_window_scan(ViewVariant::All, false, true, now, day),
+            (now, true)
+        );
+        assert_eq!(
+            recurring_window_scan(ViewVariant::B, false, true, now, day),
+            (day, false)
+        );
+        // A future anchor never scans before its own day start.
+        assert_eq!(
+            recurring_window_scan(ViewVariant::B, false, false, 50, day),
+            (day, true)
+        );
     }
 
     #[test]

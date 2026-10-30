@@ -84,19 +84,19 @@ The Today View renders a combined timeline/agenda of entries within the selected
 
 | Variant | Label | Contents |
 | :--- | :--- | :--- |
-| **`All`** | `[show: all]` | **Complete day summary**: Moods, tracker entries, open oneshot tasks, scheduled tasks overlapping the horizon, recurring windows, and tasks completed today (merged with completion timestamps). |
+| **`All`** | `[show: all]` | **Complete day summary**: Moods, tracker entries, open oneshot tasks, scheduled tasks overlapping the horizon, recurring windows, and tasks completed today (merged with completion timestamps). Lists every recurring availability window intersecting the view period by default; `[today_view] swap_all_and_due_recurring_task_views` swaps that display with `B`'s. Past-anchored days always list every window. |
 | **`A`** | `[show: journal]` | **Journal event timeline**: Moods, tracker entries, and **task completion events** occurring within the horizon. Open/uncompleted tasks are hidden; each logged completion appears at its exact timestamp, showing cumulative progress (e.g. 1/5, 2/5, 3/5). |
-| **`B`** | `[show: due]` | **Tasks agenda**: Tasks only (moods and tracker entries hidden). Shows dated oneshots due within the horizon or overdue (`end_time <= horizon_end`), scheduled tasks overlapping the horizon, and the earliest upcoming availability window per recurring task. Completed-today tasks are not explicitly merged. |
+| **`B`** | `[show: due]` | **Tasks agenda**: Tasks only (moods and tracker entries hidden). Shows dated oneshots due within the horizon or overdue (`end_time <= horizon_end`), scheduled tasks overlapping the horizon, and only the current/next availability window per recurring task by default (every window when `swap_all_and_due_recurring_task_views` is set, and always every window on a past-anchored day). Completed-today tasks are not explicitly merged. |
 
-**Past-anchored days** (`@<date>` / shift-left, view window starting before today): `All` reconstructs that day's agenda instead of showing today's open tasks. Its oneshots are the ones **created within the view window** (`start_time` in `[day_start, horizon_end]`) — an old undated oneshot does not linger in historical views — with any task that logged a completion on the anchored day still merged in with its completion timestamp. Today and future anchors keep the unbounded open-oneshot list.
+**Past-anchored days** (`@<date>` / shift-left, view window starting before today): `All` reconstructs that day's agenda instead of showing today's open tasks. Its oneshots are the ones **created within the view window** (`start_time` in `[day_start, horizon_end]`) — an old undated oneshot does not linger in historical views — with any task that logged a completion on the anchored day still merged in with its completion timestamp. Today and future anchors keep the unbounded open-oneshot list. Both variants list every recurring availability window intersecting a past-anchored period (`swap_all_and_due_recurring_task_views` only affects the current/future day).
 
 #### Today View Time Cell Rules
 - **Journal Entries & Completions**: Timestamp of the mood, tracker, or task completion event (`today_time_label`).
 - **Open Oneshots**: Empty for undated oneshots (sort after timed entries); deadline (`end_time`) for dated oneshots. On past-anchored days, the creation moment (`start_time`) instead — that is what the window filter matches on.
 - **Scheduled Tasks**: Done rows show the completion timestamp (or window end for auto-completed tasks); open rows show the start time.
 - **Recurring Windows**:
-  - `All`: Emits an entry for every availability window intersecting the horizon.
-  - `B`: Emits only the next (earliest) upcoming window per recurring task.
+  - `All`: Emits an entry for every availability window intersecting the view period (the default; `B` shares this when `[today_view] swap_all_and_due_recurring_task_views` is set or the day is past-anchored).
+  - `B`: Emits the earliest window intersecting `(now, horizon_end]` per recurring task — closed windows are skipped while a still-open window (started before now) counts — and every window on a past-anchored day.
   - Completed or passed windows (`now >= window_end`) display the last completion in the interval, or fallback to the window end.
   - Open or future windows display the window start time.
 

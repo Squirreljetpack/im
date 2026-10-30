@@ -47,6 +47,12 @@ show_last_when_done = true
 # Merge a task's adjacent completion entries into a single done row
 # in the today view (accepted for future use; no behavior yet).
 coalesce_completions = false
+# Swap which variant lists every recurring availability window: by default
+# All lists every window intersecting the view period and Due only the
+# current/next window per task; when true, All keeps just the current/next
+# window and Due lists every window. Past-anchored days always list every
+# window.
+swap_all_and_due_recurring_task_views = false
 
 [tasks_view]
 # Keep a just-completed task visible in the pending view (@) for this many

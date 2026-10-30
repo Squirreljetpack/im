@@ -310,9 +310,7 @@ pub struct TaskUpdateInfo {
 #[derive(Debug, Clone)]
 pub struct RecurringWindow {
     /// The task row; `completions` and `last_time` are scoped to this
-    /// window's interval (`[window_start, window_start + interval)`);
-    /// `end_time` carries the task's unscoped last completion instead of
-    /// the expiry (the today view doesn't use the expiry).
+    /// window's interval (`[window_start, window_start + interval)`).
     pub task: TaskRow,
     /// Window start (the interval start).
     pub window_start: i64,

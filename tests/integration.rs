@@ -2759,10 +2759,11 @@ async fn test_today_view_completed_today_inclusion_and_time_label() {
 }
 
 /// TodayView recurring rows are per availability window: All shows every
-/// window intersecting the horizon, B shows only the next window per task,
-/// and A shows only not-done windows. A passed window shows the last
-/// completion within its interval (else the window end); an open/future
-/// window shows the window start (VIEWS.md).
+/// window intersecting the horizon, B does the same on a past-anchored day
+/// (today/future anchors keep only the current/next window per task), and A
+/// shows only not-done windows. A passed window shows the last completion
+/// within its interval (else the window end); an open/future window shows
+/// the window start (VIEWS.md).
 #[tokio::test]
 async fn test_today_view_per_window_recurring_rows() {
     let pool = test_pool().await.unwrap();
@@ -2816,10 +2817,118 @@ async fn test_today_view_per_window_recurring_rows() {
         get_labels!(im::types::ViewVariant::All),
         ["03:00", "08:30", "15:00", "21:00"]
     );
-    // B: only the next (earliest) window per task.
-    assert_eq!(get_labels!(im::types::ViewVariant::B), ["03:00"]);
+    // B: the anchored day is in the past, so it lists every window too;
+    // only a today/future anchor narrows it to the current/next window.
+    assert_eq!(
+        get_labels!(im::types::ViewVariant::B),
+        ["03:00", "08:30", "15:00", "21:00"]
+    );
     // A: displays completions instead of tasks — only the completed 08:30 event appears.
     assert_eq!(get_labels!(im::types::ViewVariant::A), ["08:30"]);
+}
+
+/// The recurring-window display swap: by default `All` lists every
+/// intersecting window and `B` only the current/next one; with
+/// `[today_view] swap_all_and_due_recurring_task_views` the two displays trade places.
+#[tokio::test]
+async fn test_today_view_recurring_window_display_swap() {
+    let pool = test_pool().await.unwrap();
+    let config = Config::default();
+    im::color::ColorAxes::build(&pool, &config.moods)
+        .await
+        .unwrap();
+
+    // Whole-interval availability windows every 6 hours, anchored at the
+    // start of today.
+    let today_start = im::date::today_start();
+    insert_recurring_task(&pool, "six-hourly", today_start, 6 * 3600, None, 0, None).await;
+    let current = im::date::interval_start_unix_secs(
+        today_start,
+        interval_span(6 * 3600),
+        im::date::now(),
+    )
+    .unwrap();
+    let current_label = im::date::format_time(current);
+
+    async fn labels(
+        pool: &SqlitePool,
+        config: &Config,
+        day: i64,
+        show: im::types::ViewVariant,
+    ) -> Vec<String> {
+        let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
+            pool,
+            config,
+            im::types::TodayHorizon::Today,
+            day,
+            show,
+        )
+        .await
+        .unwrap();
+        entries
+            .iter()
+            .filter(|e| e.kind.is_task() && e.label == "six-hourly")
+            .map(|e| e.time_label.clone())
+            .collect()
+    }
+
+    // Default: All lists the day's windows; B only the one containing now
+    // (still open, so it shows its window start).
+    let all_default = labels(&pool, &config, today_start, im::types::ViewVariant::All).await;
+    assert!(all_default.len() > 1, "{all_default:?}");
+    assert_eq!(
+        labels(&pool, &config, today_start, im::types::ViewVariant::B).await,
+        [current_label.clone()]
+    );
+
+    // The swap trades the two displays.
+    let mut swapped = config.clone();
+    swapped.today_view.swap_all_and_due_recurring_task_views = true;
+    let all_swapped = labels(&pool, &swapped, today_start, im::types::ViewVariant::All).await;
+    let b_swapped = labels(&pool, &swapped, today_start, im::types::ViewVariant::B).await;
+    assert_eq!(all_swapped, [current_label]);
+    assert_eq!(b_swapped, all_default);
+}
+
+/// A recurring task that expires mid-window stops producing windows at the
+/// expiry: truncating a later window at `end_time` would put its end before
+/// its start, yielding phantom rows.
+#[tokio::test]
+async fn test_today_view_recurring_windows_stop_at_expiry() {
+    let pool = test_pool().await.unwrap();
+    let config = Config::default();
+    im::color::ColorAxes::build(&pool, &config.moods)
+        .await
+        .unwrap();
+
+    // Whole 6-hour windows starting at midnight, expiring at 08:00: only
+    // 00:00-06:00 and the expiry-truncated 06:00-08:00 window exist.
+    let today_start = im::date::today_start();
+    insert_recurring_task(
+        &pool,
+        "expiring",
+        today_start,
+        6 * 3600,
+        None,
+        0,
+        Some(today_start + 8 * 3600),
+    )
+    .await;
+    let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
+        &pool,
+        &config,
+        im::types::TodayHorizon::Today,
+        today_start,
+        im::types::ViewVariant::All,
+    )
+    .await
+    .unwrap();
+    let labels: Vec<_> = entries
+        .iter()
+        .filter(|e| e.kind.is_task() && e.label == "expiring")
+        .map(|e| e.time_label.clone())
+        .collect();
+    assert_eq!(labels.len(), 2, "{labels:?}");
 }
 
 /// A completed recurring window shows the last completion time even while
@@ -6324,7 +6433,7 @@ async fn test_today_view_journal_shows_oneshot_completions_with_progress_and_pre
     // Preview for each entry displays the progress at that completion time (2/5, 3/5, 4/5).
     let preview1 = im::ui::build_preview(
         task_entries[0].task.as_ref().unwrap(),
-        true,
+        None,
         &config,
         &[],
         None,
@@ -6339,7 +6448,7 @@ async fn test_today_view_journal_shows_oneshot_completions_with_progress_and_pre
 
     let preview2 = im::ui::build_preview(
         task_entries[1].task.as_ref().unwrap(),
-        true,
+        None,
         &config,
         &[],
         None,
@@ -6354,7 +6463,7 @@ async fn test_today_view_journal_shows_oneshot_completions_with_progress_and_pre
 
     let preview3 = im::ui::build_preview(
         task_entries[2].task.as_ref().unwrap(),
-        true,
+        None,
         &config,
         &[],
         None,
