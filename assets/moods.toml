@@ -3,7 +3,7 @@
 
 [[pairs]]
 mood = "happy"
-color = "#84c741"
+color = "#a5f69c"
 
 [[pairs]]
 mood = "sad"
@@ -19,7 +19,7 @@ color = "#c5451e"
 
 [[pairs]]
 mood = "thoughtful"
-color = "#6B705C"
+color = "#a998d8"
 
 [[pairs]]
 mood = "purposeful"
@@ -27,7 +27,7 @@ color = "#FFC107"
 
 [[pairs]]
 mood = "passive"
-color = "#7b8caa"
+color = "#6f92c9"
 
 [[pairs]]
 mood = "frustrated"
@@ -43,7 +43,7 @@ color = "#B56547"
 
 [[pairs]]
 mood = "humble"
-color = "#3B2319"
+color = "#9c977a"
 
 [[pairs]]
 mood = "secure"
@@ -75,7 +75,7 @@ color = "#F07167"
 
 [[pairs]]
 mood = "connected"
-color = "#2A9D8F"
+color = "#17b37a"
 
 [[pairs]]
 mood = "confused"
@@ -83,7 +83,7 @@ color = "#5a0475"
 
 [[pairs]]
 mood = "lucid"
-color = "#bbcc8c"
+color = "#d2ed9c"
 
 [[pairs]]
 mood = "proud"
