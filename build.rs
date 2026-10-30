@@ -42,6 +42,8 @@ fn main() {
     #[cfg(target_os = "linux")]
     println!("cargo:rustc-link-lib=dylib=stdc++");
 
+    link_macos_compiler_rt();
+
     update_readme_usage();
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -120,6 +122,49 @@ fn main() {
     // runtime).
 }
 
+/// Fat LTO bypasses the compiler driver's implicit compiler-rt link, leaving
+/// `___isPlatformVersionAtLeast` (referenced by ONNX Runtime's CoreML EP)
+/// undefined. Pass the active toolchain's runtime archive to the linker so it
+/// is available regardless of link order.
+fn link_macos_compiler_rt() {
+    if !env::var("TARGET")
+        .unwrap_or_default()
+        .contains("apple-darwin")
+    {
+        return;
+    }
+    if !env::var("HOST")
+        .unwrap_or_default()
+        .contains("apple-darwin")
+    {
+        return;
+    }
+
+    let clang = tool_output("xcrun", &["--find", "clang"])
+        .expect("xcrun --find clang failed; an Apple toolchain is required");
+    let resource_dir =
+        tool_output(&clang, &["-print-resource-dir"]).expect("clang -print-resource-dir failed");
+    let runtime = Path::new(&resource_dir).join("lib/darwin/libclang_rt.osx.a");
+    assert!(
+        runtime.is_file(),
+        "compiler-rt runtime not found at {}",
+        runtime.display()
+    );
+    println!("cargo:rustc-link-arg={}", runtime.display());
+    println!("cargo:rerun-if-env-changed=DEVELOPER_DIR");
+}
+
+fn tool_output(program: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    Some(stdout.trim().to_string())
+}
 /// `CARGO_MANIFEST_DIR/target/cache` — shared download cache for build-time
 /// artifacts. The quantization script downloads the raw FP32 model here
 /// (`embed_<safe_name>_fp32.onnx`) and writes the INT8 QDQ graph here

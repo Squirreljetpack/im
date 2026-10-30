@@ -151,12 +151,6 @@ jobs:
         run: |
           echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=-C target-feature=-crt-static" >> $GITHUB_ENV
         shell: "bash"
-      - name: "Resolve the unused CoreML symbols lazily"
-        if: "${{ contains(matrix.targets, 'aarch64-apple-darwin') }}"
-        run: |
-          flags="-C link-arg=-Wl,-undefined,dynamic_lookup"
-          echo "RUSTFLAGS=${RUSTFLAGS} ${flags}" >> $GITHUB_ENV
-        shell: "bash"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
