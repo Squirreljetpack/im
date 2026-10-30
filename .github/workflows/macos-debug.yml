@@ -17,13 +17,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-dist-14:
-    name: dist build on macos-14 (${{ matrix.variant }})
+  build-dist:
+    name: dist build on ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        variant: [flag, noflag]
-    runs-on: macos-14
+        os: [macos-14, macos-26]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -37,33 +37,18 @@ jobs:
           test "$(wc -c < assets/model/embed.onnx)" -ge 100000000
 
       - uses: dtolnay/rust-toolchain@stable
+      - name: Toolchain
+        run: rustc -Vv
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "."
-          key: dist14-${{ matrix.variant }}
-
-      - name: Drop the aarch64-apple-darwin rustflags
-        if: matrix.variant == 'noflag'
-        run: |
-          python3 - <<'PY'
-          import re
-          path = ".cargo/config.toml"
-          text = open(path).read()
-          pattern = (
-              r"# The ort-sys aarch64-apple-darwin archive"
-              r".*?rustflags = \[[^\]]*\]\n\n"
-          )
-          text, n = re.subn(pattern, "", text, flags=re.S)
-          assert n == 1, f"expected 1 rustflags block, removed {n}"
-          open(path, "w").write(text)
-          PY
+          key: dist-${{ matrix.os }}
 
       - name: Build dist profile with symbols
         env:
           CARGO_PROFILE_DIST_STRIP: "none"
         run: |
-          cargo build --locked --profile dist \
-            --target aarch64-apple-darwin -p im
+          cargo build --profile dist --target aarch64-apple-darwin -p im
           file target/aarch64-apple-darwin/dist/im
           otool -l target/aarch64-apple-darwin/dist/im |
             grep -A4 LC_BUILD_VERSION
@@ -71,20 +56,20 @@ jobs:
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: im-dist-14-${{ matrix.variant }}
+          name: im-dist-${{ matrix.os }}
           path: target/aarch64-apple-darwin/dist/im
 
   run-26:
     name: run on macos-26 (${{ matrix.name }})
-    needs: build-dist-14
+    needs: build-dist
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: dist-flag
-            artifact: im-dist-14-flag
-          - name: dist-noflag
-            artifact: im-dist-14-noflag
+          - name: dist-14
+            artifact: im-dist-macos-14
+          - name: dist-26
+            artifact: im-dist-macos-26
     runs-on: macos-26
     timeout-minutes: 20
     steps:
@@ -114,11 +99,13 @@ jobs:
           lldb -b \
             -o 'settings set target.input-path /tmp/im-in.txt' \
             -o run \
+            -o 'process status' \
+            -o 'register read pc lr sp x0 x1' \
+            -o 'thread backtrace all' \
             -o 'bt all' \
-            -o 'frame select 1' \
             -o quit \
             -- /tmp/im-test/im :embed 2>&1 | tee /tmp/im-lldb.txt
-          tail -120 /tmp/im-lldb.txt
+          tail -160 /tmp/im-lldb.txt
 
       - name: Upload lldb log
         if: always()
@@ -145,15 +132,7 @@ jobs:
           chmod +x /tmp/im-official/im-aarch64-apple-darwin/im
           shasum -a 256 /tmp/im-official/im-aarch64-apple-darwin/im
 
-      - name: Run without debugger
-        continue-on-error: true
-        run: |
-          set +e
-          printf 'hello\n' | /tmp/im-official/im-aarch64-apple-darwin/im :embed
-          echo "exit=$?"
-
-      - name: lldb backtrace
-        if: always()
+      - name: lldb register state
         run: |
           set +e
           sudo DevToolsSecurity -enable
@@ -161,11 +140,14 @@ jobs:
           lldb -b \
             -o 'settings set target.input-path /tmp/im-in.txt' \
             -o run \
+            -o 'process status' \
+            -o 'register read pc lr sp x0 x1' \
+            -o 'thread backtrace all' \
             -o 'bt all' \
             -o quit \
             -- /tmp/im-official/im-aarch64-apple-darwin/im :embed \
             2>&1 | tee /tmp/im-lldb.txt
-          tail -120 /tmp/im-lldb.txt
+          tail -160 /tmp/im-lldb.txt
 
       - name: Upload lldb log
         if: always()
