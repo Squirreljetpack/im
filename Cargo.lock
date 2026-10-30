@@ -1574,7 +1574,7 @@ dependencies = [
 
 [[package]]
 name = "im"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "atty",
@@ -1610,7 +1610,7 @@ dependencies = [
 
 [[package]]
 name = "im-dynamic"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "im",
  "mimalloc",
