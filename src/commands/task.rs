@@ -10,43 +10,7 @@ use crate::db::{Id, TaskObject};
 use crate::editor::open_editor_for_body;
 use crate::types::{Task, TaskKind, TaskRef};
 
-/// Resolve a `-<parent_id>` short id to its stable row id plus the parent's
-/// name; errors when no task holds that short id (a completed oneshot holds
-/// `NULL` and is never resolvable).
-async fn resolve_parent_named(pool: &SqlitePool, short_id: i64) -> Result<(Id, String)> {
-    crate::db::fetch_task_id_by_short_id(pool, short_id)
-        .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!("No task with short id {short_id} exists (cannot attach it as parent)")
-        })
-}
-
-/// Resolve a TaskRef to its stable row id plus the task name.
-pub(crate) async fn resolve_task_ref_named(
-    pool: &SqlitePool,
-    task_ref: &TaskRef,
-) -> Result<(Id, String)> {
-    match task_ref {
-        TaskRef::Id(short_id) => resolve_parent_named(pool, *short_id).await,
-        TaskRef::Words(words) => {
-            let matches = crate::db::fetch_task_matching_words(pool, words).await?;
-            match matches.len() {
-                0 => anyhow::bail!("No task found matching query '{}'", words.join(" ")),
-                1 => Ok((matches[0].id, matches[0].name.clone())),
-                n => anyhow::bail!(
-                    "Multiple tasks match query '{}' (found {})",
-                    words.join(" "),
-                    n
-                ),
-            }
-        }
-        TaskRef::Pick => {
-            anyhow::bail!("Cannot resolve Pick task_ref without interactive TUI");
-        }
-    }
-}
-
-/// Resolve a TaskRef to a stable row id.
+/// Resolve a parent TaskRef to a stable row id.
 pub(crate) async fn resolve_parent(
     pool: &SqlitePool,
     config: &Config,
@@ -54,19 +18,6 @@ pub(crate) async fn resolve_parent(
     parent_ref: &TaskRef,
 ) -> Result<Option<Id>> {
     match parent_ref {
-        TaskRef::Id(short_id) => Ok(Some(resolve_parent_named(pool, *short_id).await?.0)),
-        TaskRef::Words(words) => {
-            let matches = crate::db::fetch_task_matching_words(pool, words).await?;
-            match matches.len() {
-                0 => anyhow::bail!("No task found matching query '{}'", words.join(" ")),
-                1 => Ok(Some(matches[0].id)),
-                n => anyhow::bail!(
-                    "Multiple tasks match query '{}' (found {})",
-                    words.join(" "),
-                    n
-                ),
-            }
-        }
         TaskRef::Pick => {
             if !atty::is(atty::Stream::Stdin) {
                 anyhow::bail!("Picking a parent task requires an interactive terminal");
@@ -82,6 +33,7 @@ pub(crate) async fn resolve_parent(
                 None => anyhow::bail!("Cancelled"),
             }
         }
+        task_ref => Ok(Some(super::refs::resolve_task_ref(pool, task_ref).await?)),
     }
 }
 

@@ -125,7 +125,7 @@ pub fn parse_from(args: Vec<String>) -> anyhow::Result<Command> {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        AuthSubcommand, BODY_DELIMITER, ConfigTarget, DbSubcommand, TrackerItem, TrackerPeriod,
+        BODY_DELIMITER, ConfigTarget, DbSubcommand, TrackerItem, TrackerPeriod,
     };
     use super::*;
     use crate::types::{Entry, Task, TaskKind, TaskRef, ViewMode};

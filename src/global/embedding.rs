@@ -191,11 +191,13 @@ pub fn blob_to_embedding(blob: &[u8]) -> Option<Vec<f32>> {
     if blob.len() != EMBED_DIM * 4 {
         return None;
     }
-    let mut out = Vec::with_capacity(EMBED_DIM);
-    for chunk in blob.chunks_exact(4) {
-        out.push(f32::from_le_bytes(chunk.try_into().ok()?));
-    }
-    Some(out)
+    Some(
+        blob.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
+            .collect(),
+    )
 }
 
 /// Serialize an embedding vector into a raw little-endian BLOB for SQLite.

@@ -631,8 +631,7 @@ fn scoped_last(task: &TaskRow, rows: &[CompletionRow], now: i64) -> Option<i64> 
     match crate::task::interval_start(task, now) {
         Some(floor) => group_completions(task, rows)
             .into_iter()
-            .filter(|(time, _, _)| *time >= floor)
-            .next_back()
+            .rfind(|(time, _, _)| *time >= floor)
             .map(|(time, _, _)| time),
         None => unscoped_last(task, rows),
     }
