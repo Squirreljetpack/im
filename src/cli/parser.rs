@@ -423,14 +423,14 @@ mod tests {
 
     #[test]
     fn test_parse_task_recurring_create_bare() {
-        // ! % → interactive recurring creation, prompting for duration.
+        // ! % → interactive recurring creation, prompting for the interval.
         let cmd = parse_from(args(&["!", "%"])).unwrap();
         match cmd {
             Command::Task(task) => {
                 assert_eq!(task.task_type, TaskKind::Recurring);
                 assert_eq!(task.name, None);
                 assert_eq!(task.prefill, None);
-                assert!(task.pick_duration);
+                assert_eq!(task.interval, None);
             }
             _ => panic!("Expected Task command"),
         }
@@ -438,18 +438,78 @@ mod tests {
 
     #[test]
     fn test_parse_task_recurring_create_with_name() {
-        // ! %30m <name> → recurring creation with available duration and name prefill.
-        let cmd = parse_from(args(&["!", "%30m", "exercise", "more"])).unwrap();
+        // ! %1day <name> → recurring creation with the interval and name
+        // prefilled. The interval is a single argv word, so a spaced form
+        // (`%1 day`) needs shell quoting to reach the parser intact.
+        let cmd = parse_from(args(&["!", "%1day", "exercise", "more"])).unwrap();
         match cmd {
             Command::Task(task) => {
                 assert_eq!(task.task_type, TaskKind::Recurring);
                 assert_eq!(task.name, None);
                 assert_eq!(task.prefill, Some("exercise more".to_string()));
-                assert_eq!(task.available_duration, Some(1800));
-                assert!(!task.pick_duration);
+                assert_eq!(task.interval, Some("1day".to_string()));
             }
             _ => panic!("Expected Task command"),
         }
+
+        let cmd = parse_from(args(&["!", "%1 day", "exercise"])).unwrap();
+        match cmd {
+            Command::Task(task) => {
+                assert_eq!(task.interval, Some("1 day".to_string()));
+                assert_eq!(task.prefill, Some("exercise".to_string()));
+            }
+            _ => panic!("Expected Task command"),
+        }
+
+        // `! %1day :exercise more` → the `:` opens the name section, so its
+        // marker is stripped from the prefilled name.
+        let cmd = parse_from(args(&["!", "%1day", ":exercise", "more"])).unwrap();
+        match cmd {
+            Command::Task(task) => {
+                assert_eq!(task.interval, Some("1day".to_string()));
+                assert_eq!(task.prefill, Some("exercise more".to_string()));
+            }
+            _ => panic!("Expected Task command"),
+        }
+
+        // A `:` word also ends the interval field, which lets it span words.
+        let cmd = parse_from(args(&["!", "%1", "day", ":exercise"])).unwrap();
+        match cmd {
+            Command::Task(task) => {
+                assert_eq!(task.interval, Some("1 day".to_string()));
+                assert_eq!(task.prefill, Some("exercise".to_string()));
+            }
+            _ => panic!("Expected Task command"),
+        }
+
+        // Without a `:` word, only the first word is the interval; a `%`
+        // word further along stays part of the name.
+        let cmd = parse_from(args(&["!", "%1day", "exercise", "%2day"])).unwrap();
+        match cmd {
+            Command::Task(task) => {
+                assert_eq!(task.interval, Some("1day".to_string()));
+                assert_eq!(task.prefill, Some("exercise %2day".to_string()));
+            }
+            _ => panic!("Expected Task command"),
+        }
+
+        // A bare `:` name marker leaves nothing to prefill.
+        let cmd = parse_from(args(&["!", "%1day", ":"])).unwrap();
+        match cmd {
+            Command::Task(task) => {
+                assert_eq!(task.interval, Some("1day".to_string()));
+                assert_eq!(task.prefill, None);
+            }
+            _ => panic!("Expected Task command"),
+        }
+
+        // A word between the interval and the name marker joins the interval,
+        // and the interval itself has to come first.
+        assert!(parse_from(args(&["!", "%1day", "exercise", ":more"])).is_err());
+        assert!(parse_from(args(&["!", ":exercise", "%1day"])).is_err());
+
+        // An unparseable interval fails at parse time, before any prompt.
+        assert!(parse_from(args(&["!", "%bogus", "exercise"])).is_err());
 
         // Whitespace-only name trims to absent.
         let cmd = parse_from(args(&["!", "%", "  "])).unwrap();
@@ -629,13 +689,22 @@ mod tests {
 
     #[test]
     fn test_parse_task_recurring_body() {
-        // `! %30m exercise . notes` → recurring creation with the name
-        // pre-filling the name prompt and the post-delimiter text as the
-        // body.
-        let cmd = parse_from(args(&["!", "%30m", "exercise", ".", "notes"])).unwrap();
+        // `! %1day exercise . notes` → recurring creation with the interval
+        // and name pre-filled and the post-delimiter text as the body.
+        let cmd = parse_from(args(&["!", "%1day", "exercise", ".", "notes"])).unwrap();
         match cmd {
             Command::Task(task) => {
                 assert_eq!(task.task_type, TaskKind::Recurring);
+                assert_eq!(task.prefill, Some("exercise".to_string()));
+                assert_eq!(task.body, Ok("notes".to_string()));
+            }
+            _ => panic!("Expected Task command"),
+        }
+
+        // The `:` name marker does not eat the body delimiter.
+        let cmd = parse_from(args(&["!", "%1day", ":exercise", ".", "notes"])).unwrap();
+        match cmd {
+            Command::Task(task) => {
                 assert_eq!(task.prefill, Some("exercise".to_string()));
                 assert_eq!(task.body, Ok("notes".to_string()));
             }
@@ -645,7 +714,7 @@ mod tests {
 
     #[test]
     fn test_parse_task_recurring_bare_delimiter_empty_body() {
-        let cmd = parse_from(args(&["!", "%30m", "exercise", "."])).unwrap();
+        let cmd = parse_from(args(&["!", "%1day", "exercise", "."])).unwrap();
         match cmd {
             Command::Task(task) => {
                 assert_eq!(task.task_type, TaskKind::Recurring);

@@ -9,7 +9,7 @@ Entry creation full grammar:
     link  := -<tracker> [value] | +<task> [count]
   
   im ! [+[task]] [name] [@<time>]                create a oneshot task (linked to a parent)
-  im ! %<duration> [name]                        create a recurring task (interactive)
+  im ! %[<interval>] [[:]name]                   create a recurring task (interactive)
   im ! @ [<time>] [:<name>] [%<duration>]        create a scheduled task 
                                                         (interactive if partial)
   im +[task] [count]                             edit a task or update its completion state

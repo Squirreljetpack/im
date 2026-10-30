@@ -5,10 +5,16 @@ pub(crate) fn parse_special_command(args: &[String]) -> anyhow::Result<Command> 
     let first = &args[0];
 
     if first == ":embed" {
+        if let Some(help) = help_flag(&args[1..]) {
+            return Ok(help);
+        }
         return Ok(Command::Embed);
     }
 
     if first == ":score" {
+        if let Some(help) = help_flag(&args[1..]) {
+            return Ok(help);
+        }
         if args.len() < 3 {
             anyhow::bail!("Usage: im :score \"start\" \"end\"");
         }
@@ -19,6 +25,9 @@ pub(crate) fn parse_special_command(args: &[String]) -> anyhow::Result<Command> 
     }
 
     if first == ":config" || first == ":c" {
+        if let Some(help) = help_flag(&args[1..]) {
+            return Ok(help);
+        }
         let target = match args.get(1).map(String::as_str) {
             None => ConfigTarget::Main,
             Some("moods") => ConfigTarget::Moods,
@@ -35,6 +44,9 @@ pub(crate) fn parse_special_command(args: &[String]) -> anyhow::Result<Command> 
     }
 
     if first == ":db" {
+        if let Some(help) = help_flag(&args[1..]) {
+            return Ok(help);
+        }
         return match args.get(1).map(String::as_str) {
             Some("prune") => {
                 if args.len() != 2 {
@@ -69,6 +81,9 @@ pub(crate) fn parse_special_command(args: &[String]) -> anyhow::Result<Command> 
     }
 
     if first == ":color" {
+        if let Some(help) = help_flag(&args[1..]) {
+            return Ok(help);
+        }
         if args.len() < 2 {
             anyhow::bail!("Usage: im :color \"<mood>\"");
         }
@@ -78,6 +93,9 @@ pub(crate) fn parse_special_command(args: &[String]) -> anyhow::Result<Command> 
     }
 
     if first == ":clear" {
+        if let Some(help) = help_flag(&args[1..]) {
+            return Ok(help);
+        }
         let date_arg = if args.len() > 1 {
             let joined = args[1..].join(" ");
             let trimmed = joined.trim();
@@ -99,7 +117,7 @@ pub(crate) fn parse_special_command(args: &[String]) -> anyhow::Result<Command> 
     //   `:week|month|year` — period as a bare suffix on the first token
     // A stray `:<unknown>` token (e.g. `:foo`) is rejected: if the user
     // meant an id filter, they need to type `im : foo` with a space.
-    if first == ":" || matches!(first.as_str(), ":week" | ":month" | ":year") {
+    if is_bare_tracker_form(first) {
         return parse_tracker_command(args);
     }
 
@@ -108,6 +126,9 @@ pub(crate) fn parse_special_command(args: &[String]) -> anyhow::Result<Command> 
     }
 
     if first == ":sync" {
+        if let Some(help) = help_flag(&args[1..]) {
+            return Ok(help);
+        }
         let reset = match args.get(1).map(String::as_str) {
             None => false,
             Some("--reset") => true,
@@ -124,8 +145,28 @@ pub(crate) fn parse_special_command(args: &[String]) -> anyhow::Result<Command> 
     anyhow::bail!("Unknown special command: {}", first)
 }
 
+/// Help requested by a subcommand: `--help` / `-h` anywhere among its own
+/// arguments (`im :db prune --help`). Each subcommand resolves this for
+/// itself, so one that grows its own text can answer with a different
+/// command instead of the top-level [`Command::Help`].
+fn help_flag(args: &[String]) -> Option<Command> {
+    args.iter()
+        .any(|a| a == "--help" || a == "-h")
+        .then_some(Command::Help)
+}
+
+/// `im :` and its period variants — the tracker grids, whose arguments are
+/// all tracker ids. Kept apart from the named subcommands because these take
+/// no `--help` token (an id may legitimately look like a flag).
+fn is_bare_tracker_form(first: &str) -> bool {
+    matches!(first, ":" | ":week" | ":month" | ":year")
+}
+
 /// `im :auth <register|login|status|logout>`.
 fn parse_auth_command(args: &[String]) -> anyhow::Result<Command> {
+    if let Some(help) = help_flag(args) {
+        return Ok(help);
+    }
     let Some(name) = args.first() else {
         anyhow::bail!("`im :auth` needs a subcommand: register, login, status or logout");
     };
