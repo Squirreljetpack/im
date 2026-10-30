@@ -667,7 +667,8 @@ pub async fn fetch_oneshot_task_for_update(
         r#"SELECT id, name, target_count, short_id,
                   COALESCE((SELECT SUM(count) FROM todo_completions
                             WHERE todo_id = todos.id), 0) AS prior_completions
-           FROM todos WHERE short_id = ? AND interval_secs IS NULL"#,
+           FROM todos WHERE short_id = ? AND interval_secs IS NULL
+             AND available_duration_secs IS NULL"#,
     )
     .bind(short_id)
     .fetch_optional(pool)
@@ -691,7 +692,8 @@ pub async fn fetch_oneshot_task_by_id_for_update(
         r#"SELECT id, name, target_count, short_id,
                   COALESCE((SELECT SUM(count) FROM todo_completions
                             WHERE todo_id = todos.id), 0) AS prior_completions
-           FROM todos WHERE id = ? AND interval_secs IS NULL"#,
+           FROM todos WHERE id = ? AND interval_secs IS NULL
+             AND available_duration_secs IS NULL"#,
     )
     .bind(id)
     .fetch_optional(pool)
@@ -720,7 +722,7 @@ pub async fn fetch_oneshot_matching_words(
         r#"SELECT id, name, target_count, short_id,
                   COALESCE((SELECT SUM(count) FROM todo_completions
                             WHERE todo_id = todos.id), 0) AS prior_completions
-           FROM todos WHERE interval_secs IS NULL"#,
+           FROM todos WHERE interval_secs IS NULL AND available_duration_secs IS NULL"#,
     )
     .fetch_all(pool)
     .await
