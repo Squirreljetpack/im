@@ -1,0 +1,131 @@
+name: macOS embed crash
+
+# Throwaway branch workflow: reproduce the `im :embed` segfault on arm64 macOS
+# and capture a symbolized backtrace. Not part of the release pipeline.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["debug/macos-*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-debug-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backtrace:
+    name: lldb backtrace
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Environment
+        run: |
+          sw_vers
+          uname -m
+          size=$(wc -c < assets/model/embed.onnx)
+          echo "embed.onnx bytes: $size"
+          test "$size" -ge 100000000
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+
+      - name: Build with symbols
+        env:
+          CARGO_PROFILE_RELEASE_STRIP: "none"
+        run: cargo build --release -p im
+
+      - name: Run without debugger
+        continue-on-error: true
+        env:
+          MIMALLOC_VERBOSE: "1"
+          MIMALLOC_SHOW_ERRORS: "1"
+        run: |
+          set +e
+          printf 'hello\n' | ./target/release/im :embed
+          echo "exit=$?"
+
+      - name: lldb backtrace
+        if: always()
+        env:
+          MIMALLOC_VERBOSE: "1"
+          MIMALLOC_SHOW_ERRORS: "1"
+        run: |
+          set +e
+          sudo DevToolsSecurity -enable
+          printf 'hello\n' > /tmp/im-in.txt
+          lldb -b \
+            -o 'settings set target.input-path /tmp/im-in.txt' \
+            -o run \
+            -o 'image list -o -f' \
+            -o 'bt all' \
+            -o 'frame select 1' \
+            -o 'register read pc lr sp x0 x1' \
+            -o quit \
+            -- ./target/release/im :embed 2>&1 | tee /tmp/im-lldb.txt
+          echo "===== lldb log ====="
+          tail -200 /tmp/im-lldb.txt
+
+      - name: Upload lldb log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lldb-trace
+          path: /tmp/im-lldb.txt
+          if-no-files-found: warn
+
+  link-check:
+    name: link without dynamic_lookup
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+          key: no-dynamic-lookup
+
+      - name: Drop the aarch64-apple-darwin rustflags
+        run: |
+          python3 - <<'PY'
+          import re
+          path = ".cargo/config.toml"
+          text = open(path).read()
+          pattern = (
+              r"# The ort-sys aarch64-apple-darwin archive"
+              r".*?rustflags = \[[^\]]*\]\n\n"
+          )
+          text, n = re.subn(pattern, "", text, flags=re.S)
+          assert n == 1, f"expected 1 rustflags block, removed {n}"
+          open(path, "w").write(text)
+          PY
+          git diff -- .cargo/config.toml
+
+      - name: Link and capture undefined symbols
+        continue-on-error: true
+        run: |
+          set +e
+          cargo build --release -p im 2>&1 | tee /tmp/im-link.txt
+          echo "exit=${PIPESTATUS[0]}"
+          echo "===== unresolved ====="
+          grep -iE "undefined|symbol|error" /tmp/im-link.txt | tail -80
+
+      - name: Upload link log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: link-log
+          path: /tmp/im-link.txt
+          if-no-files-found: warn
