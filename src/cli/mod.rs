@@ -120,12 +120,13 @@ pub enum Command {
     Db {
         sub: DbSubcommand,
     },
-    /// `im :color <mood>` — embed a mood string (with `"mood "`
+    /// `im :color [mood]` — embed a mood string (with `"mood "`
     /// prefix) and print the projected Oklab / sRGB color plus intermediate
     /// pipeline values (raw scores, blend factors, per-axis colors).
-    /// Diagnostic tool for debugging the mood-color pipeline.
+    /// Diagnostic tool for debugging the mood-color pipeline. Without a
+    /// mood, prints every anchor mood with a swatch of its color.
     Color {
-        mood: String,
+        mood: Option<String>,
     },
     /// `im :clear [@date]` — clear all mood entries from that day.
     Clear {

@@ -1841,7 +1841,7 @@ mod tests {
     fn test_parse_color() {
         let cmd = parse_from(args(&[":color", "drained"])).unwrap();
         match cmd {
-            Command::Color { mood } => assert_eq!(mood, "drained"),
+            Command::Color { mood } => assert_eq!(mood.as_deref(), Some("drained")),
             _ => panic!("Expected Color command"),
         }
     }
@@ -1850,15 +1850,19 @@ mod tests {
     fn test_parse_color_multword() {
         let cmd = parse_from(args(&[":color", "mood", "drained"])).unwrap();
         match cmd {
-            Command::Color { mood } => assert_eq!(mood, "mood drained"),
+            Command::Color { mood } => assert_eq!(mood.as_deref(), Some("mood drained")),
             _ => panic!("Expected Color command"),
         }
     }
 
     #[test]
-    fn test_parse_color_rejects_empty() {
-        let result = parse_from(args(&[":color"]));
-        assert!(result.is_err());
+    fn test_parse_bare_color_lists_palette() {
+        // Bare :color has no mood to diagnose - it lists the anchor palette.
+        let cmd = parse_from(args(&[":color"])).unwrap();
+        match cmd {
+            Command::Color { mood } => assert_eq!(mood, None),
+            _ => panic!("Expected Color command"),
+        }
     }
 
     #[test]
