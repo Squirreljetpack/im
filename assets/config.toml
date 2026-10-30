@@ -9,12 +9,12 @@ prefix_string = "Emotional state: "
 base_string = "Emotional state"
 
 # How decisively the strongest anchor mood wins the final color (1.0 = even mix, higher = dominant).
-blend_steepness = 2.0
+blend_steepness = 4.0
 
 # How strongly emotional saliency biases the day-average embedding behind a
 # tracker-grid dot: per-mood weights are s^k, so 1 = plain saliency weighting,
 # higher = the most salient moods of the day dominate its color.
-grid_blend_steepness = 1
+grid_blend_steepness = 2.5
 
 # How much emotional intensity (saliency) moves a color away from neutral:
 # 0 disables it entirely, 100 keeps the full effect.
