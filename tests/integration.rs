@@ -2758,6 +2758,229 @@ async fn test_today_view_completed_today_inclusion_and_time_label() {
     assert!(names_a.contains(&"completed window passed"));
 }
 
+/// The completed-on row keeps the day's completion as its time label while
+/// the preview's `last:` is the newest completion in the bar's interval —
+/// which can be on a later day when the interval spans past midnight.
+#[tokio::test]
+async fn test_today_view_completed_on_last_is_interval_scoped() {
+    let pool = test_pool().await.unwrap();
+    let config = Config::default();
+    im::color::ColorAxes::build(&pool, &config.moods)
+        .await
+        .unwrap();
+
+    let anchored_day = im::date::today_start() - 3 * 86_400;
+    // A two-day interval starting two days after the anchored day: the
+    // interval containing the anchored day's completion is
+    // [anchored_day, anchored_day + 2 days), so a completion on the next day
+    // belongs to the same interval but falls outside the day window.
+    let id = insert_recurring_task(
+        &pool,
+        "spans midnight",
+        anchored_day + 2 * 86_400,
+        2 * 86_400,
+        None,
+        3,
+        None,
+    )
+    .await;
+    let day_done = anchored_day + 21 * 3600 + 10 * 60;
+    let next_done = anchored_day + 86_400 + 10 * 3600;
+    update_task(&pool, id, day_done, 1).await;
+    update_task(&pool, id, next_done, 1).await;
+
+    let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
+        &pool,
+        &config,
+        im::types::TodayHorizon::Today,
+        anchored_day,
+        im::types::ViewVariant::All,
+    )
+    .await
+    .unwrap();
+    let row = entries
+        .iter()
+        .find(|e| e.kind.is_task() && e.label == "spans midnight")
+        .expect("the completion must surface the task on the anchored day");
+    assert!(row.recurring_window.is_none(), "no window on this day");
+    assert_eq!(row.time_label, "21:10");
+    let task = row.task.as_ref().expect("task row");
+    assert_eq!(task.completions, Some(2));
+    assert_eq!(task.last_time, Some(next_done));
+}
+
+/// A completion logged before the task's `start_time` (the start was moved
+/// forward) surfaces on the anchored day, scoped to the interval that contains
+/// it — the interval ending at `start_time`, which has no availability window.
+/// When the same day also has a window, the completion row sits alongside it.
+#[tokio::test]
+async fn test_today_view_pre_start_completion_rows() {
+    let pool = test_pool().await.unwrap();
+    let config = Config::default();
+    im::color::ColorAxes::build(&pool, &config.moods)
+        .await
+        .unwrap();
+
+    let anchored_day = im::date::today_start() - 2 * 86_400;
+    // The chain starts the day after the anchored day, so the anchored day has
+    // no availability window at all (`start_time > day_end`) and the row can
+    // only come from the completed-on merge.
+    let no_window = insert_recurring_task(
+        &pool,
+        "moved start",
+        anchored_day + 86_400,
+        86_400,
+        None,
+        3,
+        None,
+    )
+    .await;
+    update_task(&pool, no_window, anchored_day + 21 * 3600 + 10 * 60, 1).await;
+    // Start moved to 18:00; the 10:00 completion belongs to the interval
+    // ending at 18:00, which has no availability window either.
+    let windowed = insert_recurring_task(
+        &pool,
+        "moved later",
+        anchored_day + 18 * 3600,
+        86_400,
+        None,
+        3,
+        None,
+    )
+    .await;
+    update_task(&pool, windowed, anchored_day + 10 * 3600, 1).await;
+
+    let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
+        &pool,
+        &config,
+        im::types::TodayHorizon::Today,
+        anchored_day,
+        im::types::ViewVariant::All,
+    )
+    .await
+    .unwrap();
+    let rows_for = |label: &str| {
+        entries
+            .iter()
+            .filter(|e| e.kind.is_task() && e.label == label)
+            .collect::<Vec<_>>()
+    };
+
+    let rows = rows_for("moved start");
+    assert_eq!(rows.len(), 1, "no window on this day");
+    assert!(rows[0].recurring_window.is_none());
+    assert_eq!(rows[0].time_label, "21:10");
+    assert_eq!(rows[0].task.as_ref().unwrap().completions, Some(1));
+
+    let rows = rows_for("moved later");
+    assert_eq!(rows.len(), 2, "completion row plus its window");
+    let completion = rows
+        .iter()
+        .find(|e| e.recurring_window.is_none())
+        .expect("pre-start completion row");
+    assert_eq!(completion.time_label, "10:00");
+    assert_eq!(completion.task.as_ref().unwrap().completions, Some(1));
+    let window = rows
+        .iter()
+        .find(|e| e.recurring_window.is_some())
+        .expect("window row");
+    assert_eq!(window.task.as_ref().unwrap().completions, Some(0));
+}
+
+/// The merge is interval-keyed, so a pre-start completion survives even when
+/// the same task has window rows later in a longer horizon.
+#[tokio::test]
+async fn test_today_view_pre_start_completion_survives_window_rows() {
+    let pool = test_pool().await.unwrap();
+    let config = Config::default();
+    im::color::ColorAxes::build(&pool, &config.moods)
+        .await
+        .unwrap();
+
+    let anchored_day = im::date::today_start() - 2 * 86_400;
+    let id = insert_recurring_task(
+        &pool,
+        "week window",
+        anchored_day + 86_400,
+        86_400,
+        None,
+        3,
+        None,
+    )
+    .await;
+    update_task(&pool, id, anchored_day + 21 * 3600 + 10 * 60, 1).await;
+
+    let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
+        &pool,
+        &config,
+        im::types::TodayHorizon::Week,
+        anchored_day,
+        im::types::ViewVariant::All,
+    )
+    .await
+    .unwrap();
+
+    let completion = entries
+        .iter()
+        .find(|e| e.kind.is_task() && e.label == "week window" && e.recurring_window.is_none())
+        .expect("pre-start completion rows must not be dropped by later windows");
+    assert_eq!(completion.time_label, "21:10");
+    assert_eq!(completion.task.as_ref().unwrap().completions, Some(1));
+
+    let window = entries
+        .iter()
+        .find(|e| e.kind.is_task() && e.label == "week window" && e.recurring_window.is_some())
+        .expect("the task's first availability window");
+    assert_eq!(window.task.as_ref().unwrap().completions, Some(0));
+}
+
+/// The completed-on fetch groups the day's completions by interval, so two
+/// pre-start intervals on the same day produce two rows.
+#[tokio::test]
+async fn test_today_view_multiple_pre_start_intervals() {
+    let pool = test_pool().await.unwrap();
+    let config = Config::default();
+    im::color::ColorAxes::build(&pool, &config.moods)
+        .await
+        .unwrap();
+
+    let anchored_day = im::date::today_start() - 2 * 86_400;
+    let id = insert_recurring_task(
+        &pool,
+        "two intervals",
+        anchored_day + 86_400,
+        6 * 3600,
+        None,
+        3,
+        None,
+    )
+    .await;
+    update_task(&pool, id, anchored_day + 2 * 3600, 1).await;
+    update_task(&pool, id, anchored_day + 8 * 3600, 1).await;
+
+    let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
+        &pool,
+        &config,
+        im::types::TodayHorizon::Today,
+        anchored_day,
+        im::types::ViewVariant::All,
+    )
+    .await
+    .unwrap();
+
+    let rows: Vec<_> = entries
+        .iter()
+        .filter(|e| e.kind.is_task() && e.label == "two intervals")
+        .collect();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|e| e.recurring_window.is_none()));
+    let labels: Vec<&str> = rows.iter().map(|e| e.time_label.as_str()).collect();
+    assert_eq!(labels, vec!["02:00", "08:00"]);
+    for row in rows {
+        assert_eq!(row.task.as_ref().unwrap().completions, Some(1));
+    }
+}
+
 /// TodayView recurring rows are per availability window: All shows every
 /// window intersecting the horizon, B does the same on a past-anchored day
 /// (today/future anchors keep only the current/next window per task), and A
@@ -2842,12 +3065,9 @@ async fn test_today_view_recurring_window_display_swap() {
     // start of today.
     let today_start = im::date::today_start();
     insert_recurring_task(&pool, "six-hourly", today_start, 6 * 3600, None, 0, None).await;
-    let current = im::date::interval_start_unix_secs(
-        today_start,
-        interval_span(6 * 3600),
-        im::date::now(),
-    )
-    .unwrap();
+    let current =
+        im::date::interval_start_unix_secs(today_start, interval_span(6 * 3600), im::date::now())
+            .unwrap();
     let current_label = im::date::format_time(current);
 
     async fn labels(
@@ -2856,15 +3076,10 @@ async fn test_today_view_recurring_window_display_swap() {
         day: i64,
         show: im::types::ViewVariant,
     ) -> Vec<String> {
-        let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
-            pool,
-            config,
-            im::types::TodayHorizon::Today,
-            day,
-            show,
-        )
-        .await
-        .unwrap();
+        let im::today::TodayFetch { entries, .. } =
+            im::today::fetch_today_entries(pool, config, im::types::TodayHorizon::Today, day, show)
+                .await
+                .unwrap();
         entries
             .iter()
             .filter(|e| e.kind.is_task() && e.label == "six-hourly")
@@ -6661,10 +6876,7 @@ async fn test_scheduled_completion_is_one_cell_written_in_place() {
         .unwrap();
     assert_eq!(state(pool.clone()).await, vec![(derived.to_string(), -1)]);
     assert_eq!(completions(pool.clone()).await, None);
-    assert!(!im::task::is_task_done(
-        0,
-        completions(pool.clone()).await
-    ));
+    assert!(!im::task::is_task_done(0, completions(pool.clone()).await));
 
     im::db::set_scheduled_completion(&pool, task, Some(1))
         .await
@@ -6750,7 +6962,10 @@ async fn a_scheduled_task_takes_no_completion_delta() {
     let by_short_id = im::db::fetch_oneshot_task_for_update(&pool, short_id)
         .await
         .unwrap();
-    assert!(by_short_id.is_none(), "a scheduled task has no oneshot update");
+    assert!(
+        by_short_id.is_none(),
+        "a scheduled task has no oneshot update"
+    );
 }
 
 /// Directly plant completion rows at chosen moments, so a test can exercise
@@ -6778,13 +6993,12 @@ async fn test_an_undo_lands_on_the_completion_it_takes_back() {
 
     // The correction carries the moment it corrects, so a reader that groups by
     // time sees the net there instead of a completion followed by a smaller one.
-    let cancelled_at: i64 = sqlx::query_scalar(
-        "SELECT time FROM todo_completions WHERE todo_id = ? AND count < 0",
-    )
-    .bind(task)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let cancelled_at: i64 =
+        sqlx::query_scalar("SELECT time FROM todo_completions WHERE todo_id = ? AND count < 0")
+            .bind(task)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(cancelled_at, 2_000);
 
     // One moment stands (1 at 1000); the 2000 moment nets to zero and is gone.
