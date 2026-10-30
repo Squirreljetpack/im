@@ -1,8 +1,8 @@
 name: macOS embed crash
 
-# Throwaway branch workflow: fat LTO omits compiler-rt, leaving
-# ___isPlatformVersionAtLeast undefined. Test explicitly linking
-# libclang_rt.osx.a from the active Xcode toolchain.
+# Throwaway branch workflow: verify that build.rs linking libclang_rt.osx.a
+# keeps ___isPlatformVersionAtLeast defined under fat LTO, and that the
+# resulting binary runs on macOS 26.
 
 on:
   workflow_dispatch:
@@ -17,107 +17,92 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-end:
-    name: build with compiler-rt as input
-    runs-on: macos-26
+  build:
+    name: build ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: dist-14
+            os: macos-14
+            profile: dist
+            target: aarch64-apple-darwin
+          - name: dist-26
+            os: macos-26
+            profile: dist
+            target: aarch64-apple-darwin
+          - name: release-26
+            os: macos-26
+            profile: release
+            target: ""
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
           lfs: true
-      - run: test "$(wc -c < assets/model/embed.onnx)" -ge 100000000
+
+      - name: Environment
+        run: |
+          sw_vers
+          test "$(wc -c < assets/model/embed.onnx)" -ge 100000000
+
       - uses: dtolnay/rust-toolchain@stable
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "."
-          key: crt-end
-      - name: Build
+          key: ${{ matrix.name }}
+
+      - name: Build with symbols
         env:
           CARGO_PROFILE_DIST_STRIP: "none"
-          CARGO_PROFILE_DIST_LTO: fat
+          CARGO_PROFILE_RELEASE_STRIP: "none"
         run: |
           set -e
-          RT=$("$(xcrun --find clang)" -print-resource-dir)
-          RT=$RT/lib/darwin/libclang_rt.osx.a
-          ls -l "$RT"
-          export RUSTFLAGS="-C link-arg=$RT -C link-arg=-Wl,-undefined,error"
-          cargo build --profile dist --target aarch64-apple-darwin -p im
-          llvm-nm -m target/aarch64-apple-darwin/dist/im |
-            grep isPlatformVersionAtLeast || true
+          target="${{ matrix.target }}"
+          cargo build --profile ${{ matrix.profile }} \
+            ${target:+--target $target} -p im
+          dir="target/${target:+$target/}${{ matrix.profile }}"
+          ls -l "$dir/im"
+          llvm-nm -m "$dir/im" | grep isPlatformVersionAtLeast
           mkdir -p /tmp/out
-          cp target/aarch64-apple-darwin/dist/im /tmp/out/im
-      - uses: actions/upload-artifact@v4
+          cp "$dir/im" /tmp/out/im
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
         with:
-          name: im-crt-end
+          name: im-${{ matrix.name }}
           path: /tmp/out/im
 
-  run-end:
-    name: run compiler-rt-as-input
-    needs: build-end
+  run:
+    name: run ${{ matrix.name }} on macos-26
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: dist-14
+          - name: dist-26
+          - name: release-26
     runs-on: macos-26
     timeout-minutes: 20
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: im-crt-end
+          name: im-${{ matrix.name }}
           path: /tmp/im-test
-      - name: Run
-        continue-on-error: true
-        run: |
-          set +e
-          chmod +x /tmp/im-test/im
-          printf 'hello\n' | /tmp/im-test/im :embed
-          echo "exit=$?"
 
-  build-force:
-    name: build with force_load compiler-rt
-    runs-on: macos-26
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          lfs: true
-      - run: test "$(wc -c < assets/model/embed.onnx)" -ge 100000000
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "."
-          key: crt-force
-      - name: Build
-        env:
-          CARGO_PROFILE_DIST_STRIP: "none"
-          CARGO_PROFILE_DIST_LTO: fat
+      - name: Embed
         run: |
-          set -e
-          RT=$("$(xcrun --find clang)" -print-resource-dir)
-          RT=$RT/lib/darwin/libclang_rt.osx.a
-          ls -l "$RT"
-          export RUSTFLAGS="-C link-arg=-Wl,-force_load,$RT"
-          export RUSTFLAGS="$RUSTFLAGS -C link-arg=-Wl,-undefined,error"
-          cargo build --profile dist --target aarch64-apple-darwin -p im
-          llvm-nm -m target/aarch64-apple-darwin/dist/im |
-            grep isPlatformVersionAtLeast || true
-          mkdir -p /tmp/out
-          cp target/aarch64-apple-darwin/dist/im /tmp/out/im
-      - uses: actions/upload-artifact@v4
-        with:
-          name: im-crt-force
-          path: /tmp/out/im
-
-  run-force:
-    name: run force_load compiler-rt
-    needs: build-force
-    runs-on: macos-26
-    timeout-minutes: 20
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: im-crt-force
-          path: /tmp/im-test
-      - name: Run
-        continue-on-error: true
-        run: |
-          set +e
           chmod +x /tmp/im-test/im
-          printf 'hello\n' | /tmp/im-test/im :embed
+          printf 'hello\n' | /tmp/im-test/im :embed > /tmp/im-out.txt
           echo "exit=$?"
+          wc -w /tmp/im-out.txt
+
+      - name: Color
+        run: |
+          /tmp/im-test/im :color "glad i got the protocol working" \
+            > /tmp/im-color.txt
+          echo "exit=$?"
+          cat /tmp/im-color.txt
