@@ -212,6 +212,11 @@ pub enum Interval {
 pub struct Skip {
     pub unit: Interval,
     pub skip: i32,
+    /// Set by the day-name keywords (`today`, `yesterday`/`y`, `tomorrow`,
+    /// `yesterweek`), which name a whole calendar day: without a time part
+    /// they resolve to that day's start instead of keeping the base
+    /// time-of-day. Interval forms (`3 days ago`, `-3`) stay offsets.
+    pub day_anchor: bool,
 }
 
 impl Skip {
@@ -226,7 +231,11 @@ impl Skip {
                     .checked_add(Span::new().days((days as i64) * (self.skip as i64)))
                     .or_err("bad date")?;
                 if ts.empty() {
-                    Ok(date)
+                    if self.day_anchor {
+                        date.start_of_day().or_err("bad date")
+                    } else {
+                        Ok(date)
+                    }
                 } else {
                     ts.to_date_time(date.date(), tz)
                 }
@@ -389,6 +398,18 @@ pub enum DateSpec {
     Absolute(AbsDate), // Y M D (e.g. 2018-06-02, 4 July 2017)
     Relative(Skip),    // n U (e.g. 2min, 3 years ago, -2d)
     FromName(ByName),  // (e.g. 'next fri', 'jul')
+    Shift(Shift),      // n U from <base> (e.g. 3 days from today)
+}
+
+/// `N unit from <base>`: the operand is resolved against the same base
+/// expression and then shifted by the interval, so its own alignment carries
+/// over — `3 days from now` is a delta keeping the clock time, `3 days from
+/// today` is midnight three days out, `3 days from 2pm` is 14:00 that day.
+#[derive(Debug)]
+pub struct Shift {
+    pub unit: Interval,
+    pub skip: i32,
+    pub base: Box<DateTimeSpec>,
 }
 
 impl DateSpec {
@@ -405,7 +426,21 @@ impl DateSpec {
     }
 
     pub fn skip(unit: Interval, skip: i32) -> DateSpec {
-        DateSpec::Relative(Skip { unit, skip })
+        DateSpec::Relative(Skip {
+            unit,
+            skip,
+            day_anchor: false,
+        })
+    }
+
+    /// A day-anchored skip (`today`, `yesterday`, `3 days past`): resolves to
+    /// the start of the resulting day when no time part follows.
+    pub fn day_skip(unit: Interval, skip: i32) -> DateSpec {
+        DateSpec::Relative(Skip {
+            unit,
+            skip,
+            day_anchor: true,
+        })
     }
 
     /// chrono-english parity: `to_*` methods take/consume their receiver.
@@ -419,6 +454,22 @@ impl DateSpec {
             }
             Relative(skip) => skip.to_date_time(base, ts), // might need time
             FromName(byname) => byname.to_date_time(base, ts, american),
+            Shift(shift) => {
+                let DateTimeSpec { date, time } = *shift.base;
+                let inner_ts = time.unwrap_or_else(TimeSpec::new_empty);
+                let inner = match date {
+                    Some(dspec) => dspec.to_date_time(base, &inner_ts, american)?,
+                    // no date, time set for today's date (as at the top level)
+                    None => inner_ts.to_date_time(base.date(), base.time_zone())?,
+                };
+                let skip = shift.skip as i64;
+                let span = match shift.unit {
+                    Interval::Seconds(secs) => Span::new().seconds(secs as i64 * skip),
+                    Interval::Days(days) => Span::new().days(days as i64 * skip),
+                    Interval::Months(mm) => Span::new().months(mm as i64 * skip),
+                };
+                inner.checked_add(span).or_err("bad date")
+            }
         }
     }
 }

@@ -85,15 +85,24 @@ impl<'a> DateParser<'a> {
             }
         }
         if let Some(name) = t.as_iden() {
+            // Day-name keywords name a calendar day, so a missing time part
+            // resolves to that day's start. `now` is the exception: it is the
+            // base instant itself.
             let shortcut = match name {
-                "now" | "today" => Some((TimeUnit::Day, 0)),
-                "yesterday" | "y" => Some((TimeUnit::Day, -1)),
-                "tomorrow" => Some((TimeUnit::Day, 1)),
-                "yesterweek" => Some((TimeUnit::Week, -1)),
+                "now" => Some((TimeUnit::Day, 0, false)),
+                "today" => Some((TimeUnit::Day, 0, true)),
+                "yesterday" | "y" => Some((TimeUnit::Day, -1, true)),
+                "tomorrow" => Some((TimeUnit::Day, 1, true)),
+                "yesterweek" => Some((TimeUnit::Week, -1, true)),
                 _ => None,
             };
-            if let Some((unit, skip)) = shortcut {
-                return Ok(Some(DateSpec::skip(unit.to_interval(), skip)));
+            if let Some((unit, skip, day_anchor)) = shortcut {
+                let interval = unit.to_interval();
+                return Ok(Some(if day_anchor {
+                    DateSpec::day_skip(interval, skip)
+                } else {
+                    DateSpec::skip(interval, skip)
+                }));
             } else if let Some(d) = Direction::from_name(name) {
                 self.direct = d;
             } else if let Some(align) = DayAlign::from_name(name) {
@@ -174,44 +183,75 @@ impl<'a> DateParser<'a> {
                         {
                             // '2 days'
                             let mut n = n as i32;
+                            let mut anchored = false;
                             if sign {
                                 n = -n;
                             } else {
                                 let t = self.scanner.get();
-                                let got_marker = if let Some(name) = t.as_iden() {
+                                let mut got_marker = true;
+                                if let Some(name) = t.as_iden() {
                                     let name = name.to_ascii_lowercase();
                                     let name = name.as_str();
                                     match name {
-                                        // 'ago' negates; 'hence'/'later' are its
-                                        // explicit-future counterparts and keep
-                                        // the sign as-is. All three are
-                                        // case-insensitive.
-                                        "ago" => {
+                                        // Direction and alignment both come from the
+                                        // marker. 'ago'/'past' are the past-direction
+                                        // pair, the rest the future-direction one.
+                                        // 'past', 'hence', 'next' and 'future' name a
+                                        // calendar day, so a missing time part resolves
+                                        // to midnight; 'ago', 'after' and 'later' keep
+                                        // the base time-of-day.
+                                        // All markers are case-insensitive.
+                                        "ago" => n = -n,
+                                        "past" => {
                                             n = -n;
-                                            true
+                                            anchored = true;
                                         }
-                                        "hence" | "later" => true,
+                                        "hence" | "next" | "future" => anchored = true,
+                                        "after" | "later" => {}
+                                        // '3 days from <base>' starts from the operand
+                                        // itself rather than from `now`, so its own
+                                        // alignment carries over: 'from now' is a
+                                        // delta, 'from today' is midnight, 'from 2pm'
+                                        // is 14:00 that day. Nothing may follow it.
+                                        "from" => {
+                                            if self.scanner.peek() == '\0' {
+                                                return date_result(
+                                                    "expected a date after 'from'",
+                                                );
+                                            }
+                                            let base = self.parse()?;
+                                            return Ok(Some(DateSpec::Shift(Shift {
+                                                unit: u,
+                                                skip: n,
+                                                base: Box::new(base),
+                                            })));
+                                        }
                                         // a day-align keyword is a trailing
                                         // time part ("2 days eod"): record it
                                         // for `parse_time`.
                                         _ if DayAlign::from_name(name).is_some() => {
                                             self.day_align = DayAlign::from_name(name);
-                                            false
+                                            got_marker = false;
                                         }
                                         _ => {
                                             return date_result(
-                                                "only expected 'ago', 'hence' or 'later'",
+                                                "only expected 'ago', 'past', 'hence', 'next', \
+                                                 'future', 'after', 'later' or 'from'",
                                             );
                                         }
                                     }
                                 } else {
-                                    false
-                                };
+                                    got_marker = false;
+                                }
                                 if !got_marker && let Some(h) = t.to_integer() {
                                     self.maybe_time = Some((h as u32, TimeKind::Unknown));
                                 }
                             }
-                            Some(DateSpec::skip(u, n))
+                            Some(if anchored {
+                                DateSpec::day_skip(u, n)
+                            } else {
+                                DateSpec::skip(u, n)
+                            })
                         } else if name == "am" || name == "pm" {
                             self.maybe_time = Some((n, TimeKind::AmPm(name == "pm")));
                             None

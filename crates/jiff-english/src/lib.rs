@@ -32,10 +32,12 @@
 //! (so "3h"). We make a distinction between _second_ intervals
 //! (seconds,minutes,hours), _day_ intervals (days,weeks) and _month_
 //! intervals (months,years). Second intervals are not followed by a time, but
-//! day and month intervals can be. Without a time, a day interval has the
-//! same time as the base time (which defaults to 'now'). Month intervals
-//! always give us the same date, if possible — but adding a month to
-//! "30 Jan" gives "28 Feb" or "29 Feb" depending if a leap year.
+//! day and month intervals can be. Without a time, a day interval keeps the
+//! base time (which defaults to 'now'); the day-name keywords (`today`,
+//! `yesterday`, `tomorrow`, `yesterweek`) instead resolve to the start of the
+//! named day. Month intervals always give us the same date, if possible — but
+//! adding a month to "30 Jan" gives "28 Feb" or "29 Feb" depending if a leap
+//! year.
 //!
 //! Finally, dates may be followed by time. Either 'formal' like 18:03, with
 //! optional seconds and fractional seconds (like 18:03:40.25) or 'informal'
@@ -47,10 +49,18 @@
 //!   `"next friday start"`, or a bare `"eod"` (today at the last moment of
 //!   the day). `start` is 00:00:00.000000000, `eod`/`end` is
 //!   23:59:59.999999999. Case-insensitive.
-//! - **`hence` / `later` as the explicit-future counterparts of `ago`**:
-//!   `"3 days ago"` negates, `"3 days hence"` / `"3 days later"` keep the
-//!   sign (identical to a plain `"3 days"`). All three markers are
-//!   case-insensitive.
+//! - **Interval markers**: a marker after `N <unit>` sets both direction and
+//!   alignment. `past` and `ago` point backwards, `hence`/`next`/`future`,
+//!   `after` and `later` forwards (`"3 days ago"` negates, `"3 days hence"`
+//!   keeps the sign). `past`, `hence`, `next` and `future` name a calendar
+//!   day, so without a time part they resolve to that day's start
+//!   (`"3 weeks hence"` = 00:00 three weeks out); `ago`, `after` and `later`
+//!   keep the base time-of-day. Case-insensitive.
+//! - **`from <base>` as an explicit base**: `"3 days from now"` shifts the
+//!   operand instead of `now`, so the operand's own alignment decides — `now`
+//!   is a delta, `today` is midnight three days out, `2pm` is 14:00 that day.
+//!   The operand is any date expression (defaulting to today when it is a bare
+//!   time), and nothing may follow it.
 //! - **12-hour clock fix**: chrono-english turns `12pm` into an invalid
 //!   24:00 (error) and leaves `12am` as 12:00 noon. Here `12am` is midnight
 //!   (00:00) and `12pm` is noon (12:00).
@@ -181,6 +191,7 @@ pub fn parse_duration(s: &str) -> DateResult<Interval> {
     match d.date.unwrap() {
         DateSpec::Absolute(_) => date_result("unexpected absolute date"),
         DateSpec::FromName(_) => date_result("unexpected date component"),
+        DateSpec::Shift(_) => date_result("unexpected date component"),
         DateSpec::Relative(skip) => Ok(skip.to_interval()),
     }
 }
@@ -315,16 +326,56 @@ mod tests {
     #[test]
     fn keywords() {
         expect("now", utc(2024, 3, 14, 12, 34, 56, NOON));
-        expect("today", utc(2024, 3, 14, 12, 34, 56, NOON));
-        expect("yesterday", utc(2024, 3, 13, 12, 34, 56, NOON));
-        expect("tomorrow", utc(2024, 3, 15, 12, 34, 56, NOON));
+        // Day-name keywords name a whole day: without a time part they
+        // resolve to that day's start, like git's `--since=today`.
+        expect("today", utc(2024, 3, 14, 0, 0, 0, NOON));
+        expect("yesterday", utc(2024, 3, 13, 0, 0, 0, NOON));
+        expect("tomorrow", utc(2024, 3, 15, 0, 0, 0, NOON));
         expect("tomorrow 9am", utc(2024, 3, 15, 9, 0, 0, NOON));
         expect("now 8pm", utc(2024, 3, 14, 20, 0, 0, NOON));
+        expect("today 8pm", utc(2024, 3, 14, 20, 0, 0, NOON));
         expect("yesterday 3pm", utc(2024, 3, 13, 15, 0, 0, NOON));
 
         // `y` is an alias for `yesterday`; `yesterweek` is a week back.
-        expect("y", utc(2024, 3, 13, 12, 34, 56, NOON));
-        expect("yesterweek", utc(2024, 3, 7, 12, 34, 56, NOON));
+        expect("y", utc(2024, 3, 13, 0, 0, 0, NOON));
+        expect("yesterweek", utc(2024, 3, 7, 0, 0, 0, NOON));
+
+        // Interval forms stay offsets from the base instant.
+        expect("3 days ago", utc(2024, 3, 11, 12, 34, 56, NOON));
+    }
+
+    #[test]
+    fn anchored_and_delta_markers() {
+        // `past`, `hence`, `next` and `future` name a calendar day, so with
+        // no time part they resolve to its start.
+        expect("3 days past", utc(2024, 3, 11, 0, 0, 0, NOON));
+        expect("3 days hence", utc(2024, 3, 17, 0, 0, 0, NOON));
+        expect("1 week past", utc(2024, 3, 7, 0, 0, 0, NOON));
+        expect("2 weeks hence", utc(2024, 3, 28, 0, 0, 0, NOON));
+        expect("1 day past 9am", utc(2024, 3, 13, 9, 0, 0, NOON));
+        expect("3 days hence eod", utc(2024, 3, 17, 23, 59, 59, 999_999_999));
+
+        // `ago`, `after` and `later` are deltas: they keep the clock time.
+        expect("3 days after", utc(2024, 3, 17, 12, 34, 56, NOON));
+        expect("3 days later", utc(2024, 3, 17, 12, 34, 56, NOON));
+    }
+
+    #[test]
+    fn from_starts_at_its_operand() {
+        // `N unit from <base>` shifts the operand, so the operand's own
+        // alignment decides the result.
+        expect("3 days from now", utc(2024, 3, 17, 12, 34, 56, NOON));
+        expect("3 days from today", utc(2024, 3, 17, 0, 0, 0, NOON));
+        expect("3 days from 2pm", utc(2024, 3, 17, 14, 0, 0, NOON));
+        expect("1 week from yesterday", utc(2024, 3, 20, 0, 0, 0, NOON));
+        expect("2 months from 2024-01-31", utc(2024, 3, 31, 0, 0, 0, NOON));
+        expect("2 days from tomorrow", utc(2024, 3, 17, 0, 0, 0, NOON));
+        expect("3 hours from now", utc(2024, 3, 14, 15, 34, 56, NOON));
+
+        assert_eq!(
+            err("3 days from"),
+            "expected a date after 'from'",
+        );
     }
 
     #[test]
@@ -476,8 +527,10 @@ mod tests {
 
     #[test]
     fn hence_later() {
-        expect("3 days hence", utc(2024, 3, 17, 12, 34, 56, NOON));
+        expect("3 days hence", utc(2024, 3, 17, 0, 0, 0, NOON));
         expect("3 days later", utc(2024, 3, 17, 12, 34, 56, NOON));
+        expect("3 days next", utc(2024, 3, 17, 0, 0, 0, NOON));
+        expect("3 days future", utc(2024, 3, 17, 0, 0, 0, NOON));
         expect("3 days ago", utc(2024, 3, 11, 12, 34, 56, NOON));
         expect("3 days AGO", utc(2024, 3, 11, 12, 34, 56, NOON));
         expect("2 hours hence", utc(2024, 3, 14, 14, 34, 56, NOON));
@@ -485,7 +538,7 @@ mod tests {
         expect("6 months hence", utc(2024, 9, 14, 0, 0, 0, NOON));
         expect("1 year later", utc(2025, 3, 14, 0, 0, 0, NOON));
         expect("2 days later 15:00", utc(2024, 3, 16, 15, 0, 0, NOON));
-        expect("3 weeks hence", utc(2024, 4, 4, 12, 34, 56, NOON));
+        expect("3 weeks hence", utc(2024, 4, 4, 0, 0, 0, NOON));
         expect("15m hence", utc(2024, 3, 14, 12, 49, 56, NOON));
 
         // the marker is the sole sign control: a leading '-' already
@@ -640,9 +693,9 @@ mod tests {
             .to_zoned(ny.clone())
             .unwrap();
 
-        // "tomorrow" keeps the wall-clock time across the transition:
-        // Mar 10 12:00 EDT == 16:00 UTC.
-        expect_with_base("tomorrow", &base, utc(2024, 3, 10, 16, 0, 0, NOON));
+        // "tomorrow" snaps to the day start (00:00) regardless of the base
+        // time-of-day: Mar 10 00:00 EDT, before the 02:00 gap, is 05:00 UTC.
+        expect_with_base("tomorrow", &base, utc(2024, 3, 10, 5, 0, 0, NOON));
 
         // 2:30 does not exist on Mar 10; compatible mode resolves via the
         // pre-gap offset (-05:00): 02:30 EST == 07:30 UTC.
@@ -750,6 +803,7 @@ mod tests {
         // hence/later keep the sign, like a bare unit
         assert_eq!(parse_duration("3 days hence").unwrap(), Interval::Days(3));
         assert_eq!(parse_duration("3 days later").unwrap(), Interval::Days(3));
+        assert_eq!(parse_duration("2 days from now").err(), Some(date_error("unexpected date component")));
         assert_eq!(
             parse_duration("2 hours later").unwrap(),
             Interval::Seconds(2 * 3600)

@@ -29,9 +29,14 @@ assert_eq!(date_time.time(), civil::time(20, 0, 0, 0));
   `"next friday start"`, or a bare `"eod"` (today at the last moment of the
   day). `start` is 00:00:00.000000000, `eod`/`end` is 23:59:59.999999999.
   Case-insensitive.
-- **`hence` / `later`** as the explicit-future counterparts of `ago`:
-  `"3 days ago"` negates, `"3 days hence"` / `"3 days later"` keep the sign.
-  All three markers are case-insensitive.
+- **Interval markers** set both direction and alignment: `past`/`ago` point
+  backwards, `hence`/`next`/`future`, `after`/`later` forwards. `past`,
+  `hence`, `next` and `future` name a calendar day, so without a time part they
+  resolve to that day's start; `ago`, `after` and `later` keep the base
+  time-of-day.
+- **`from <base>`** shifts an explicit operand instead of `now`: `"3 days from
+  now"` is a delta, `"3 days from today"` is midnight three days out, `"3 days
+  from 2pm"` is 14:00 that day. The operand is any date expression.
 - **12-hour clock fix**: `12am` is midnight (00:00) and `12pm` is noon
   (12:00); chrono-english turns `12pm` into an invalid 24:00 and leaves
   `12am` as 12:00 noon.
@@ -40,13 +45,16 @@ assert_eq!(date_time.time(), civil::time(20, 0, 0, 0));
 
 - Absolute dates: `2018-04-01`, `30/06/17`, `30 June 2018`, `June 30, 2018`
   (comma required), bare year `2018`
-- Keywords: `now`, `today`, `yesterday`, `tomorrow` (+ optional time)
+- Keywords: `now`, `today`, `yesterday`, `tomorrow`, `yesterweek` (+ optional
+  time); day-name keywords resolve to the start of the day when no time
+  follows, `now` to the instant
 - Weekdays: `friday`, `fri`, `next mon` (UK: weekday of next week),
   `last fri 9.30`
 - Months: `april`, `next April`, `last April`; day-month forms `4 July`,
   `9/11` (day/month under `Dialect::Uk`), `next 10 Dec`
 - Intervals: `2 days`, `3h`, `-3 month`, `6 months ago`, `3 days hence`,
-  `2 days later 15:00`; single-letter shortcuts `s m h w d y` (m = minutes)
+  `2 days later 15:00`, `3 days past`, `1 week from today`; single-letter
+  shortcuts `s m h w d y` (m = minutes)
 - Times: `18:03[:40[.25]]`, `6.03pm`, `8pm`, `±HH[:MM]` / `Z` offsets
 - Day alignment: `eod`, `end`, `start` (with any date form)
 
@@ -60,7 +68,7 @@ date expression`; trailing whitespace is fine).
 `NaiveDate::parse_and_remainder`), but also returns the leftover input as
 `(Zoned, &str)`, trailing whitespace included (the core the two above
 delegate to).
-- `parse_duration` — the relative part of `"N unit [ago|hence|later]"` as an
+- `parse_duration` — the relative part of `"N unit [marker]"` as an
 `Interval`.
 
 ## License
