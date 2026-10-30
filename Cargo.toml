@@ -3,7 +3,7 @@ members = [".", "crates/im-dynamic", "crates/jiff-english"]
 default-members = [".", "crates/jiff-english"]
 
 [workspace.package]
-version = "0.2.6"
+version = "0.2.7"
 edition = "2024"
 repository = "https://github.com/Squirreljetpack/im"
 homepage = "https://github.com/Squirreljetpack/im"
