@@ -253,7 +253,7 @@ whose arguments are all tracker ids. `parse_from` dispatches on `args[0]`:
 | `:db prune` | `Db { Prune }` — prunes expired/completed tasks, clears the embedding cache |
 | `:db backfill` | `Db { Backfill }` — computes and persists missing mood embeddings + saliency scores |
 | `:db doctor` | `Db { Doctor }` — prunes tracker entries whose storage class no longer matches the configured kind |
-| `:color <mood>` | `Color` — full mood-color pipeline diagnostic |
+| `:color [mood]` | `Color` — full mood-color pipeline diagnostic; bare lists the anchor palette with swatches |
 | `:clear [@date]` | `Clear` — deletes that day's mood entries (interactive confirm) |
 
 Tracker names cannot begin with `@` (reserved for recurring ids). Tabs in
@@ -428,8 +428,9 @@ L2-normalized difference from a neutral base embedding.
 - **Blend** (`weights_to_color`): saliency-gated weighted Oklab blend of the
   contributing basis colors; `None` → neutral baseline.
 - **Render** (`mood_color_cached`): per-mood cache, prefers stored embedding
-  BLOBs and backfills legacy rows; `:color <mood>` (`diagnose_color`) prints
-  every intermediate value.
+  BLOBs and backfills legacy rows; `:color [mood]` (`diagnose_color`) prints
+  every intermediate value, or the anchor palette with swatches for each
+  mood.
 
 ---
 

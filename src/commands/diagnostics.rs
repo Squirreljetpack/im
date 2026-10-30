@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use crossterm::style::Stylize;
+use oklab::Oklab;
 use std::io::{BufRead, Write};
 
 use crate::cli::CliOpts;
@@ -25,11 +26,43 @@ pub fn print_embeddings<R: BufRead, W: Write>(reader: &mut R, out: &mut W) -> Re
     Ok(())
 }
 
-/// `:color <mood>` — diagnostic: embed the mood string with the
-/// configured `moods.prefix_string`, run it through the full three-step mood-color
-/// pipeline, and print intermediate values at each stage plus the final
-/// Oklab / sRGB colour (with a terminal swatch of the final colour).
+/// `:color [mood]` — with a mood, the full pipeline diagnostic; without
+/// one, the mood palette: every anchor mood of the moods file with a swatch
+/// of its colour, one per line.
 pub(super) fn diagnose_color<W: Write>(
+    mood: Option<&str>,
+    config: &Config,
+    axes: &crate::color::ColorAxes,
+    opts: &CliOpts,
+    out: &mut W,
+) -> Result<()> {
+    match mood.map(str::trim).filter(|mood| !mood.is_empty()) {
+        Some(mood) => diagnose_mood(mood, config, axes, opts, out),
+        None => print_mood_swatches(axes, out),
+    }
+}
+
+/// One `mood: <swatch>` line per anchor mood, in moods-file order.
+fn print_mood_swatches<W: Write>(axes: &crate::color::ColorAxes, out: &mut W) -> Result<()> {
+    for basis in &axes.basis_moods {
+        writeln!(out, "{}: {}", basis.mood, swatch(basis.oklab))?;
+    }
+    Ok(())
+}
+
+/// Eight spaces on the colour's background: a terminal colour cell that
+/// needs no glyph support (crossterm emits the SGR sequence itself).
+fn swatch(color: Oklab) -> String {
+    "        "
+        .on(crate::color::conversion::oklab_to_crossterm(color))
+        .to_string()
+}
+
+/// Embed the mood string with the configured `moods.prefix_string`, run it
+/// through the full three-step mood-color pipeline, and print intermediate
+/// values at each stage plus the final Oklab / sRGB colour (with a terminal
+/// swatch of the final colour).
+fn diagnose_mood<W: Write>(
     mood: &str,
     config: &Config,
     axes: &crate::color::ColorAxes,
@@ -37,7 +70,6 @@ pub(super) fn diagnose_color<W: Write>(
     out: &mut W,
 ) -> Result<()> {
     let embedder = global::embedder();
-    let mood = mood.trim();
 
     // Verbose: dump the full axes settings up front; the per-value lines that
     // used to follow are gone — the dump carries them.
@@ -130,15 +162,7 @@ pub(super) fn diagnose_color<W: Write>(
     // Real swatch rendered directly (works when stdout is a tty); the hex
     // line above is the capture-safe record. Debug builds additionally
     // print the copy-paste printf command for non-tty captures.
-    writeln!(
-        out,
-        "swatch     : {}",
-        "        ".on(crossterm::style::Color::Rgb {
-            r: rgb.r,
-            g: rgb.g,
-            b: rgb.b,
-        }),
-    )?;
+    writeln!(out, "swatch     : {}", swatch(final_oklab))?;
     #[cfg(debug_assertions)]
     writeln!(
         out,

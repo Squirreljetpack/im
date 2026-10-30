@@ -122,7 +122,7 @@ pub async fn execute_command<W: Write>(
 
         Command::Color { mood } => {
             let axes = crate::color::ColorAxes::build(pool, &config.moods).await?;
-            diagnostics::diagnose_color(&mood, config, &axes, opts, out)
+            diagnostics::diagnose_color(mood.as_deref(), config, &axes, opts, out)
         }
 
         Command::Clear { date } => maintenance::clear_moods(pool, config, date, tui).await,

@@ -84,11 +84,10 @@ pub(crate) fn parse_special_command(args: &[String]) -> anyhow::Result<Command> 
         if let Some(help) = help_flag(&args[1..]) {
             return Ok(help);
         }
-        if args.len() < 2 {
-            anyhow::bail!("Usage: im :color \"<mood>\"");
-        }
+        let mood = args[1..].join(" ");
+        let mood = mood.trim().trim_matches('"').trim();
         return Ok(Command::Color {
-            mood: args[1..].join(" ").trim_matches('"').to_string(),
+            mood: (!mood.is_empty()).then(|| mood.to_string()),
         });
     }
 
