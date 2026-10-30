@@ -14,7 +14,7 @@ serde = ["dep:serde"]
 
 [dependencies]
 jiff = { workspace = true }
-scanlex = "0.1"
+scanlex = "0.2"
 serde = { version = "1", features = ["derive"], optional = true }
 
 [package.metadata.workspaces]
