@@ -8,8 +8,9 @@ end — against a real deployment (§1) and entirely on one machine with Minifla
 
 **Read this first**
 
-- The commands are `im :auth …` and `im :sync`. A bare `im sync` (no colon) is
-  entry text and logs a mood named "sync".
+- The account commands are `im :sync register|login|status|logout`; `im :sync`
+  exchanges events. A bare `im sync` (no colon) is entry text and logs a mood
+  named "sync".
 - The server address comes from `[sync] server` in the client config and
   defaults to `http://127.0.0.1:8787`. It is **not** stored with the account:
   signing in does not remember it. `IM_SYNC_URL` overrides the config for one
@@ -100,7 +101,7 @@ cd im
 # Cargo.toml patches matchmaker-lib to ../matchmaker/matchmaker-lib
 git clone https://github.com/Squirreljetpack/matchmaker ../matchmaker
 cargo build --release
-./target/release/im :auth status   # "Not signed in (run `im :auth login`)."
+./target/release/im :sync status   # "Not signed in (run `im :sync login`)."
 ```
 
 `[patch.crates-io]` means the im checkout does not build on its own. CI builds a
@@ -142,17 +143,17 @@ server = "https://im-sync.<your-subdomain>.workers.dev"
 Then:
 
 ```sh
-im :auth status              # "Not signed in (run `im :auth login`)."
+im :sync status              # "Not signed in (run `im :sync login`)."
 ```
 
 Device A creates the account; device B joins it:
 
 ```sh
 # A
-im :auth register            # prompts for email + password (8+ chars)
+im :sync register            # prompts for email + password (8+ chars)
 
 # B
-im :auth login               # same email, same password
+im :sync login               # same email, same password
 ```
 
 Both print the server they signed in to and suggest `im :sync`. Signing in does
@@ -204,7 +205,7 @@ winning cell, both devices converge, and the device whose write lost prints a
 notice of the form `… body: yours (…) was replaced by … (<device> at …)`. There
 is no text-conflict prompt any more — only deletions can ask a question.
 
-Deletion: `im :clear` (confirm the prompt) removes today's moods and their
+Deletion: `im :tool clear` (confirm the prompt) removes today's moods and their
 tracker rows; the delete events go out on the next `im :sync`. The other device
 prints `deleted <n>` and the entries disappear. If you had unsynced edits to
 something the other side deleted, the edit is dropped with a notice and an
@@ -216,7 +217,7 @@ Offline tolerance:
 ```sh
 IM_SYNC_URL=http://127.0.0.1:9999 im :sync
 # Failed to reach the sync server at http://127.0.0.1:9999   (exit 1)
-im :auth status      # signed in locally; the queue only shows when reachable
+im :sync status      # signed in locally; the queue only shows when reachable
 ```
 
 The outbox is kept: sync again with the right URL and the queued events go.
@@ -228,7 +229,7 @@ Rebuild from the server:
 ```sh
 im :sync --reset     # interactive: confirm, local rows are dropped and replayed
 im @                 # everything the server has is back, including A's rows
-im :auth status      # same account; device id rotated
+im :sync status      # same account; device id rotated
 ```
 
 ### 1.5 When it goes wrong
@@ -239,7 +240,7 @@ im :auth status      # same account; device id rotated
   "SELECT id, email, created_at FROM users"` lists registered accounts.
 - The per-user event log lives in the user's Durable Object (`UserSyncDO`):
   Workers & Pages → `im-sync` → Durable Objects → the object for that user.
-- Client side: `im :auth status` (account + queued count), and `im.log` in the
+- Client side: `im :sync status` (account + queued count), and `im.log` in the
   state dir (appendix A) for the last run's debug output; `-v` raises verbosity.
 
 ### 1.6 Teardown
@@ -301,7 +302,7 @@ Terminal 2 — device A:
 
 ```sh
 export XDG_STATE_HOME=/tmp/im-device-a
-im :auth register
+im :sync register
 im happy . hello from a
 im ! try local sync
 im :sync
@@ -311,7 +312,7 @@ Terminal 3 — device B:
 
 ```sh
 export XDG_STATE_HOME=/tmp/im-device-b
-im :auth login            # the account A just created
+im :sync login            # the account A just created
 im :sync
 im @                      # A's task is here
 ```

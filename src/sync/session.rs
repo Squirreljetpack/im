@@ -88,7 +88,7 @@ impl Pull {
     }
 }
 
-/// Store the account a successful `im :auth register`/`login` returned.
+/// Store the account a successful `im :sync register`/`login` returned.
 pub async fn store_account(pool: &SqlitePool, account: &Account) -> Result<()> {
     let mut conn = pool
         .acquire()
@@ -102,7 +102,7 @@ pub async fn store_account(pool: &SqlitePool, account: &Account) -> Result<()> {
     state::set_account(&mut conn, Some(&account.user_id), &account.token).await
 }
 
-/// Sign a database in with a token someone else obtained (`im auth login` on a
+/// Sign a database in with a token someone else obtained (`im :sync login` on a
 /// second machine hands the token over the wire, not the user id).
 pub async fn store_token(pool: &SqlitePool, token: &str) -> Result<()> {
     let mut conn = pool
@@ -149,7 +149,7 @@ pub async fn sync_once(
         .context("Failed to acquire a db connection")?;
     let token = state::token(&mut conn)
         .await?
-        .context("not logged in — run `im :auth login`")?;
+        .context("not logged in — run `im :sync login`")?;
     let device = state::device_id(&mut conn).await?;
 
     let batch = outbox(&mut conn).await?;

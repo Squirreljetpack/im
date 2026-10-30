@@ -6,7 +6,6 @@ use std::io::Write;
 use crate::cli::{CliOpts, Command};
 use crate::config::Config;
 
-mod auth;
 mod diagnostics;
 mod edit_task;
 mod entry;
@@ -48,17 +47,6 @@ pub async fn execute_command<W: Write>(
         Command::Task(task) => task::create_task_command(pool, config, opts, task).await,
 
         Command::TaskEdit { task } => edit_task::handle_task_edit(pool, config, opts, task).await,
-
-        Command::Embed => {
-            let stdin = std::io::stdin();
-            let mut reader = stdin.lock();
-            diagnostics::print_embeddings(&mut reader, out)
-        }
-
-        Command::Score { .. } => {
-            todo!();
-            // handle_score(&start, &end, &mut reader, out)
-        }
 
         Command::Today {
             date,
@@ -106,29 +94,53 @@ pub async fn execute_command<W: Write>(
             Ok(())
         }
 
-        Command::Config { target } => match target {
-            crate::cli::ConfigTarget::Main => maintenance::edit_config().await,
-            crate::cli::ConfigTarget::Moods => maintenance::edit_moods(config).await,
-            crate::cli::ConfigTarget::Colors => maintenance::edit_colors().await,
-        },
-
         Command::Matchmaker => crate::ui::tracker_picker::run_trackers_app(config).await,
 
-        Command::Db { sub } => match sub {
+        Command::Db(sub) => match sub {
             crate::cli::DbSubcommand::Prune => maintenance::db_prune(pool, config).await,
             crate::cli::DbSubcommand::Backfill => maintenance::db_backfill(pool).await,
             crate::cli::DbSubcommand::Doctor => maintenance::db_doctor(pool, config, tui).await,
         },
 
-        Command::Color { mood } => {
-            let axes = crate::color::ColorAxes::build(pool, &config.moods).await?;
-            diagnostics::diagnose_color(mood.as_deref(), config, &axes, opts, out)
-        }
+        Command::Tool(sub) => match sub {
+            crate::cli::ToolSubcommand::Embed => {
+                let stdin = std::io::stdin();
+                let mut reader = stdin.lock();
+                diagnostics::print_embeddings(&mut reader, out)
+            }
+            crate::cli::ToolSubcommand::Score { .. } => todo!(),
+            crate::cli::ToolSubcommand::Config { target } => match target.unwrap_or_default() {
+                crate::cli::ConfigTarget::Main => maintenance::edit_config().await,
+                crate::cli::ConfigTarget::Moods => maintenance::edit_moods(config).await,
+                crate::cli::ConfigTarget::Colors => maintenance::edit_colors().await,
+            },
+            crate::cli::ToolSubcommand::Mood { mood } => {
+                let mood = join_mood(&mood);
+                let axes = crate::color::ColorAxes::build(pool, &config.moods).await?;
+                diagnostics::diagnose_color(mood.as_deref(), config, &axes, opts, out)
+            }
+            crate::cli::ToolSubcommand::Clear { date } => {
+                let date = clear_date(&date);
+                maintenance::clear_moods(pool, config, date, tui).await
+            }
+        },
 
-        Command::Clear { date } => maintenance::clear_moods(pool, config, date, tui).await,
-
-        Command::Auth { sub } => auth::auth_command(pool, config, sub).await,
-
-        Command::Sync { reset } => sync::sync_command(pool, config, reset).await,
+        Command::Sync { sub, reset } => sync::sync_command(pool, config, sub, reset).await,
     }
+}
+
+fn join_mood(words: &[String]) -> Option<String> {
+    let joined = words.join(" ");
+    let mood = joined.trim().trim_matches('"').trim();
+    (!mood.is_empty()).then(|| mood.to_string())
+}
+
+fn clear_date(words: &[String]) -> Option<String> {
+    if words.is_empty() {
+        return None;
+    }
+    let joined = words.join(" ");
+    let trimmed = joined.trim();
+    let stripped = trimmed.strip_prefix('@').unwrap_or(trimmed).trim();
+    (!stripped.is_empty()).then(|| stripped.to_string())
 }

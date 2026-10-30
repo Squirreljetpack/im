@@ -1,23 +1,43 @@
-//! `im sync` — push the outbox and merge what the other devices wrote.
+//! `im :sync` — push the outbox and merge what the other devices wrote.
 //!
 //! Nothing here arbitrates: the server already named the winner of every cell,
 //! so a round applies values and reports the decisions it had to take on the
 //! user's behalf. The one question it asks is whether to re-create content that
-//! was deleted elsewhere. `im sync --reset` throws the local copy away and
+//! was deleted elsewhere. `im :sync --reset` throws the local copy away and
 //! rebuilds it from the register, which is the escape hatch when the local
 //! state is wrong rather than merely old.
+//!
+//! The account subcommands (`register`, `login`, `status`, `logout`) live here
+//! too: the account exists only to make syncing possible.
 
 use std::time::Duration;
 
 use anyhow::{Result, bail};
 use sqlx::SqlitePool;
 
+use crate::cli::SyncSubcommand;
 use crate::config::Config;
 use crate::sync::client::server_url;
 use crate::sync::session::{self, Resurrect, sync_once};
 use crate::tracker::TrackerSlots;
 
-/// How long `im sync` waits on the server: it is the interactive path, so a
+/// `im :sync` — sync, or manage the account this device syncs with.
+pub(super) async fn sync_command(
+    pool: &SqlitePool,
+    config: &Config,
+    sub: Option<SyncSubcommand>,
+    reset: bool,
+) -> Result<()> {
+    match sub {
+        None => run_sync(pool, config, reset).await,
+        Some(SyncSubcommand::Register) => register(pool, config).await,
+        Some(SyncSubcommand::Login) => login(pool, config).await,
+        Some(SyncSubcommand::Status) => status(pool, config).await,
+        Some(SyncSubcommand::Logout) => logout(pool).await,
+    }
+}
+
+/// How long `im :sync` waits on the server: it is the interactive path, so a
 /// slow connection is worth waiting for.
 const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -38,7 +58,7 @@ fn reset_guard(pending: usize, interactive: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn sync_command(pool: &SqlitePool, config: &Config, reset: bool) -> Result<()> {
+async fn run_sync(pool: &SqlitePool, config: &Config, reset: bool) -> Result<()> {
     let server = server_url(config);
     let slots = TrackerSlots::from_config(config);
     let interactive = atty::is(atty::Stream::Stdin);
@@ -168,4 +188,76 @@ async fn maybe_resurrect(pool: &SqlitePool, offer: &Resurrect, interactive: bool
         None => println!("Nothing was left to copy."),
     }
     Ok(())
+}
+
+/// `:sync register` — create an account and sign this device in.
+async fn register(pool: &SqlitePool, config: &Config) -> Result<()> {
+    let (email, password) = prompt_credentials()?;
+    let server = server_url(config);
+    let account = session::register(&server, &email, &password).await?;
+    session::store_account(pool, &account).await?;
+    println!(
+        "Registered {} on {server}; this device is signed in.",
+        account.email
+    );
+    println!("Run `im :sync` to upload the events this device has queued.");
+    Ok(())
+}
+
+/// `:sync login` — sign this device in to an existing account.
+async fn login(pool: &SqlitePool, config: &Config) -> Result<()> {
+    let (email, password) = prompt_credentials()?;
+    let server = server_url(config);
+    let account = session::login(&server, &email, &password).await?;
+    session::store_account(pool, &account).await?;
+    println!("Signed in as {} on {server}.", account.email);
+    println!("Run `im :sync` to exchange events with the other devices.");
+    Ok(())
+}
+
+/// `:sync status` — show the account this device is signed in as.
+async fn status(pool: &SqlitePool, config: &Config) -> Result<()> {
+    let Some(token) = session::signed_in(pool).await? else {
+        println!("Not signed in (run `im :sync login`).");
+        return Ok(());
+    };
+    let server = server_url(config);
+    match session::account_status(&server, &token).await {
+        Ok(status) => {
+            let queued = session::unsynced_count(pool).await?;
+            println!(
+                "Signed in as {} ({}) on {server}.",
+                status.email, status.user_id
+            );
+            println!("{queued} local change(s) queued to push.");
+        }
+        Err(error) => {
+            println!("Signed in locally, but {server} rejected the session: {error}")
+        }
+    }
+    Ok(())
+}
+
+/// `:sync logout` — forget the account on this device (local data stays).
+async fn logout(pool: &SqlitePool) -> Result<()> {
+    // The server keeps the events it already has; this device keeps
+    // its data and simply stops syncing it.
+    session::logout(pool).await?;
+    println!("Signed out. Local data is untouched.");
+    Ok(())
+}
+
+fn prompt_credentials() -> Result<(String, String)> {
+    if !atty::is(atty::Stream::Stdin) {
+        bail!("`im :sync` needs an interactive terminal to ask for the email and password");
+    }
+    let email: String = cliclack::input("Email:")
+        .placeholder("you@example.com")
+        .interact()
+        .map_err(|e| anyhow::anyhow!("Prompt cancelled: {e}"))?;
+    let password: String = cliclack::password("Password:")
+        .mask('*')
+        .interact()
+        .map_err(|e| anyhow::anyhow!("Prompt cancelled: {e}"))?;
+    Ok((email.trim().to_string(), password))
 }

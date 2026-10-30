@@ -125,7 +125,7 @@ colors = "rating"
 # scheduled_template = []
 
 [sync]
-# Base URL of the sync server, for both `im :auth` and `im :sync`. Unset means
+# Base URL of the sync server, for every `im :sync` subcommand. Unset means
 # http://127.0.0.1:8787 (the local
 # `wrangler dev` server); `IM_SYNC_URL` overrides it for a single command.
 # server = "https://im-sync.<subdomain>.workers.dev"

@@ -1,113 +1,31 @@
-use super::super::{AuthSubcommand, Command, ConfigTarget};
+use clap::Parser;
+
+use super::super::{Command, DbSubcommand, ToolSubcommand};
+use super::groups::SyncCli;
 use super::tracker::parse_tracker_command;
 
 pub(crate) fn parse_special_command(args: &[String]) -> anyhow::Result<Command> {
     let first = &args[0];
 
-    if first == ":embed" {
-        if let Some(help) = help_flag(&args[1..]) {
-            return Ok(help);
-        }
-        return Ok(Command::Embed);
+    if first == ":tool" {
+        let sub = ToolSubcommand::parse_from(clap_argv(&args[1..]));
+        return Ok(Command::Tool(sub));
     }
 
-    if first == ":score" {
-        if let Some(help) = help_flag(&args[1..]) {
-            return Ok(help);
-        }
-        if args.len() < 3 {
-            anyhow::bail!("Usage: im :score \"start\" \"end\"");
-        }
-        return Ok(Command::Score {
-            start: args[1].trim_matches('"').to_string(),
-            end: args[2].trim_matches('"').to_string(),
-        });
-    }
-
-    if first == ":config" || first == ":c" {
-        if let Some(help) = help_flag(&args[1..]) {
-            return Ok(help);
-        }
-        let target = match args.get(1).map(String::as_str) {
-            None => ConfigTarget::Main,
-            Some("moods") => ConfigTarget::Moods,
-            Some("colors") => ConfigTarget::Colors,
-            Some(other) => anyhow::bail!(
-                "Unknown :config subcommand '{}' (expected moods or colors)",
-                other
-            ),
-        };
-        if args.len() > 2 {
-            anyhow::bail!("Usage: im :config [moods|colors]");
-        }
-        return Ok(Command::Config { target });
+    // `:c` is a shorthand for `:tool config`; clap renders its help and
+    // validates its optional target under the canonical name.
+    if first == ":c" {
+        let sub = ToolSubcommand::parse_from(
+            std::iter::once("im".to_string())
+                .chain(std::iter::once("config".to_string()))
+                .chain(args[1..].iter().cloned()),
+        );
+        return Ok(Command::Tool(sub));
     }
 
     if first == ":db" {
-        if let Some(help) = help_flag(&args[1..]) {
-            return Ok(help);
-        }
-        return match args.get(1).map(String::as_str) {
-            Some("prune") => {
-                if args.len() != 2 {
-                    anyhow::bail!("Usage: im :db prune");
-                }
-                Ok(Command::Db {
-                    sub: crate::cli::DbSubcommand::Prune,
-                })
-            }
-            Some("backfill") => {
-                if args.len() != 2 {
-                    anyhow::bail!("Usage: im :db backfill");
-                }
-                Ok(Command::Db {
-                    sub: crate::cli::DbSubcommand::Backfill,
-                })
-            }
-            Some("doctor") => {
-                if args.len() != 2 {
-                    anyhow::bail!("Usage: im :db doctor");
-                }
-                Ok(Command::Db {
-                    sub: crate::cli::DbSubcommand::Doctor,
-                })
-            }
-            Some(other) => anyhow::bail!(
-                "Unknown :db subcommand '{}' (expected prune, backfill, or doctor)",
-                other
-            ),
-            None => anyhow::bail!("Usage: im :db prune | :db backfill | :db doctor"),
-        };
-    }
-
-    if first == ":color" {
-        if let Some(help) = help_flag(&args[1..]) {
-            return Ok(help);
-        }
-        let mood = args[1..].join(" ");
-        let mood = mood.trim().trim_matches('"').trim();
-        return Ok(Command::Color {
-            mood: (!mood.is_empty()).then(|| mood.to_string()),
-        });
-    }
-
-    if first == ":clear" {
-        if let Some(help) = help_flag(&args[1..]) {
-            return Ok(help);
-        }
-        let date_arg = if args.len() > 1 {
-            let joined = args[1..].join(" ");
-            let trimmed = joined.trim();
-            let stripped = trimmed.strip_prefix('@').unwrap_or(trimmed).trim();
-            if stripped.is_empty() {
-                None
-            } else {
-                Some(stripped.to_string())
-            }
-        } else {
-            None
-        };
-        return Ok(Command::Clear { date: date_arg });
+        let sub = DbSubcommand::parse_from(clap_argv(&args[1..]));
+        return Ok(Command::Db(sub));
     }
 
     // Tracker view: dispatches on two syntaxes:
@@ -120,38 +38,18 @@ pub(crate) fn parse_special_command(args: &[String]) -> anyhow::Result<Command> 
         return parse_tracker_command(args);
     }
 
-    if first == ":auth" {
-        return parse_auth_command(&args[1..]);
-    }
-
     if first == ":sync" {
-        if let Some(help) = help_flag(&args[1..]) {
-            return Ok(help);
-        }
-        let reset = match args.get(1).map(String::as_str) {
-            None => false,
-            Some("--reset") => true,
-            Some(other) => {
-                anyhow::bail!("`im :sync` takes no argument other than --reset, got {other}")
-            }
-        };
-        if args.len() > 2 {
-            anyhow::bail!("`im :sync` takes at most one argument");
-        }
-        return Ok(Command::Sync { reset });
+        let SyncCli { sub, reset } = SyncCli::parse_from(clap_argv(&args[1..]));
+        return Ok(Command::Sync { sub, reset });
     }
 
     anyhow::bail!("Unknown special command: {}", first)
 }
 
-/// Help requested by a subcommand: `--help` / `-h` anywhere among its own
-/// arguments (`im :db prune --help`). Each subcommand resolves this for
-/// itself, so one that grows its own text can answer with a different
-/// command instead of the top-level [`Command::Help`].
-fn help_flag(args: &[String]) -> Option<Command> {
-    args.iter()
-        .any(|a| a == "--help" || a == "-h")
-        .then_some(Command::Help)
+/// Clap expects argv[0] to be the program name; `bin_name` on each group
+/// replaces it with the colon spelling in usage and help.
+fn clap_argv(args: &[String]) -> impl Iterator<Item = String> + '_ {
+    std::iter::once("im".to_string()).chain(args.iter().cloned())
 }
 
 /// `im :` and its period variants — the tracker grids, whose arguments are
@@ -159,27 +57,4 @@ fn help_flag(args: &[String]) -> Option<Command> {
 /// no `--help` token (an id may legitimately look like a flag).
 fn is_bare_tracker_form(first: &str) -> bool {
     matches!(first, ":" | ":week" | ":month" | ":year")
-}
-
-/// `im :auth <register|login|status|logout>`.
-fn parse_auth_command(args: &[String]) -> anyhow::Result<Command> {
-    if let Some(help) = help_flag(args) {
-        return Ok(help);
-    }
-    let Some(name) = args.first() else {
-        anyhow::bail!("`im :auth` needs a subcommand: register, login, status or logout");
-    };
-    let sub = match name.as_str() {
-        "register" => AuthSubcommand::Register,
-        "login" => AuthSubcommand::Login,
-        "status" => AuthSubcommand::Status,
-        "logout" => AuthSubcommand::Logout,
-        other => anyhow::bail!(
-            "unknown auth subcommand '{other}' (expected register, login, status or logout)"
-        ),
-    };
-    if args.len() > 1 {
-        anyhow::bail!("`im :auth {name}` takes no further arguments");
-    }
-    Ok(Command::Auth { sub })
 }

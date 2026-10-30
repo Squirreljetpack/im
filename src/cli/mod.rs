@@ -52,18 +52,19 @@ pub struct Cli {
     pub cmd: Command,
 }
 
-/// Which file `im :config [<target>]` opens in $VISUAL/$EDITOR.
+/// Which file `im :tool config [<target>]` opens in $VISUAL/$EDITOR.
 /// `Main` is the active config; `Moods` the moods file named by
 /// `[moods] source`; `Colors` the colors file (`colors.toml`). `:c` is an
-/// alias for `:config`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// alias for `:tool config`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum ConfigTarget {
-    /// `im :config` — the active config file.
+    /// The active config file.
     #[default]
+    #[value(skip)]
     Main,
-    /// `im :config moods` — the moods file named by `[moods] source`.
+    /// The moods file.
     Moods,
-    /// `im :config colors` — the colors file (`colors.toml`).
+    /// The colors file.
     Colors,
 }
 
@@ -82,11 +83,6 @@ pub enum Command {
     TaskEdit {
         task: Option<TaskRef>,
     },
-    Embed,
-    Score {
-        start: String,
-        end: String,
-    },
     /// `im` with no args — today view; `im @<date>` anchors it to
     /// an arbitrary day (any date string that parses); `im @due[:t|:w]`
     /// opens the today view at `ShowVariant::B` with the day/tomorrow/week
@@ -97,79 +93,92 @@ pub enum Command {
         horizon: TodayHorizon,
     },
     /// `im --help` / `im -h` / `im -vh` in the initial position (handled in
-    /// `parse_cli`, before the command dispatchers) and `im :<command> --help`
-    /// on any named subcommand (`:auth`, `:db`, `:config`, …). Handlers print
-    /// the contents of `assets/help.txt` (or `assets/vhelp.txt` when verbose).
+    /// `parse_cli`, before the command dispatchers). Handlers print the
+    /// contents of `assets/help.txt` (or `assets/vhelp.txt` when verbose).
+    /// Help for the clap-parsed `:` groups is printed and exits during parsing.
     Help,
-    /// `im :config [moods|colors]` — handlers open a config-style file in
-    /// $VISUAL/$EDITOR via [`crate::editor::open_editor_at`]. With no
-    /// subcommand the active config is opened (the bundled `assets/config.toml`
-    /// is copied to the path first when missing); `moods` opens the moods
-    /// file named by `[moods] source`; `colors` opens the colors file
-    /// (`colors.toml`). `:c` is an alias for `:config`.
-    Config {
-        target: ConfigTarget,
-    },
+    /// `im :tool <sub>` — local diagnostics and configuration helpers.
+    Tool(ToolSubcommand),
     /// `im -` — a matchmaker-backed viewer listing every configured tracker
     /// (a single name column) with a live preview of each tracker's settings
     /// and a row of colored cells (one per entry of its resolved color
     /// palette).
     Matchmaker,
-    /// `im :db prune` — delete completed oneshot tasks and recurring
-    /// tasks whose `end_time` has passed.
-    Db {
-        sub: DbSubcommand,
-    },
-    /// `im :color [mood]` — embed a mood string (with `"mood "`
-    /// prefix) and print the projected Oklab / sRGB color plus intermediate
-    /// pipeline values (raw scores, blend factors, per-axis colors).
-    /// Diagnostic tool for debugging the mood-color pipeline. Without a
-    /// mood, prints every anchor mood with a swatch of its color.
-    Color {
-        mood: Option<String>,
-    },
-    /// `im :clear [@date]` — clear all mood entries from that day.
-    Clear {
-        date: Option<String>,
-    },
-    /// `im auth <sub>` — the sync account this device is signed in as.
-    Auth {
-        sub: AuthSubcommand,
-    },
-    /// `im sync` — push the queued events and apply everything the other
-    /// devices wrote, asking about concurrent rewrites of text and about
-    /// parent cycles. `--reset` discards the local copy first and rebuilds it
-    /// from the server log.
+    /// `im :db <sub>` — database maintenance utilities.
+    Db(DbSubcommand),
+    /// `im :sync` — exchange events with the other devices. A subcommand
+    /// manages the account instead; `reset` discards the local copy first.
     Sync {
+        sub: Option<SyncSubcommand>,
         reset: bool,
     },
 }
 
-/// Subcommands of `im auth`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthSubcommand {
-    /// `auth register` — create an account and sign this device in.
+/// Subcommands of `im :tool`.
+#[derive(Debug, Clone, PartialEq, Eq, clap::Parser)]
+#[command(
+    name = "im :tool",
+    bin_name = "im :tool",
+    about = "Local diagnostics and configuration helpers",
+    disable_help_subcommand = true
+)]
+pub enum ToolSubcommand {
+    /// Print an embedding vector for each stdin line.
+    Embed,
+    /// Score a start and end mood (stub).
+    Score {
+        /// Mood to start from
+        start: String,
+        /// Mood to end at
+        end: String,
+    },
+    /// Open the config, moods file, or colors file in $VISUAL/$EDITOR.
+    Config {
+        /// File to open (defaults to the active config)
+        #[arg(value_enum)]
+        target: Option<ConfigTarget>,
+    },
+    /// Show the mood-color palette, or diagnose one mood.
+    Mood {
+        /// Mood to diagnose (words are joined)
+        #[arg(value_name = "MOOD", num_args = 0.., allow_hyphen_values = true)]
+        mood: Vec<String>,
+    },
+    /// Clear all mood entries from a day.
+    Clear {
+        /// Day to clear (defaults to today)
+        #[arg(value_name = "DATE", num_args = 0..)]
+        date: Vec<String>,
+    },
+}
+
+/// Subcommands of `im :sync`; a bare `im :sync` runs a sync instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::Subcommand)]
+pub enum SyncSubcommand {
+    /// Create an account and sign this device in.
     Register,
-    /// `auth login` — sign this device in to an existing account.
+    /// Sign this device in to an existing account.
     Login,
-    /// `auth status` — show the account this device is signed in as.
+    /// Show the account this device is signed in as.
     Status,
-    /// `auth logout` — forget the account on this device (local data stays).
+    /// Forget the account on this device; local data stays.
     Logout,
 }
 
 /// Subcommands of `im :db`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::Parser)]
+#[command(
+    name = "im :db",
+    bin_name = "im :db",
+    about = "Database maintenance utilities",
+    disable_help_subcommand = true
+)]
 pub enum DbSubcommand {
-    /// `:db prune` — delete completed oneshot tasks and expired recurring
-    /// tasks (the former `:prune` command).
+    /// Delete finished and expired tasks.
     Prune,
-    /// `:db backfill` — compute and persist missing mood embeddings and
-    /// saliency scores (rendering no longer backfills them inline).
+    /// Fill in missing mood data.
     Backfill,
-    /// `:db doctor` — check every tracker entry's storage class against the
-    /// tracker's current configured kind and prune the mismatches (orphaned
-    /// tracker types included), after an interactive confirm.
+    /// Check tracker data and remove mismatches after confirmation.
     Doctor,
 }
 

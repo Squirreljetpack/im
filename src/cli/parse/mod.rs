@@ -1,4 +1,5 @@
 mod entry;
+mod groups;
 mod special;
 mod task;
 mod tracker;
