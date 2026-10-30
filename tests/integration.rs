@@ -6608,6 +6608,42 @@ async fn test_unmarked_scheduled_row_is_not_a_completion() {
     assert!(done.is_empty(), "cleared, not completed");
 }
 
+/// A scheduled task is not an addressable oneshot: a `+<ref> <count>` must not
+/// reach `update_task`, which would add a second state row (and an undo would
+/// be clamped against the unmarked sentinel).
+#[tokio::test]
+async fn a_scheduled_task_takes_no_completion_delta() {
+    let pool = im::db::test_pool().await.unwrap();
+    let (task, short_id) = create_task(
+        &pool,
+        &TaskObject {
+            id: None,
+            short_id: None,
+            name: "walk".into(),
+            body: String::new(),
+            priority: 5,
+            start_time: Some(im::date::now()),
+            available_duration_secs: Some(3600),
+            interval_secs: None,
+            target_count: 0,
+            optional: false,
+            end_time: None,
+            parent: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let by_id = im::db::fetch_oneshot_task_by_id_for_update(&pool, task)
+        .await
+        .unwrap();
+    assert!(by_id.is_none(), "a scheduled task has no oneshot update");
+    let by_short_id = im::db::fetch_oneshot_task_for_update(&pool, short_id)
+        .await
+        .unwrap();
+    assert!(by_short_id.is_none(), "a scheduled task has no oneshot update");
+}
+
 /// Directly plant completion rows at chosen moments, so a test can exercise
 /// corrections across distinct times without sleeping a second between calls.
 async fn plant_completions(pool: &sqlx::SqlitePool, task: im::db::Id, rows: &[(i64, i32)]) {
