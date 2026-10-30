@@ -176,8 +176,7 @@ pub async fn prompt_short_id(
         if Some(new_short) == current_short {
             return Ok(current_short);
         }
-        if let Some(existing_id) =
-            crate::db::fetch_task_id_by_short_id(pool, new_short).await?
+        if let Some(existing_id) = crate::db::fetch_task_id_by_short_id(pool, new_short).await?
             && existing_id != current_id
         {
             cliclack::log::error(format!("Short ID {} is already in use", new_short))?;
@@ -236,41 +235,88 @@ pub fn prompt_interval(default: Option<&str>) -> Result<String> {
     Ok(raw)
 }
 
-/// Prompt for an available duration. Blank = always available. `max` (in
-/// seconds) optionally caps the allowed input: a duration longer than
-/// `format_duration(max)` is rejected (the recurring flow passes the
-/// interval, since availability beyond it means always available). `default`
-/// pre-fills the input (edit flow).
+/// Prompt for an available duration. `Ok(None)` = always available, which a
+/// blank answer and any duration at or beyond `max` both resolve to — the
+/// recurring flow passes its interval, since availability cannot outlast one.
+/// The accepted answer is repainted to `always` so the screen stops showing
+/// the typed span. `default` pre-fills the input (edit flow).
 pub fn prompt_available_duration(
     placeholder: &str,
     default: Option<&str>,
     max: Option<i64>,
-) -> Result<String> {
+) -> Result<Option<i64>> {
     use cliclack::input;
 
     let raw: String = input("Available duration:")
         .placeholder(placeholder)
         .default_input(default.unwrap_or(""))
-        .validate(move |input: &String| {
+        .validate(|input: &String| {
             if input.is_empty() {
                 Ok(())
             } else {
-                match crate::date::parse_duration_secs(input) {
-                    Ok(secs) => match max {
-                        Some(m) if secs > m => Err(format!(
-                            "Must be at most {}",
-                            crate::date::format_duration(m)
-                        )),
-                        _ => Ok(()),
-                    },
-                    Err(e) => Err(format!("Invalid duration: {}", e)),
-                }
+                crate::date::parse_duration_secs(input)
+                    .map(|_| ())
+                    .map_err(|e| format!("Invalid duration: {}", e))
             }
         })
         .interact()
         .map_err(|e| anyhow::anyhow!("Prompt cancelled: {}", e))?;
 
-    Ok(raw)
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let secs = crate::date::parse_duration_secs(raw)?;
+    if max.is_some_and(|m| secs >= m) {
+        rewrite_answer_line(raw, "always");
+        return Ok(None);
+    }
+    Ok(Some(secs))
+}
+
+/// Repaint the answer line of the prompt that just finished, so the screen
+/// shows the stored value instead of the raw input.
+///
+/// cliclack's `Input` has no transform hook — the submit frame re-renders the
+/// typed text verbatim — so a normalized answer can only be shown by
+/// overwriting the frame's value line and the `│` footer below it.
+fn rewrite_answer_line(typed: &str, shown: &str) {
+    let term = console::Term::stderr();
+    if !term.is_term() {
+        return;
+    }
+    let width = (term.size().1 as usize).max(1);
+    // The value renders as `│  <text>`, wrapping over several rows when long.
+    let rows = |text: &str| {
+        (3 + console::measure_text_width(text))
+            .div_ceil(width)
+            .max(1)
+    };
+
+    let clear = rows(typed) + 1; // value row(s) + footer row
+    if term.clear_last_lines(clear).is_err() {
+        return;
+    }
+    let bar = console::Style::new().black().bright().apply_to("│");
+    let mut painted = 0;
+    for line in cliclack::termwrap(shown, 3).lines() {
+        if term
+            .write_line(&format!(
+                "{bar}  {}",
+                console::Style::new().dim().apply_to(line)
+            ))
+            .is_err()
+        {
+            return;
+        }
+        painted += 1;
+    }
+    // Pad to the cleared height so later output does not drift upwards.
+    for _ in painted..clear {
+        if term.write_line(&bar.to_string()).is_err() {
+            return;
+        }
+    }
 }
 
 /// Prompt for a recurring-task end time. The label is "Duration or end time":

@@ -73,6 +73,16 @@ pub fn interval_start(task: &crate::db::TaskRow, now: i64) -> Option<i64> {
     Some(current_interval_start(start, span, now))
 }
 
+/// Availability is capped by the interval: a duration that is not shorter than
+/// the interval means "always available" (stored as `None`). Call this after
+/// editing either field so the pair stays consistent.
+pub fn availability_within_interval(
+    duration: Option<i64>,
+    interval_rough_secs: i64,
+) -> Option<i64> {
+    duration.filter(|dur| *dur < interval_rough_secs)
+}
+
 /// Whether a task's availability window has fully passed (`now >= window
 /// end`). For a recurring task the window is anchored to the **current
 /// interval** — `current_interval_start + available_duration_secs <= now`

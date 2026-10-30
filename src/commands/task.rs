@@ -368,6 +368,10 @@ pub(super) async fn create_task_command(
     Ok(())
 }
 
+/// Interactive recurring creation flow (`im ! %<interval> [name]`). Prompts
+/// name, start time, interval, and available duration upfront, then lets the
+/// menu adjust any of the time fields plus priority, body, target count, end
+/// time, and optional before saving.
 async fn create_recurring_task(
     pool: &SqlitePool,
     config: &Config,
@@ -376,7 +380,7 @@ async fn create_recurring_task(
     body: Result<String, usize>,
     cl_interval: Option<String>,
 ) -> Result<()> {
-    use crate::date::{parse_duration_secs, parse_span};
+    use crate::date::parse_span;
 
     if !atty::is(atty::Stream::Stdin) {
         anyhow::bail!("Recurring task creation requires an interactive terminal");
@@ -391,38 +395,27 @@ async fn create_recurring_task(
     let name = prompt_unique_name(pool, prefill.as_deref(), Some(TaskKind::Recurring)).await?;
 
     // 2. Start time (prompted before menu)
-    let start_time = crate::prompts::prompt_start_time("Start time:", None)?;
+    let mut start_time = crate::prompts::prompt_start_time("Start time:", None)?;
 
-    // 3. Interval (prompted before menu unless `! %<interval>` prefilled it)
-    let interval_str = match cl_interval {
+    // 3. Interval (prompted before the menu unless `! %<interval>` prefilled
+    //    it). Editable from the menu afterwards.
+    let mut interval_label = match cl_interval {
         Some(i) => {
             cliclack::log::info(format!("Interval: {i}"))?;
             i
         }
         None => crate::prompts::prompt_interval(None)?,
     };
-    let interval_span = parse_span(&interval_str)?;
-    let interval_rough_secs = crate::date::span_rough_seconds(interval_span) as i64;
+    let mut interval_secs = crate::date::span_to_db(&parse_span(&interval_label)?);
+    let mut interval_rough_secs = crate::date::db_span_rough_secs(interval_secs);
 
-    // 4. Available duration (prompted before menu); blank or anything at
-    //    least as long as the interval means always available.
-    let available_duration_secs: Option<i64> = {
-        let avail_str = crate::prompts::prompt_available_duration(
-            &interval_str,
-            None,
-            Some(interval_rough_secs),
-        )?;
-        if avail_str.trim().is_empty() {
-            None
-        } else {
-            let dur = parse_duration_secs(&avail_str)?;
-            if dur >= interval_rough_secs {
-                None
-            } else {
-                Some(dur)
-            }
-        }
-    };
+    // 4. Available duration (prompted before the menu). Blank, or a duration
+    //    that is not shorter than the interval, means always available.
+    let mut available_duration_secs = crate::prompts::prompt_available_duration(
+        &interval_label,
+        None,
+        Some(interval_rough_secs),
+    )?;
 
     // Remaining fields configured via edit menu
     let mut priority_val = config.tasks.default_recurring_priority;
@@ -448,6 +441,19 @@ async fn create_recurring_task(
         select = select.item("save", "Finish", "");
         select = select.item("priority", "Priority", priority_val.to_string());
         select = select.item("body", "Body", &body_hint);
+        select = select.item(
+            "start",
+            "Start time",
+            crate::date::format_datetime(start_time),
+        );
+        select = select.item("interval", "Interval", &interval_label);
+        select = select.item(
+            "available_duration",
+            "Available duration",
+            available_duration_secs
+                .map(crate::date::format_duration)
+                .unwrap_or_else(|| "always".to_string()),
+        );
         select = select.item(
             "target",
             "Times to complete",
@@ -478,6 +484,36 @@ async fn create_recurring_task(
             "body" => {
                 if let Ok(b) = crate::editor::open_editor_on_text(&body_val) {
                     body_val = b;
+                }
+            }
+            "start" => {
+                let cur = crate::date::format_datetime(start_time);
+                if let Ok(t) = crate::prompts::prompt_start_time("Start time:", Some(&cur)) {
+                    start_time = t;
+                }
+            }
+            "interval" => {
+                if let Ok(s) = crate::prompts::prompt_interval(Some(&interval_label)) {
+                    let span = parse_span(&s)?;
+                    interval_secs = crate::date::span_to_db(&span);
+                    interval_label = crate::date::format_span(&span);
+                    interval_rough_secs = crate::date::db_span_rough_secs(interval_secs);
+                    // A duration that no longer fits the new interval means
+                    // always available.
+                    available_duration_secs = crate::task::availability_within_interval(
+                        available_duration_secs,
+                        interval_rough_secs,
+                    );
+                }
+            }
+            "available_duration" => {
+                let cur = available_duration_secs.map(crate::date::format_duration);
+                if let Ok(dur) = crate::prompts::prompt_available_duration(
+                    &interval_label,
+                    cur.as_deref(),
+                    Some(interval_rough_secs),
+                ) {
+                    available_duration_secs = dur;
                 }
             }
             "target" => {
@@ -513,7 +549,7 @@ async fn create_recurring_task(
         priority: priority_val,
         start_time: Some(start_time),
         available_duration_secs,
-        interval_secs: Some(crate::date::span_to_db(&interval_span)),
+        interval_secs: Some(interval_secs),
         target_count,
         optional,
         end_time,
@@ -539,8 +575,8 @@ async fn create_recurring_task(
 
 /// Interactive scheduled creation flow (`! @<time> [:name] [%<duration>]`
 /// with anything missing from the command line). Prompts name, start time,
-/// and available duration upfront, then allows editing priority, body,
-/// and optional in the menu before saving.
+/// and available duration upfront, then lets the menu adjust the start time,
+/// available duration, priority, body, and optional before saving.
 async fn create_scheduled_task(
     pool: &SqlitePool,
     config: &Config,
@@ -550,8 +586,6 @@ async fn create_scheduled_task(
     duration: Option<i64>,
     body: Result<String, usize>,
 ) -> Result<()> {
-    use crate::date::parse_duration_secs;
-
     if !atty::is(atty::Stream::Stdin) {
         anyhow::bail!("Scheduled task creation requires an interactive terminal");
     }
@@ -565,7 +599,7 @@ async fn create_scheduled_task(
     let name = prompt_unique_name(pool, name.as_deref(), Some(TaskKind::Scheduled)).await?;
 
     // 2. Start time (prompted before menu)
-    let start = match start {
+    let mut start = match start {
         Some(s) => {
             cliclack::log::info(format!("Start: {}", crate::date::format_datetime(s)))?;
             s
@@ -574,19 +608,13 @@ async fn create_scheduled_task(
     };
 
     // 3. Available duration (prompted before menu)
-    let duration_secs = match duration {
+    let mut duration_secs = match duration {
         Some(d) => {
             cliclack::log::info(format!("Duration: {}", format_duration(d)))?;
             d
         }
-        None => {
-            let raw = crate::prompts::prompt_available_duration("1 hour", None, None)?;
-            if raw.trim().is_empty() {
-                3600
-            } else {
-                parse_duration_secs(&raw)?
-            }
-        }
+        // Blank input keeps the one-hour default.
+        None => crate::prompts::prompt_available_duration("1 hour", None, None)?.unwrap_or(3600),
     };
 
     // Remaining fields configured via edit menu
@@ -611,6 +639,12 @@ async fn create_scheduled_task(
         select = select.item("save", "Finish", "");
         select = select.item("priority", "Priority", priority_val.to_string());
         select = select.item("body", "Body", &body_hint);
+        select = select.item("start", "Start time", crate::date::format_datetime(start));
+        select = select.item(
+            "available_duration",
+            "Available duration",
+            format_duration(duration_secs),
+        );
         select = select.item("optional", "Optional", if optional { "Yes" } else { "No" });
         select = select.item("cancel", "Cancel", "");
 
@@ -625,6 +659,23 @@ async fn create_scheduled_task(
             "body" => {
                 if let Ok(b) = crate::editor::open_editor_on_text(&body_val) {
                     body_val = b;
+                }
+            }
+            "start" => {
+                let cur = crate::date::format_datetime(start);
+                if let Ok(t) = crate::prompts::prompt_start_time("Start time:", Some(&cur)) {
+                    start = t;
+                }
+            }
+            "available_duration" => {
+                if let Ok(Some(dur)) = crate::prompts::prompt_available_duration(
+                    "1 hour",
+                    Some(&format_duration(duration_secs)),
+                    None,
+                ) {
+                    // A scheduled window is mandatory: a blank answer keeps the
+                    // current duration.
+                    duration_secs = dur;
                 }
             }
             "optional" => {

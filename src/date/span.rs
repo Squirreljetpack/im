@@ -78,6 +78,12 @@ pub fn zoned_from_unix_secs(unix_secs: i64) -> Result<Zoned, jiff::Error> {
 /// Rough total seconds for a span, for estimation only (nominal 365.25-day
 /// years and 30.44-day months; weeks/days at 24h). Unlike `Span::total`,
 /// this never fails for calendar units like months.
+/// [`span_rough_seconds`] for a span already packed for the database, in whole
+/// seconds. This is the form interval/duration comparisons use.
+pub fn db_span_rough_secs(db_span: DbSpan) -> i64 {
+    span_rough_seconds(db_to_span(db_span)) as i64
+}
+
 pub fn span_rough_seconds(span: Span) -> f64 {
     f64::from(span.get_years()) * 365.25 * 86_400.0
         + f64::from(span.get_months()) * 30.44 * 86_400.0
