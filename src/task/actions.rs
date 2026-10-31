@@ -28,7 +28,7 @@ pub fn accept_action(
     completions: Option<i32>,
     is_scheduled: bool,
     target_count: i32,
-    start_time: Option<i64>,
+    start_time: i64,
     duration: Option<i64>,
     now: i64,
 ) -> AcceptAction {
@@ -37,7 +37,7 @@ pub fn accept_action(
             None => AcceptAction::Complete,
             Some(c) if c > 0 => AcceptAction::SetFailed,
             Some(_) => {
-                let before = start_time.unwrap_or(now) + duration.unwrap_or(0) >= now;
+                let before = start_time + duration.unwrap_or(0) >= now;
                 if before {
                     AcceptAction::Clear
                 } else {

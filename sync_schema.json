@@ -9,7 +9,7 @@
         "name": { "class": "text", "required": true },
         "body": { "class": "text" },
         "priority": { "class": "int" },
-        "start_time": { "class": "int" },
+        "start_time": { "class": "int", "required": true },
         "available_duration_secs": { "class": "int" },
         "interval_secs": { "class": "int" },
         "target_count": { "class": "int" },

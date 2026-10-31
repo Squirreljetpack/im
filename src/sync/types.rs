@@ -259,7 +259,7 @@ pub enum TaskUpdate {
     Name(String),
     Body(String),
     Priority(i32),
-    StartTime(Option<i64>),
+    StartTime(i64),
     AvailableDurationSecs(Option<i64>),
     IntervalSecs(Option<i64>),
     TargetCount(i32),
@@ -275,7 +275,7 @@ impl TaskUpdate {
             Self::Name(name) => (task_field::NAME, Some(CellValue::text(name))),
             Self::Body(body) => (task_field::BODY, Some(CellValue::text(body))),
             Self::Priority(priority) => (task_field::PRIORITY, Some(CellValue::int(*priority))),
-            Self::StartTime(time) => (task_field::START_TIME, time.map(CellValue::Int)),
+            Self::StartTime(time) => (task_field::START_TIME, Some(CellValue::Int(*time))),
             Self::AvailableDurationSecs(secs) => {
                 (task_field::AVAILABLE_DURATION_SECS, secs.map(CellValue::Int))
             }

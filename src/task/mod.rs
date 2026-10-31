@@ -4,10 +4,12 @@
 mod actions;
 mod completion;
 mod scheduling;
+mod validate;
 
 pub use actions::*;
 pub use completion::*;
 pub use scheduling::*;
+pub use validate::*;
 
 #[cfg(test)]
 mod tests {
@@ -66,7 +68,7 @@ mod tests {
             name: "t".to_string(),
             body: String::new(),
             priority: 5,
-            start_time: Some(st),
+            start_time: st,
             available_duration_secs: dur,
             interval_secs: interval.map(|s| crate::date::span_to_db(&s)),
             target_count: 0,
@@ -184,13 +186,13 @@ mod tests {
         // Scheduled tasks never prompt: none → done; done → failed;
         // failed → cleared before the window end, done after.
         let now = 1_000_000i64;
-        let (start, dur) = (Some(now - 3600), Some(3600)); // window ends at now
+        let (start, dur) = (now - 3600, Some(3600)); // window ends at now
         let scheduled = |c| accept_action(c, true, 0, start, dur, now);
         assert_eq!(scheduled(None), AcceptAction::Complete);
         assert_eq!(scheduled(Some(1)), AcceptAction::SetFailed);
         assert_eq!(scheduled(Some(0)), AcceptAction::Clear); // now == window end → before
 
-        let (start, dur) = (Some(now - 7200), Some(3600)); // window ended an hour ago
+        let (start, dur) = (now - 7200, Some(3600)); // window ended an hour ago
         let scheduled = |c| accept_action(c, true, 0, start, dur, now);
         assert_eq!(scheduled(None), AcceptAction::Complete);
         assert_eq!(scheduled(Some(1)), AcceptAction::SetFailed);
@@ -203,27 +205,27 @@ mod tests {
         // done → Reset (no modal).
         let now = 1_000_000i64;
         assert_eq!(
-            accept_action(None, false, 0, None, None, now),
+            accept_action(None, false, 0, 0, None, now),
             AcceptAction::Complete
         );
         assert_eq!(
-            accept_action(Some(0), false, 0, None, None, now),
+            accept_action(Some(0), false, 0, 0, None, now),
             AcceptAction::Complete
         );
         assert_eq!(
-            accept_action(Some(1), false, 0, None, None, now),
+            accept_action(Some(1), false, 0, 0, None, now),
             AcceptAction::Reset
         );
         assert_eq!(
-            accept_action(None, false, 1, None, None, now),
+            accept_action(None, false, 1, 0, None, now),
             AcceptAction::Complete
         );
         assert_eq!(
-            accept_action(Some(1), false, 1, None, None, now),
+            accept_action(Some(1), false, 1, 0, None, now),
             AcceptAction::Reset
         );
         assert_eq!(
-            accept_action(Some(0), false, 1, None, None, now),
+            accept_action(Some(0), false, 1, 0, None, now),
             AcceptAction::Complete
         );
     }
@@ -234,23 +236,23 @@ mod tests {
         // ResetConfirm when complete.
         let now = 1_000_000i64;
         assert_eq!(
-            accept_action(None, false, 5, None, None, now),
+            accept_action(None, false, 5, 0, None, now),
             AcceptAction::CompletePrompt
         );
         assert_eq!(
-            accept_action(Some(0), false, 5, None, None, now),
+            accept_action(Some(0), false, 5, 0, None, now),
             AcceptAction::CompletePrompt
         );
         assert_eq!(
-            accept_action(Some(2), false, 5, None, None, now),
+            accept_action(Some(2), false, 5, 0, None, now),
             AcceptAction::CompletePrompt
         );
         assert_eq!(
-            accept_action(Some(5), false, 5, None, None, now),
+            accept_action(Some(5), false, 5, 0, None, now),
             AcceptAction::ResetConfirm
         );
         assert_eq!(
-            accept_action(Some(7), false, 5, None, None, now),
+            accept_action(Some(7), false, 5, 0, None, now),
             AcceptAction::ResetConfirm
         );
     }

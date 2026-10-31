@@ -330,7 +330,7 @@ fn scheduled_badge(task: &TaskRow, config: &Config, done_view: bool, now: i64) -
     let auto_completed = task.completions.is_none()
         && task
             .available_duration_secs
-            .is_some_and(|dur| task.start_time.unwrap_or(now) + dur < now);
+            .is_some_and(|dur| task.start_time + dur < now);
     let done = task.completions.is_some_and(|c| c > 0) || auto_completed;
     let color = if done {
         *colors.last().unwrap_or(&CtColor::Reset)
@@ -395,7 +395,7 @@ mod tests {
             name: "t".to_string(),
             body: String::new(),
             priority: 5,
-            start_time: Some(1_000_000),
+            start_time: 1_000_000,
             available_duration_secs: None,
             interval_secs: None,
             target_count: 0,
@@ -498,7 +498,7 @@ mod tests {
                 name: "r".to_string(),
                 body: String::new(),
                 priority: 5,
-                start_time: Some(st),
+                start_time: st,
                 available_duration_secs: Some(dur),
                 interval_secs: Some(day),
                 target_count: target,

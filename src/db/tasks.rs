@@ -55,13 +55,15 @@ pub async fn create_task(pool: &SqlitePool, task: &TaskObject) -> Result<(Id, i6
 
 /// Update a task row with all editable fields. Returns the number of affected rows.
 pub async fn edit_task(pool: &SqlitePool, update: &UpdateTaskObject) -> Result<u64> {
-    assert!(
-        update.interval_secs.is_none_or(|i| i > 0),
-        "interval_secs must be None or positive, got {:?}",
-        update.interval_secs
-    );
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
     let before = fetch_edit_preimage(&mut tx, update.id).await?;
+    if let Some(before) = &before {
+        let kind = TaskKind::of(
+            before.get::<Option<i64>, _>("interval_secs"),
+            before.get::<Option<i64>, _>("available_duration_secs"),
+        );
+        crate::task::validate_edit(kind, update)?;
+    }
     let res = sqlx::query(
         r#"UPDATE todos SET name = ?, body = ?, priority = ?, short_id = ?, start_time = ?,
                    available_duration_secs = ?, interval_secs = ?, target_count = ?,
@@ -125,7 +127,7 @@ fn edit_diff(
     if before.get::<i32, _>("priority") != update.priority {
         diff.push(crate::sync::TaskUpdate::Priority(update.priority));
     }
-    if before.get::<Option<i64>, _>("start_time") != update.start_time {
+    if before.get::<i64, _>("start_time") != update.start_time {
         diff.push(crate::sync::TaskUpdate::StartTime(update.start_time));
     }
     if before.get::<Option<i64>, _>("available_duration_secs") != update.available_duration_secs {
@@ -986,7 +988,7 @@ mod tests {
                 name: name.to_string(),
                 body: String::new(),
                 priority: 5,
-                start_time: Some(1_700_000_000),
+                start_time: 1_700_000_000,
                 available_duration_secs: None,
                 interval_secs: None,
                 target_count: 0,

@@ -16,12 +16,11 @@ pub fn pending_sort_time(task: &crate::db::TaskRow, now: i64) -> i64 {
     if task.is_done() {
         return task.last_time.unwrap_or_else(|| {
             task.start_time
-                .unwrap_or(i64::MAX)
                 .saturating_add(task.available_duration_secs.unwrap_or(0))
         });
     }
     if task.is_scheduled() {
-        return task.start_time.unwrap_or(i64::MAX);
+        return task.start_time;
     }
     if task.is_recurring() {
         return recurring_window_end(task, now);
@@ -35,7 +34,7 @@ pub fn completed_sort_time(task: &crate::db::TaskRow) -> i64 {
     if let Some(last) = task.last_time {
         return last;
     }
-    let start = task.start_time.unwrap_or(i64::MAX);
+    let start = task.start_time;
     if task.interval_secs.is_none() {
         start.saturating_add(task.available_duration_secs.unwrap_or(0))
     } else {
@@ -47,8 +46,9 @@ pub fn completed_sort_time(task: &crate::db::TaskRow) -> i64 {
 /// duration when it is shorter than the interval and still open, else the
 /// interval end (`interval start + span`).
 fn recurring_window_end(task: &crate::db::TaskRow, now: i64) -> i64 {
-    match (task.start_time, task.interval_span()) {
-        (Some(st), Some(span)) => {
+    let st = task.start_time;
+    match task.interval_span() {
+        Some(span) => {
             let interval_start = current_interval_start(st, span, now);
             match task.available_duration_secs {
                 Some(dur)
@@ -60,17 +60,16 @@ fn recurring_window_end(task: &crate::db::TaskRow, now: i64) -> i64 {
                 _ => crate::date::interval_end_unix_secs(st, span, now).unwrap_or(interval_start),
             }
         }
-        // Defensive: interval-less recurring row — fall back to the anchor.
-        _ => task.start_time.unwrap_or(now),
+        // Defensive: interval-less recurring row — the anchor is the window.
+        None => st,
     }
 }
 
 /// Start of the current interval for a recurring task (`None` for others):
 /// the floor used by the interval-scoped completion queries.
 pub fn interval_start(task: &crate::db::TaskRow, now: i64) -> Option<i64> {
-    let start = task.start_time?;
     let span = task.interval_span()?;
-    Some(current_interval_start(start, span, now))
+    Some(current_interval_start(task.start_time, span, now))
 }
 
 /// Availability is capped by the interval: a duration that is not shorter than
@@ -92,19 +91,15 @@ pub fn availability_within_interval(
 /// modal (Accept on a recurring task whose window has passed) and the
 /// recurring badge — see docs/VIEWS.md.
 pub fn availability_passed(task: &crate::db::TaskRow, now: i64) -> bool {
-    match (
-        task.start_time,
-        task.interval_span(),
-        task.available_duration_secs,
-    ) {
+    match (task.interval_span(), task.available_duration_secs) {
         // Recurring: the window moves with each interval. With
         // `dur >= interval` the window covers the whole interval, so the
         // end never precedes now (consistent with `recurring_available`).
-        (Some(st), Some(span), Some(dur)) if crate::date::span_rough_seconds(span) > 0.0 => {
-            current_interval_start(st, span, now) + dur <= now
+        (Some(span), Some(dur)) if crate::date::span_rough_seconds(span) > 0.0 => {
+            current_interval_start(task.start_time, span, now) + dur <= now
         }
         // Scheduled: the window is absolute.
-        (Some(st), None, Some(dur)) => st + dur <= now,
+        (None, Some(dur)) => task.start_time + dur <= now,
         _ => false,
     }
 }

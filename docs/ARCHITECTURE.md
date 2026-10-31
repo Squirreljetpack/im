@@ -166,7 +166,8 @@ todos:          id (AUTOINCREMENT), name TEXT NOT NULL, body, priority DEFAULT 5
                 short_id INTEGER UNIQUE,   -- user-facing id; first-free-gap,
                                            -- NULL once a oneshot task is done
                 name_embedding BLOB,       -- reserved; never populated
-                start_time, available_duration_secs, interval_secs, target_count DEFAULT 0,
+                start_time INTEGER NOT NULL, -- creation moment; every kind dates from it
+                available_duration_secs, interval_secs, target_count DEFAULT 0,
                 -- interval_secs stores a packed DbSpan (NOT seconds) — a jiff
                 -- Span with calendar units, unpacked via date::db_to_span
                 optional DEFAULT 0, end_time, parent → todos(id) ON DELETE SET NULL

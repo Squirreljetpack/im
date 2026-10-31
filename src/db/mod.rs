@@ -371,7 +371,9 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
             short_id                INTEGER UNIQUE,
             -- Reserved for a name-derived embedding; local only.
             name_embedding          BLOB,
-            start_time              INTEGER,
+            -- The moment the task was created (never NULL): every kind
+            -- schedules its availability and its interval math from it.
+            start_time              INTEGER NOT NULL,
             available_duration_secs INTEGER,
             interval_secs           INTEGER,
             target_count            INTEGER NOT NULL DEFAULT 0,
@@ -618,7 +620,7 @@ mod tests {
     #[tokio::test]
     async fn a_null_scheduled_state_is_folded_into_the_sentinel() {
         let pool = test_pool().await.unwrap();
-        sqlx::query("INSERT INTO todos (id, name) VALUES ('t', 'walk')")
+        sqlx::query("INSERT INTO todos (id, name, start_time) VALUES ('t', 'walk', 1)")
             .execute(&pool)
             .await
             .unwrap();

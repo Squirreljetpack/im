@@ -12,7 +12,7 @@ import { SCHEMA } from "../src/schema";
  * without recording the new digest and there is no entry to match.
  */
 const VOCABULARY: Record<number, string> = {
-  1: "f7823cffa53a6674",
+  1: "6965e6583b70478e",
 };
 
 /** JSON with every object's keys sorted, so formatting and key order do not matter. */

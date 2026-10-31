@@ -139,13 +139,10 @@ pub fn recurring_available(task: &TaskRow, now: i64) -> bool {
     if task.end_time.is_some_and(|end| now > end) {
         return true;
     }
-    match (
-        task.start_time,
-        task.interval_span(),
-        task.available_duration_secs,
-    ) {
-        (Some(st), Some(span), Some(dur)) if dur < crate::date::span_rough_seconds(span) as i64 => {
-            let interval_start = crate::task::current_interval_start(st, span, now);
+    match (task.interval_span(), task.available_duration_secs) {
+        (Some(span), Some(dur)) if dur < crate::date::span_rough_seconds(span) as i64 => {
+            let interval_start =
+                crate::task::current_interval_start(task.start_time, span, now);
             now - interval_start < dur
         }
         _ => true,
@@ -435,9 +432,10 @@ fn recurring_windows_in_period(
     period_start: i64,
     period_end: i64,
 ) -> Vec<(i64, i64)> {
-    let (Some(st), Some(span)) = (task.start_time, task.interval_span()) else {
+    let Some(span) = task.interval_span() else {
         return Vec::new();
     };
+    let st = task.start_time;
     if crate::date::span_rough_seconds(span) <= 0.0 {
         return Vec::new();
     }
@@ -528,7 +526,7 @@ pub async fn fetch_recurring_windows_for_period(
             continue;
         }
         let span = task.interval_span().expect("filtered to recurring tasks");
-        let st = task.start_time.expect("filtered to tasks with a start");
+        let st = task.start_time;
         // Completion events within the span of the intersecting windows
         // (each window's interval, i.e. up to the last interval end).
         let span_end =
@@ -662,8 +660,8 @@ fn scoped_completion_sum(task: &TaskRow, rows: &[CompletionRow], now: i64) -> Op
 /// moved-forward start still belongs to the interval that ends at it. `None`
 /// for non-recurring tasks.
 fn interval_containing_at(task: &TaskRow, at: i64) -> Option<(i64, i64)> {
-    let (start, span) = (task.start_time?, task.interval_span()?);
-    crate::date::interval_slot_unix_secs(start, span, at)
+    let span = task.interval_span()?;
+    crate::date::interval_slot_unix_secs(task.start_time, span, at)
 }
 
 /// The most recent moment whose progress still stands. A moment whose
@@ -903,9 +901,9 @@ pub async fn fetch_tasks_for_view(
                 let not_done = scoped.is_none() || scoped.unwrap_or(0) < task.target_count;
                 if is_scheduled {
                     (scoped.is_none() || scoped == Some(0))
-                        && task
-                            .start_time
-                            .is_some_and(|st| st + task.available_duration_secs.unwrap_or(0) >= now)
+                        && task.start_time
+                            + task.available_duration_secs.unwrap_or(0)
+                            >= now
                         || recent
                 } else {
                     not_done || recent
@@ -922,9 +920,9 @@ pub async fn fetch_tasks_for_view(
             (ViewMode::DoneTasks, ViewVariant::B) => {
                 if is_scheduled {
                     scoped.is_some()
-                        || task
-                            .start_time
-                            .is_some_and(|st| st + task.available_duration_secs.unwrap_or(0) < now)
+                        || task.start_time
+                            + task.available_duration_secs.unwrap_or(0)
+                            < now
                 } else {
                     true
                 }
@@ -954,10 +952,9 @@ pub async fn fetch_tasks_for_view(
             };
             let fallback = if task.is_scheduled() {
                 task.start_time
-                    .unwrap_or(i64::MAX)
                     .saturating_add(task.available_duration_secs.unwrap_or(0))
             } else {
-                task.start_time.unwrap_or(i64::MAX)
+                task.start_time
             };
             scoped.unwrap_or(fallback)
         };

@@ -28,7 +28,7 @@ fn task(name: &str) -> TaskObject {
         name: name.to_string(),
         body: String::new(),
         priority: 5,
-        start_time: Some(1_700_000_000),
+        start_time: 1_700_000_000,
         available_duration_secs: None,
         interval_secs: None,
         target_count: 0,
@@ -274,10 +274,10 @@ async fn a_cell_for_a_row_that_never_appeared_is_skipped() {
 }
 
 /// A required cell's register row moves forward whenever it is rewritten, so a
-/// create can straddle two pages. The row must not be invented from what
-/// arrived first, and the cursor must not pass what is still being built.
+/// create can straddle pages. The row must not be invented from what arrived
+/// first, and the cursor must not pass what is still being built.
 #[tokio::test]
-async fn a_create_split_across_pages_waits_for_its_required_cell() {
+async fn a_create_split_across_pages_waits_for_its_required_cells() {
     let pool = test_pool().await.expect("in-memory db");
     let id = crate::db::Id::new();
     let device = crate::db::Id::new();
@@ -295,6 +295,7 @@ async fn a_create_split_across_pages_waits_for_its_required_cell() {
     };
     let existence = cell(10, EXISTENCE, live());
     let name = cell(90, "name", Some(CellValue::text("late")));
+    let start = cell(95, "start_time", Some(CellValue::Int(1_700_000_000)));
 
     let mut conn = pool.acquire().await.unwrap();
     let mut pending = apply::Pending::default();
@@ -312,8 +313,14 @@ async fn a_create_split_across_pages_waits_for_its_required_cell() {
     let second = apply::apply_rows(&mut conn, &[name], &mut pending)
         .await
         .expect("apply the name");
-    assert_eq!(second.created, 1, "the required cell completes the create");
-    assert_eq!(pending.fence(90), 90, "and the fence may move on");
+    assert_eq!(second.created, 0, "a task is still short its start time");
+    assert_eq!(pending.fence(100), 9, "so the fence stays where it was held");
+
+    let third = apply::apply_rows(&mut conn, &[start], &mut pending)
+        .await
+        .expect("apply the start time");
+    assert_eq!(third.created, 1, "the last required cell completes the create");
+    assert_eq!(pending.fence(95), 95, "and the fence may move on");
 
     let name: String = sqlx::query_scalar("SELECT name FROM todos WHERE id = ?")
         .bind(id)

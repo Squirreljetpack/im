@@ -682,7 +682,6 @@ pub async fn fetch_today_entries(
             for task in &due_tasks {
                 let time = if creation_time {
                     task.start_time
-                        .unwrap_or_else(|| pending_sort_time(task, now_ts))
                 } else {
                     pending_sort_time(task, now_ts)
                 };
@@ -982,7 +981,7 @@ mod tests {
     }
 
     fn task_row(
-        start_time: Option<i64>,
+        start_time: i64,
         available_duration_secs: Option<i64>,
         interval: Option<jiff::Span>,
         end_time: Option<i64>,
@@ -1033,7 +1032,7 @@ mod tests {
         // with a weekday prefix (outside the anchored day).
         check(
             &task_row(
-                Some(anchor),
+                anchor,
                 Some(hour_secs),
                 Some(jiff::Span::new().days(1)),
                 None,
@@ -1047,7 +1046,7 @@ mod tests {
         // end): the window end of the current interval.
         let open_now = at("2024-03-16 08:30");
         let open = task_row(
-            Some(anchor),
+            anchor,
             Some(hour_secs),
             Some(jiff::Span::new().days(1)),
             None,
@@ -1064,7 +1063,7 @@ mod tests {
         // (timed — every recurring window has a time cell now).
         check(
             &task_row(
-                Some(anchor),
+                anchor,
                 None,
                 Some(jiff::Span::new().days(1)),
                 None,
@@ -1079,7 +1078,7 @@ mod tests {
         // next interval's start, like the untimed group.
         check(
             &task_row(
-                Some(anchor),
+                anchor,
                 Some(day_secs),
                 Some(jiff::Span::new().days(1)),
                 None,
@@ -1092,7 +1091,7 @@ mod tests {
         // Scheduled, not done (window still open): the deadline.
         check(
             &task_row(
-                Some(at("2024-03-16 08:00")),
+                at("2024-03-16 08:00"),
                 Some(10 * hour_secs),
                 None,
                 None,
@@ -1105,7 +1104,7 @@ mod tests {
         // Scheduled, done with an entry: the completion time.
         check(
             &task_row(
-                Some(at("2024-03-16 08:00")),
+                at("2024-03-16 08:00"),
                 Some(10 * hour_secs),
                 None,
                 None,
@@ -1119,7 +1118,7 @@ mod tests {
         // end is the completion moment.
         check(
             &task_row(
-                Some(at("2024-03-16 08:00")),
+                at("2024-03-16 08:00"),
                 Some(2 * hour_secs),
                 None,
                 None,
@@ -1132,7 +1131,7 @@ mod tests {
         // Oneshot, not done, with a due time.
         check(
             &task_row(
-                Some(anchor),
+                anchor,
                 None,
                 None,
                 Some(at("2024-03-16 12:00")),
@@ -1144,14 +1143,14 @@ mod tests {
         );
         // Oneshot, not done, undated: untimed (sorts last).
         check(
-            &task_row(Some(anchor), None, None, None, None, None),
+            &task_row(anchor, None, None, None, None, None),
             i64::MAX,
             "",
         );
         // Oneshot, done: the completion time.
         check(
             &task_row(
-                Some(anchor),
+                anchor,
                 None,
                 None,
                 Some(at("2024-03-16 12:00")),
@@ -1170,7 +1169,7 @@ mod tests {
             name: "partial history".to_string(),
             target_count: 2,
             ..task_row(
-                Some(anchor),
+                anchor,
                 Some(hour_secs),
                 Some(jiff::Span::new().days(1)),
                 None,
@@ -1198,7 +1197,7 @@ mod tests {
         // Done oneshot with an entry: the last completion entry.
         assert_eq!(
             crate::task::completed_sort_time(&task_row(
-                Some(at("2024-03-16 08:00")),
+                at("2024-03-16 08:00"),
                 None,
                 None,
                 None,
@@ -1210,7 +1209,7 @@ mod tests {
         // Scheduled with an entry: the entry.
         assert_eq!(
             crate::task::completed_sort_time(&task_row(
-                Some(at("2024-03-16 08:00")),
+                at("2024-03-16 08:00"),
                 Some(10 * hour_secs),
                 None,
                 None,
@@ -1222,7 +1221,7 @@ mod tests {
         // Scheduled without an entry (auto-completed): the window end.
         assert_eq!(
             crate::task::completed_sort_time(&task_row(
-                Some(at("2024-03-16 08:00")),
+                at("2024-03-16 08:00"),
                 Some(2 * hour_secs),
                 None,
                 None,
@@ -1236,7 +1235,7 @@ mod tests {
         // per-interval availability window, not a completion moment.
         assert_eq!(
             crate::task::completed_sort_time(&task_row(
-                Some(at("2024-03-15 08:00")),
+                at("2024-03-15 08:00"),
                 Some(2 * hour_secs),
                 Some(jiff::Span::new().days(1)),
                 None,
@@ -1244,11 +1243,6 @@ mod tests {
                 None,
             )),
             at("2024-03-15 08:00")
-        );
-        // Undated: i64::MAX (defensive — can't appear in a done view).
-        assert_eq!(
-            crate::task::completed_sort_time(&task_row(None, None, None, None, None, None)),
-            i64::MAX
         );
     }
 
@@ -1437,7 +1431,7 @@ mod tests {
             name: name.to_string(),
             body: String::new(),
             priority: 5,
-            start_time: Some(at(created)),
+            start_time: at(created),
             available_duration_secs: None,
             interval_secs: None,
             target_count: 0,
