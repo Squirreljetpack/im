@@ -31,13 +31,8 @@ pub async fn init_database(db_path: &Path) -> Result<SqlitePool> {
     }
 }
 
-/// Open, probe and migrate the database file.
+/// Open, probe and lay out the schema.
 async fn open_database(db_path: &Path) -> Result<SqlitePool> {
-    // A file from an older version still has integer primary keys, and the
-    // schema below is created with `IF NOT EXISTS`: a legacy table would
-    // silently survive with the wrong key type. Copy it aside and start empty.
-    back_up_legacy_database(db_path).await?;
-
     probe_database(db_path).await?;
 
     let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
@@ -74,75 +69,10 @@ async fn open_database(db_path: &Path) -> Result<SqlitePool> {
         .connect(&db_url)
         .await?;
 
-    run_migrations(&pool).await?;
+    create_schema(&pool).await?;
 
     log::debug!("Database initialized at {:?}", db_path);
     Ok(pool)
-}
-
-/// Backup path for a legacy database: `<file>.legacy-<unix-seconds>.bak`.
-fn legacy_backup_path(db_path: &Path) -> PathBuf {
-    let mut name = db_path.as_os_str().to_os_string();
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default();
-    name.push(format!(".legacy-{secs}.bak"));
-    PathBuf::from(name)
-}
-
-/// Whether an existing database file uses the pre-sync integer-key schema
-/// (`todos.id` declared `INTEGER`). A file without a `todos` table is not
-/// legacy — it is either fresh or half-built.
-async fn has_legacy_schema(db_path: &Path) -> Result<bool> {
-    let db_url = format!("sqlite:{}?mode=rw", db_path.display());
-    let mut conn = SqliteConnection::connect(&db_url)
-        .await
-        .with_context(|| format!("Failed to open {} for inspection", db_path.display()))?;
-    let declared: Option<String> =
-        sqlx::query_scalar("SELECT type FROM pragma_table_info('todos') WHERE name = 'id'")
-            .fetch_optional(&mut conn)
-            .await
-            .with_context(|| format!("Failed to inspect the schema of {}", db_path.display()))?;
-    conn.close()
-        .await
-        .with_context(|| format!("Failed to close {} after inspection", db_path.display()))?;
-    Ok(declared.is_some_and(|decl_type| decl_type.eq_ignore_ascii_case("INTEGER")))
-}
-
-/// Copy a legacy (integer-key) database aside with `VACUUM INTO` — a single
-/// consistent file, WAL contents included — then delete it so the caller
-/// starts from the current schema with no rows. Returns the backup path, or
-/// `None` when the file is absent or already uses UUID keys.
-async fn back_up_legacy_database(db_path: &Path) -> Result<Option<PathBuf>> {
-    if !db_path.is_file() || !has_legacy_schema(db_path).await? {
-        return Ok(None);
-    }
-
-    let backup = legacy_backup_path(db_path);
-    let escaped = backup.display().to_string().replace('\'', "''");
-    let db_url = format!("sqlite:{}?mode=rw", db_path.display());
-    let mut conn = SqliteConnection::connect(&db_url)
-        .await
-        .with_context(|| format!("Failed to open {} for backup", db_path.display()))?;
-    sqlx::query(sqlx::AssertSqlSafe(format!("VACUUM INTO '{escaped}'")))
-        .execute(&mut conn)
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to back up {} to {}",
-                db_path.display(),
-                backup.display()
-            )
-        })?;
-    conn.close().await?;
-
-    delete_database(db_path)?;
-    log::warn!(
-        "Recreated the database without the rows of the pre-sync schema; the old file was copied to {}",
-        backup.display()
-    );
-    Ok(Some(backup))
 }
 
 /// Read the schema over a plain connection: a file that is not a SQLite
@@ -250,75 +180,12 @@ pub async fn test_pool() -> anyhow::Result<SqlitePool> {
         .connect("sqlite::memory:")
         .await?;
 
-    run_migrations(&pool).await?;
+    create_schema(&pool).await?;
 
     Ok(pool)
 }
-/// Bring an existing database onto the cell-based sync tables.
-///
-/// The outbox used to hold one opaque payload per event and the merge kept
-/// per-entity watermarks and kinds; cells replaced all three. A queued event of
-/// the old shape cannot be expressed as cells, so the outbox is dropped — the
-/// caller's next mutation refills it.
-async fn migrate_sync_tables(pool: &SqlitePool) -> anyhow::Result<()> {
-    let columns: Vec<String> =
-        sqlx::query_scalar("SELECT name FROM pragma_table_info('_sync_events')")
-            .fetch_all(pool)
-            .await
-            .unwrap_or_default();
-    if columns.iter().any(|column| column == "payload") {
-        sqlx::query("DROP TABLE _sync_events").execute(pool).await?;
-    }
-    for table in ["_sync_watermark", "_sync_entities"] {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP TABLE IF EXISTS {table}"
-        )))
-        .execute(pool)
-        .await?;
-    }
-
-    // A scheduled task's state lives in its row's `count` (`-1` unmarked, `0`
-    // failed, `1` done), which is NOT NULL. Fold any NULL rows an earlier
-    // build left behind into the unmarked sentinel and restore the constraint
-    // SQLite cannot re-add in place.
-    let not_null: Option<i64> = sqlx::query_scalar(
-        "SELECT \"notnull\" FROM pragma_table_info('todo_completions') WHERE name = 'count'",
-    )
-    .fetch_optional(pool)
-    .await?;
-    if not_null == Some(0) {
-        sqlx::query(
-            r#"
-            CREATE TABLE todo_completions_cells (
-                id      TEXT PRIMARY KEY,
-                todo_id TEXT NOT NULL REFERENCES todos(id) ON DELETE CASCADE,
-                time    INTEGER NOT NULL DEFAULT (unixepoch()),
-                count   INTEGER NOT NULL DEFAULT 1
-            )
-            "#,
-        )
-        .execute(pool)
-        .await?;
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "INSERT INTO todo_completions_cells (id, todo_id, time, count)
-             SELECT id, todo_id, time, COALESCE(count, {}) FROM todo_completions",
-            SCHEDULED_UNMARKED
-        )))
-        .execute(pool)
-        .await?;
-        sqlx::query("DROP TABLE todo_completions")
-            .execute(pool)
-            .await?;
-        sqlx::query("ALTER TABLE todo_completions_cells RENAME TO todo_completions")
-            .execute(pool)
-            .await?;
-    }
-
-    Ok(())
-}
-
-pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
-    migrate_sync_tables(pool).await?;
+/// Create every table and index the schema defines.
+pub async fn create_schema(pool: &SqlitePool) -> anyhow::Result<()> {
     // Create tables if they don't exist
     sqlx::query(
         r#"
@@ -523,7 +390,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
-    log::debug!("Database migrations completed");
+    log::debug!("Database schema ready");
     Ok(())
 }
 
@@ -615,52 +482,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         delete_database(&dir.path().join("never-existed.db")).unwrap();
     }
-
-    /// An unmarked scheduled completion left as NULL by an earlier build is
-    /// folded into the sentinel, and the column keeps its NOT NULL constraint.
-    #[tokio::test]
-    async fn a_null_scheduled_state_is_folded_into_the_sentinel() {
-        let pool = test_pool().await.unwrap();
-        sqlx::query("INSERT INTO todos (id, name, start_time) VALUES ('t', 'walk', 1)")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("DROP TABLE todo_completions")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "CREATE TABLE todo_completions (
-                 id TEXT PRIMARY KEY,
-                 todo_id TEXT NOT NULL REFERENCES todos(id) ON DELETE CASCADE,
-                 time INTEGER NOT NULL DEFAULT (unixepoch()),
-                 count INTEGER DEFAULT 1
-             )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query("INSERT INTO todo_completions (id, todo_id, count) VALUES ('c', 't', NULL)")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        migrate_sync_tables(&pool).await.unwrap();
-
-        let not_null: i64 = sqlx::query_scalar(
-            "SELECT \"notnull\" FROM pragma_table_info('todo_completions') WHERE name = 'count'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(not_null, 1);
-        let count: i32 = sqlx::query_scalar("SELECT count FROM todo_completions WHERE id = 'c'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(count, SCHEDULED_UNMARKED);
-    }
-
 }
 
 mod embeddings;
