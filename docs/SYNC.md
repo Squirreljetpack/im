@@ -22,7 +22,9 @@ end — against a real deployment (§1) and entirely on one machine with Minifla
 - A pre-sync database (v0.2.5) has INTEGER ids and is not migrated. Do not point
   a sync build at an old state dir; move the file aside first (appendix A).
 - `im :sync --reset` deletes every local row and rebuilds from the server log.
-  It is the repair path for a locally diverged database, not an undo.
+  It asks first if any local change never reached the server, and `--force`
+  skips that question. It is the repair path for a locally diverged database,
+  not an undo.
 
 ---
 
@@ -242,7 +244,7 @@ writes refused; `im :sync` reports it and retries once with fresh stamps.
 Rebuild from the server:
 
 ```sh
-im :sync --reset     # interactive: confirm, local rows are dropped and replayed
+im :sync --reset     # asks if local changes are queued; --force skips the question
 im @                 # everything the server has is back, including A's rows
 im :sync status      # same account; device id rotated, new log adopted
 ```

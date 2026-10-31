@@ -107,10 +107,12 @@ pub enum Command {
     /// `im :db <sub>` — database maintenance utilities.
     Db(DbSubcommand),
     /// `im :sync` — exchange events with the other devices. A subcommand
-    /// manages the account instead; `reset` discards the local copy first.
+    /// manages the account instead; `reset` discards the local copy first,
+    /// asking unless `force` says the queue is expendable.
     Sync {
         sub: Option<SyncSubcommand>,
         reset: bool,
+        force: bool,
     },
 }
 

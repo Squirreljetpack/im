@@ -1771,16 +1771,27 @@ mod tests {
             parse_from(args(&[":sync"])).unwrap(),
             Command::Sync {
                 sub: None,
-                reset: false
+                reset: false,
+                force: false
             }
         );
         assert_eq!(
             parse_from(args(&[":sync", "--reset"])).unwrap(),
             Command::Sync {
                 sub: None,
-                reset: true
+                reset: true,
+                force: false
             }
         );
+        assert_eq!(
+            parse_from(args(&[":sync", "--reset", "--force"])).unwrap(),
+            Command::Sync {
+                sub: None,
+                reset: true,
+                force: true
+            }
+        );
+
         for (name, sub) in [
             ("register", SyncSubcommand::Register),
             ("login", SyncSubcommand::Login),
@@ -1791,7 +1802,8 @@ mod tests {
                 parse_from(args(&[":sync", name])).unwrap(),
                 Command::Sync {
                     sub: Some(sub),
-                    reset: false
+                    reset: false,
+                    force: false
                 }
             );
         }

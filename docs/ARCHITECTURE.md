@@ -265,7 +265,7 @@ arguments are all tracker ids.
 | `:tool config [moods\|colors]` / `:c …` | `Tool(Config)` — opens the live config, moods file, or colors file in `$VISUAL`/`$EDITOR` |
 | `:tool mood [mood]` | `Tool(Mood)` — full mood-color pipeline diagnostic; bare lists the anchor palette with swatches |
 | `:tool clear [@date]` | `Tool(Clear)` — deletes that day's mood entries (interactive confirm) |
-| `:sync` / `:sync --reset` | `Sync { sub: None, reset }` — exchange events with the other devices; `--reset` rebuilds the local copy from the server log |
+| `:sync` / `:sync --reset` | `Sync { sub: None, reset, force }` — exchange events with the other devices; `--reset` rebuilds the local copy from the server log, asking first if local changes are unpushed (`--force` skips the question) |
 | `:sync register\|login\|status\|logout` | `Sync { sub: Some(Register\|Login\|Status\|Logout) }` — the account this device syncs with |
 | `:db prune` | `Db(Prune)` — prunes expired/completed tasks, clears the embedding cache |
 | `:db backfill` | `Db(Backfill)` — computes and persists missing mood embeddings + saliency scores |

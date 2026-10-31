@@ -27,9 +27,10 @@ pub(super) async fn sync_command(
     config: &Config,
     sub: Option<SyncSubcommand>,
     reset: bool,
+    force: bool,
 ) -> Result<()> {
     match sub {
-        None => run_sync(pool, config, reset).await,
+        None => run_sync(pool, config, reset, force).await,
         Some(SyncSubcommand::Register) => register(pool, config).await,
         Some(SyncSubcommand::Login) => login(pool, config).await,
         Some(SyncSubcommand::Status) => status(pool, config).await,
@@ -42,33 +43,35 @@ pub(super) async fn sync_command(
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `--reset` must not silently discard changes that never reached the server.
-fn reset_guard(pending: usize, interactive: bool) -> Result<()> {
+/// Rebuilding is only safe when nothing outside the server's log would be lost,
+/// so the prompt appears exactly when something would be.
+async fn confirm_reset(pool: &SqlitePool, interactive: bool, force: bool) -> Result<()> {
+    if force {
+        return Ok(());
+    }
+    let pending = session::unsynced_count(pool).await?;
+    if pending == 0 {
+        return Ok(());
+    }
     if !interactive {
-        if pending > 0 {
-            bail!(
-                "{pending} local change(s) have not been synced yet and `im :sync --reset` would discard \
-                 them — sync first, or run it in a terminal to confirm"
-            );
-        } else {
-            bail!(
-                "`im :sync --reset` needs an interactive terminal to confirm resetting the local database"
-            );
-        }
+        bail!(
+            "{pending} local change(s) have not been synced yet and `im :sync --reset` would discard \
+             them — sync first, or run it in a terminal to confirm, or pass --force"
+        );
+    }
+    if !crate::prompts::prompt_discard_unsynced(pending)? {
+        bail!("keeping the local database");
     }
     Ok(())
 }
 
-async fn run_sync(pool: &SqlitePool, config: &Config, reset: bool) -> Result<()> {
+async fn run_sync(pool: &SqlitePool, config: &Config, reset: bool, force: bool) -> Result<()> {
     let server = server_url(config);
     let slots = TrackerSlots::from_config(config);
     let interactive = atty::is(atty::Stream::Stdin);
 
     if reset {
-        let pending = session::unsynced_count(pool).await?;
-        reset_guard(pending, interactive)?;
-        if !crate::prompts::prompt_discard_unsynced(pending)? {
-            bail!("keeping the local database");
-        }
+        confirm_reset(pool, interactive, force).await?;
         let dropped = session::reset_local_state(pool).await?;
         println!("Cleared the local database; rebuilding it from the server.");
         if dropped > 0 {

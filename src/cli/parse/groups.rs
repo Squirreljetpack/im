@@ -23,4 +23,7 @@ pub(super) struct SyncCli {
     /// Discard the local copy and rebuild it from the server
     #[arg(long)]
     pub(super) reset: bool,
+    /// Rebuild without asking, even if local changes were never pushed
+    #[arg(long, requires = "reset")]
+    pub(super) force: bool,
 }

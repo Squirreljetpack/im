@@ -39,8 +39,8 @@ pub(crate) fn parse_special_command(args: &[String]) -> anyhow::Result<Command> 
     }
 
     if first == ":sync" {
-        let SyncCli { sub, reset } = SyncCli::parse_from(clap_argv(&args[1..]));
-        return Ok(Command::Sync { sub, reset });
+        let SyncCli { sub, reset, force } = SyncCli::parse_from(clap_argv(&args[1..]));
+        return Ok(Command::Sync { sub, reset, force });
     }
 
     anyhow::bail!("Unknown special command: {}", first)

@@ -477,13 +477,9 @@ pub fn prompt_discard_unsynced(count: usize) -> Result<bool> {
     use cliclack::{confirm, intro};
 
     intro("Reset local database")?;
-
-    if count > 0 {
-        cliclack::log::warning(format!(
-            "{count} local change(s) have not been synced and will be discarded."
-        ))?;
-    }
-
+    cliclack::log::warning(format!(
+        "{count} local change(s) have not been synced and will be discarded."
+    ))?;
     confirm("Rebuild the local database from the server log?".to_string())
         .initial_value(false)
         .interact()

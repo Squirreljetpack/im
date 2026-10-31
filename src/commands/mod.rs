@@ -125,7 +125,9 @@ pub async fn execute_command<W: Write>(
             }
         },
 
-        Command::Sync { sub, reset } => sync::sync_command(pool, config, sub, reset).await,
+        Command::Sync { sub, reset, force } => {
+            sync::sync_command(pool, config, sub, reset, force).await
+        }
     }
 }
 
