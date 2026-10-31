@@ -1,3 +1,38 @@
+## [0.2.10] - 2026-10-31
+
+### 🚀 Features
+
+- `im :sync --reset` asks before it discards local changes the server never
+  received; `--force` skips the question, and an idle database rebuilds without
+  a prompt.
+- Sync is versioned end to end. A cursor names the log it indexes, and the
+  client and worker exchange the envelope `protocol` and cell `version` on
+  every round: a cursor minted by another log, one past the end of this log, or
+  a peer that speaks another version is refused instead of merging unrelated
+  histories or skipping what it cannot read. `im :sync status` prints the log,
+  cursor version and both protocol numbers.
+
+### 🐛 Bug Fixes
+
+- A task's start time is required, and an edit can no longer clear the column
+  that defines a task's kind. A scheduled task's window opens at that start, a
+  recurring task's intervals tile from it, and a oneshot is stamped with it at
+  creation; clearing the duration or interval that goes with it is refused
+  instead of silently reclassifying the task (and with it its availability,
+  view membership and completion scope).
+- An end time is cleared by a blank answer (or `never`/`none`) in both the
+  create and edit menus; a blank previously kept the old value.
+
+### 💥 Breaking changes
+
+- A task create must carry `start_time`, so the cell vocabulary is now version
+  2. A peer that speaks another version refuses the round rather than skip the
+  cell, and v0.2.9 and earlier clients send no version at all: redeploy the
+  worker and upgrade the client together.
+- Databases from earlier builds are not migrated: a schema change means
+  deleting the database file, then signing in to rebuild from the log.
+
+
 ## [0.2.9] - 2026-10-30
 
 ### 🚀 Features

@@ -100,7 +100,7 @@ Other:
   im -                                           browse trackers
   im :db prune|backfill|doctor                   database utilities
 
-  im :sync [register|login|status|logout]        setup/manage/run sync 
+  im :sync [register|login|status|logout]        setup/authenticate/run sync 
 
 
 Flags:
