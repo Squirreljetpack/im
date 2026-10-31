@@ -7,11 +7,18 @@
  * is a register diff: cells whose winner sits above the client's cursor, with
  * the client's own cells suppressed unless it is materialising from nothing.
  *
+ * A round that cannot mean anything is refused before anything is appended: a
+ * cursor minted by a different log, one past the end of this log, or a peer that
+ * speaks another protocol or cell vocabulary. Each of those would otherwise be
+ * read as a position in this log and quietly lose the user's cells.
+ *
  * The register is a pure fold of the log (see `fold`), so it is a cache that
  * can be rebuilt, never a second truth.
  */
 
 import {
+  PROTOCOL,
+  SCHEMA_VERSION,
   classMatches,
   decode,
   encode,
@@ -20,7 +27,7 @@ import {
   kindSpec,
   subkindFrom,
 } from "./schema";
-import { EXISTENCE, error, json } from "./types";
+import { EXISTENCE, error, isCellCursor, json, refusal } from "./types";
 import type {
   CellEvent,
   Env,
@@ -60,6 +67,8 @@ type Sql = SqlStorage;
 
 export class UserSyncDO implements DurableObject {
   private readonly ctx: DurableObjectState;
+  /** The log identity, read once per object instance. */
+  private minted: string | undefined;
 
   constructor(ctx: DurableObjectState, _env: Env) {
     this.ctx = ctx;
@@ -77,21 +86,6 @@ export class UserSyncDO implements DurableObject {
   }
 
   private createTables(sql: Sql): void {
-    // A log written before cells existed stores opaque payloads that cannot be
-    // folded into cells, so this storage starts over. That is only safe
-    // because the server has never been deployed; a live instance would need a
-    // payload -> cells backfill instead, or its clients could not rebuild.
-    const columns = sql
-      .exec("SELECT name FROM pragma_table_info('sync_log')")
-      .toArray() as unknown as { name: string }[];
-    if (
-      columns.length > 0 &&
-      !columns.some((column) => column.name === "kind" || column.name === "batch")
-    ) {
-      sql.exec("DROP TABLE IF EXISTS sync_log");
-      sql.exec("DROP TABLE IF EXISTS sync_register");
-    }
-
     sql.exec(
       `CREATE TABLE IF NOT EXISTS sync_log (
          version    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -151,6 +145,51 @@ export class UserSyncDO implements DurableObject {
          PRIMARY KEY (device_id, event_id)
        )`,
     );
+    // Facts about this log that outlive a restart. Its identity is what a client
+    // stores beside its cursor, so "my position belongs here" can be told from
+    // "my position belongs to another log".
+    sql.exec(
+      `CREATE TABLE IF NOT EXISTS sync_meta (
+         key   TEXT PRIMARY KEY,
+         value TEXT NOT NULL
+       )`,
+    );
+  }
+
+  /**
+   * The identity of this log: minted with the log and kept for as long as that
+   * log exists, so a cursor issued here stays recognisable across restarts.
+   */
+  private logId(sql: Sql): string {
+    if (this.minted !== undefined) {
+      return this.minted;
+    }
+    sql.exec(
+      "INSERT OR IGNORE INTO sync_meta (key, value) VALUES ('log_id', ?)",
+      crypto.randomUUID(),
+    );
+    // SAFETY: the query selects one column, aliased `value`.
+    const row = sql.exec("SELECT value FROM sync_meta WHERE key = 'log_id'").one() as {
+      value: string;
+    };
+    this.minted = row.value;
+    return this.minted;
+  }
+
+  /** This log's identity and the last version it issued. */
+  private identity(): { log: string; head: number } {
+    return this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      // SAFETY: the query selects one column, aliased `head`.
+      const head = Number(
+        (
+          sql.exec("SELECT COALESCE(MAX(version), 0) AS head FROM sync_log").one() as {
+            head: number;
+          }
+        ).head,
+      );
+      return { log: this.logId(sql), head };
+    });
   }
 
   private async sync(request: Request, pageSize: number): Promise<Response> {
@@ -160,7 +199,17 @@ export class UserSyncDO implements DurableObject {
     } catch {
       return error("invalid json body", 400);
     }
-    if (typeof body?.device_id !== "string" || body.device_id === "") {
+    // The vocabulary first: a peer that speaks another one cannot be read, and
+    // the alternative — skipping the cells it cannot parse and advancing its
+    // cursor past them — loses data silently.
+    if (body?.protocol !== PROTOCOL || body.schema !== SCHEMA_VERSION) {
+      return refusal(
+        "version_mismatch",
+        `this server speaks sync protocol ${PROTOCOL} and schema ${SCHEMA_VERSION}`,
+        { protocol: PROTOCOL, schema: SCHEMA_VERSION },
+      );
+    }
+    if (typeof body.device_id !== "string" || body.device_id === "") {
       return error("device_id is required", 400);
     }
     if (!Array.isArray(body.events)) {
@@ -169,12 +218,30 @@ export class UserSyncDO implements DurableObject {
     if (body.events.length > MAX_PUSH) {
       return error(`at most ${MAX_PUSH} events per push`, 400);
     }
+    const cursor = body.cursor ?? null;
+    if (cursor !== null && !isCellCursor(cursor)) {
+      return error("cursor must be { log: string, version: number }, or null", 400);
+    }
     const device = body.device_id;
-    const cursor = Number.isInteger(body.cursor) && body.cursor > 0 ? body.cursor : 0;
     const now = Date.now();
 
+    const { log, head } = this.identity();
+    // A cursor from another log would read the wrong history through this one,
+    // and one past this log's end would read nothing at all — both silently,
+    // and for good. A database that has read nowhere yet names no log, so it
+    // adopts this one.
+    if (cursor !== null && cursor.log !== log) {
+      return refusal("log_mismatch", "the cursor belongs to another log", { log_id: log, head });
+    }
+    if (cursor !== null && cursor.version > head) {
+      return refusal("cursor_ahead", "the cursor is past the end of this log", {
+        log_id: log,
+        head,
+      });
+    }
+
     try {
-      return json(this.pushBatch(body, device, cursor, now, pageSize));
+      return json(this.pushBatch(body, device, log, cursor?.version ?? 0, now, pageSize));
     } catch (failure) {
       if (failure instanceof Refused) {
         return error(failure.message, 400);
@@ -192,6 +259,7 @@ export class UserSyncDO implements DurableObject {
   private pushBatch(
     body: SyncRequest,
     device: string,
+    log: string,
     cursor: number,
     now: number,
     pageSize: number,
@@ -252,7 +320,7 @@ export class UserSyncDO implements DurableObject {
 
       const pull = this.pull(sql, cursor, device, pageSize);
       return {
-        cursor: pull.cursor,
+        cursor: { log, version: pull.cursor },
         now,
         has_more: pull.hasMore,
         events: pull.rows,

@@ -229,6 +229,7 @@ async fn status(pool: &SqlitePool, config: &Config) -> Result<()> {
                 "Signed in as {} ({}) on {server}.",
                 status.email, status.user_id
             );
+            println!("{}", describe_cursor(pool).await?);
             println!("{queued} local change(s) queued to push.");
         }
         Err(error) => {
@@ -236,6 +237,27 @@ async fn status(pool: &SqlitePool, config: &Config) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Where this database has read to, plus the versions this build speaks — the
+/// numbers a refusal quotes back.
+async fn describe_cursor(pool: &SqlitePool) -> Result<String> {
+    let cursor = session::cursor(pool).await?;
+    let versions = format!(
+        "protocol {}, schema {}",
+        crate::sync::schema::SCHEMA.protocol,
+        crate::sync::schema::SCHEMA.version
+    );
+    Ok(match cursor {
+        Some(cursor) => {
+            let log: String = cursor.log.chars().take(8).collect();
+            format!(
+                "Synced to log {log} at version {} ({versions}).",
+                cursor.version
+            )
+        }
+        None => format!("Not synced to any log yet ({versions})."),
+    })
 }
 
 /// `:sync logout` — forget the account on this device (local data stays).

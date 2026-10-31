@@ -9,6 +9,40 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::{EventId, Id, TrackerValue};
 
+/// A position in a named append-only log.
+///
+/// The name is what makes a position meaningful. A bare version indexes "some
+/// log", so a database that last synced elsewhere would read the wrong history
+/// through it — or, when its version is past that log's end, nothing at all,
+/// silently and forever. A cursor that names a log the server does not have is
+/// therefore refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cursor {
+    /// The log this position belongs to.
+    pub log: String,
+    /// The highest `version` merged from that log.
+    pub version: i64,
+}
+
+impl Cursor {
+    /// Read the stored form, `"<log>/<version>"`. Anything else is not a
+    /// position in a log, so the database is treated as one that has read
+    /// nowhere yet.
+    pub fn parse(text: &str) -> Option<Self> {
+        let (log, version) = text.split_once('/')?;
+        let version = version.parse().ok()?;
+        (!log.is_empty()).then(|| Self {
+            log: log.to_string(),
+            version,
+        })
+    }
+
+    /// The stored form of this cursor.
+    pub fn encode(&self) -> String {
+        format!("{}/{}", self.log, self.version)
+    }
+}
+
 /// The column names of `todos` that a cell can carry.
 pub mod task_field {
     pub const NAME: &str = "name";
@@ -153,15 +187,23 @@ pub struct LogRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncRequest {
+    /// [`crate::sync::schema::SCHEMA`]'s `protocol`, so a peer that speaks
+    /// another envelope refuses instead of misreading it.
+    pub protocol: u32,
+    /// [`crate::sync::schema::SCHEMA`]'s `version`: the cell vocabulary.
+    pub schema: u32,
     pub device_id: Id,
-    /// The highest `version` this device has merged.
-    pub cursor: i64,
+    /// Where this device has read to: a position in one named log, not in
+    /// "the first log that answers". `None` until a sync names one.
+    pub cursor: Option<Cursor>,
     pub events: Vec<CellEvent>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SyncResponse {
-    pub cursor: i64,
+    /// The next position to read from. It always names the server's log, so a
+    /// client adopts it wholesale.
+    pub cursor: Cursor,
     /// The server's clock, for naming a `clock_ahead` offset.
     pub now: i64,
     pub has_more: bool,

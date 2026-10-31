@@ -10,6 +10,34 @@ export interface Env {
 export const EXISTENCE = "";
 
 /**
+ * A position in a named append-only log.
+ *
+ * The name is what makes a position meaningful: a bare version indexes "some
+ * log", so a database that last synced elsewhere would read the wrong history
+ * through it, or nothing at all once its version is past that log's end.
+ */
+export interface CellCursor {
+  /** The log this position belongs to. */
+  log: string;
+  /** The highest `version` merged from that log. */
+  version: number;
+}
+
+/** Whether a body carries a position in a named log. */
+export function isCellCursor(value: unknown): value is CellCursor {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const { log, version } = value as { log?: unknown; version?: unknown };
+  return (
+    typeof log === "string" &&
+    log !== "" &&
+    Number.isInteger(version) &&
+    (version as number) >= 0
+  );
+}
+
+/**
  * One cell value with its SQLite storage class kept explicit: a tracker score
  * of `3` and `3.0` are different rows in a dynamically typed column, and
  * JavaScript numbers alone cannot tell them apart.
@@ -42,9 +70,12 @@ export interface LogRow extends CellEvent {
 
 /** `POST /api/sync` request body. */
 export interface SyncRequest {
+  protocol: number;
+  schema: number;
   device_id: string;
-  /** Highest `winner.version` the client has merged. */
-  cursor: number;
+  /** Where this device has read to, in the log it names; `null` until a sync
+   * names one. */
+  cursor: CellCursor | null;
   events: CellEvent[];
 }
 
@@ -90,8 +121,8 @@ export interface SupersededNotice {
 }
 
 export interface SyncResponse {
-  /** Advance the client's cursor to this. */
-  cursor: number;
+  /** The next position to read from; always names this log. */
+  cursor: CellCursor;
   /** The server's clock, for diagnosing `clock_ahead`. */
   now: number;
   has_more: boolean;
@@ -123,4 +154,20 @@ export function json(data: unknown, status = 200): Response {
 
 export function error(message: string, status: number): Response {
   return json({ error: message }, status);
+}
+
+/**
+ * Why a server refuses a database outright, before appending anything.
+ *
+ * These are not verdicts: no cell crossed in either direction.
+ */
+export type RefusalCode = "log_mismatch" | "cursor_ahead" | "version_mismatch";
+
+/** A 409 carrying the facts the client needs to explain the refusal. */
+export function refusal(
+  code: RefusalCode,
+  message: string,
+  facts: Record<string, unknown> = {},
+): Response {
+  return json({ error: message, code, ...facts }, 409);
 }

@@ -4,8 +4,22 @@
 use sqlx::{Row, SqlitePool};
 
 use super::apply;
-use super::types::{CellEvent, CellValue, EXISTENCE, LogRow, live};
+use super::types::{CellEvent, CellValue, Cursor, EXISTENCE, LogRow, live};
 use crate::db::{TaskObject, create_task, delete_task, test_pool, update_todo_body};
+
+/// A cursor names the log it indexes, and a position that names none is not a
+/// position: the database is treated as one that has read nowhere yet.
+#[test]
+fn a_cursor_keeps_the_log_it_names() {
+    let named = Cursor {
+        log: "log-id".to_string(),
+        version: 7,
+    };
+    assert_eq!(Cursor::parse(&named.encode()), Some(named));
+    assert_eq!(Cursor::parse("412"), None);
+    assert_eq!(Cursor::parse("/0"), None);
+    assert_eq!(Cursor::parse("log-id/not-a-version"), None);
+}
 
 fn task(name: &str) -> TaskObject {
     TaskObject {

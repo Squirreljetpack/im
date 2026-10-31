@@ -13,6 +13,11 @@ const SCHEMA_JSON: &str = include_str!("../../sync_schema.json");
 
 #[derive(Debug, Deserialize)]
 pub struct Schema {
+    /// The envelope both sides must agree on: the shape of [`crate::sync::types::SyncRequest`],
+    /// [`crate::sync::types::SyncResponse`] and the cells they carry.
+    pub protocol: u32,
+    /// The cell vocabulary both sides must agree on.
+    pub version: u32,
     pub kinds: BTreeMap<String, Kind>,
 }
 

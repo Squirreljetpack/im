@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 use sqlx::SqliteConnection;
 
+use super::types::Cursor;
 use crate::db::Id;
 
 pub const KEY_DEVICE_ID: &str = "device_id";
@@ -110,13 +111,20 @@ pub async fn device_id(conn: &mut SqliteConnection) -> Result<Id> {
     Ok(id)
 }
 
-/// The highest delivered `version` this device has merged.
-pub async fn cursor(conn: &mut SqliteConnection) -> Result<i64> {
-    get_i64(&mut *conn, KEY_CURSOR).await
+/// The log this database has read to, and how far. `None` until a sync names
+/// one.
+pub async fn cursor(conn: &mut SqliteConnection) -> Result<Option<Cursor>> {
+    Ok(get(&mut *conn, KEY_CURSOR)
+        .await?
+        .as_deref()
+        .and_then(Cursor::parse))
 }
 
-pub async fn set_cursor(conn: &mut SqliteConnection, cursor: i64) -> Result<()> {
-    set(&mut *conn, KEY_CURSOR, &cursor.to_string()).await
+pub async fn set_cursor(conn: &mut SqliteConnection, cursor: Option<&Cursor>) -> Result<()> {
+    match cursor {
+        Some(cursor) => set(&mut *conn, KEY_CURSOR, &cursor.encode()).await,
+        None => remove(&mut *conn, KEY_CURSOR).await,
+    }
 }
 
 /// The stamp for the next event this device emits.

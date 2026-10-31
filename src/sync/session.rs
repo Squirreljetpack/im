@@ -13,11 +13,11 @@ use sqlx::{Connection, Row, SqliteConnection, SqlitePool};
 
 use super::apply::{self, Pending, Skip};
 use super::client::{Account, AccountStatus, Client, run_blocking};
-use super::state;
 use super::schema;
+use super::state;
 use super::types::{
-    self, CellEvent, CellValue, EXISTENCE, LogRow, Notice, Outcome, SyncRequest, SyncResponse,
-    Verdict,
+    self, CellEvent, CellValue, Cursor, EXISTENCE, LogRow, Notice, Outcome, SyncRequest,
+    SyncResponse, Verdict,
 };
 use crate::db::{EventId, Id};
 use crate::tracker::TrackerSlots;
@@ -69,8 +69,9 @@ pub struct Resurrect {
 /// The persisted mark, not this, is what a later run trusts: it never claims a
 /// cell that lives only in memory.
 pub struct Pull {
-    /// The version the next page is requested from.
-    cursor: i64,
+    /// The log and version the next page is requested from; `None` until a
+    /// sync names one.
+    cursor: Option<Cursor>,
     pending: Pending,
 }
 
@@ -96,8 +97,8 @@ pub async fn store_account(pool: &SqlitePool, account: &Account) -> Result<()> {
         .context("Failed to acquire a db connection")?;
     let previous = state::account_user_id(&mut conn).await?;
     if previous.as_deref() != Some(account.user_id.as_str()) {
-        // A different account: the cursor belonged to the other user's log.
-        state::set_cursor(&mut conn, 0).await?;
+        // A different account's log is not this database's position.
+        state::set_cursor(&mut conn, None).await?;
     }
     state::set_account(&mut conn, Some(&account.user_id), &account.token).await
 }
@@ -119,6 +120,15 @@ pub async fn signed_in(pool: &SqlitePool) -> Result<Option<String>> {
         .await
         .context("Failed to acquire a db connection")?;
     state::token(&mut conn).await
+}
+
+/// The log this database has read to, and how far, if it has synced anywhere.
+pub async fn cursor(pool: &SqlitePool) -> Result<Option<Cursor>> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("Failed to acquire a db connection")?;
+    state::cursor(&mut conn).await
 }
 
 /// Forget the account. Local data and the device identity are untouched.
@@ -154,8 +164,10 @@ pub async fn sync_once(
 
     let batch = outbox(&mut conn).await?;
     let request = SyncRequest {
+        protocol: schema::SCHEMA.protocol,
+        schema: schema::SCHEMA.version,
         device_id: device,
-        cursor: pull.cursor,
+        cursor: pull.cursor.clone(),
         events: batch.iter().map(|row| row.1.clone()).collect(),
     };
     let client = Client::with_timeout(server, Some(token), timeout);
@@ -173,8 +185,8 @@ pub async fn sync_once(
 
     let mut report = SyncReport {
         pushed: batch.len(),
-        cursor_before: pull.cursor,
-        cursor: response.cursor,
+        cursor_before: pull.cursor.as_ref().map_or(0, |cursor| cursor.version),
+        cursor: response.cursor.version,
         has_more: response.has_more,
         ..SyncReport::default()
     };
@@ -186,12 +198,11 @@ pub async fn sync_once(
     // held create stay in memory.
     let mut tx = conn.begin().await.context("Failed to start a sync round")?;
     let applied = apply::apply_rows(&mut tx, &response.events, &mut pull.pending).await?;
-    let fence = if response.has_more {
-        pull.pending.fence(response.cursor)
-    } else {
-        response.cursor
-    };
-    state::set_cursor(&mut tx, fence).await?;
+    let mut fence = response.cursor.clone();
+    if response.has_more {
+        fence.version = pull.pending.fence(response.cursor.version);
+    }
+    state::set_cursor(&mut tx, Some(&fence)).await?;
     tx.commit().await.context("Failed to commit a sync round")?;
     report.created = applied.created;
     report.applied = applied.updated;
@@ -202,7 +213,7 @@ pub async fn sync_once(
         // Reporting it beats a fence that would never move again.
         report.skipped.extend(pull.pending.abandon());
     }
-    pull.cursor = response.cursor;
+    pull.cursor = Some(response.cursor);
 
     let touched = tracker_slots(&mut conn, slots, &response.events).await?;
     let repaired = apply::dedup_tracker_slots(&mut conn, &touched).await?;

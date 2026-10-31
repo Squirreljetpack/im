@@ -1,5 +1,7 @@
 {
-  "$comment": "Sync schema: the rules both sides obey. Rust reads it at compile time, the worker imports it at runtime. A field's class is its SQLite storage class; `link` names the kind it must point at; `immutable` means the cell may be written once, at create.",
+  "$comment": "Sync schema: the rules both sides obey. Rust reads it at compile time, the worker imports it at runtime. A field's class is its SQLite storage class; `link` names the kind it must point at; `immutable` means the cell may be written once, at create. `protocol` versions the envelope and `version` the cell vocabulary: bump either whenever the envelope or a kind, field, class, link or cascade changes, because a client and a server that disagree refuse to sync. That is deliberate — a peer that silently skipped what it could not read would advance its cursor past it. `test/schema.test.ts` pins the vocabulary to `version`, so forgetting the bump fails CI.",
+  "protocol": 1,
+  "version": 1,
   "kinds": {
     "task": {
       "table": "todos",

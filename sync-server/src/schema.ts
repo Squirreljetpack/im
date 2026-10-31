@@ -41,10 +41,20 @@ export interface KindSpec {
 }
 
 interface SchemaFile {
+  /** The envelope both sides must agree on. */
+  protocol: number;
+  /** The cell vocabulary both sides must agree on. */
+  version: number;
   kinds: Record<string, KindSpec>;
 }
 
 export const SCHEMA = raw as unknown as SchemaFile;
+
+/** The envelope version this worker speaks. */
+export const PROTOCOL = SCHEMA.protocol;
+
+/** The version of the cell vocabulary this worker enforces. */
+export const SCHEMA_VERSION = SCHEMA.version;
 
 export function kindSpec(kind: string): KindSpec | undefined {
   return Object.hasOwn(SCHEMA.kinds, kind) ? SCHEMA.kinds[kind] : undefined;

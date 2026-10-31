@@ -1,11 +1,13 @@
 import { exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 
+import { PROTOCOL, SCHEMA_VERSION } from "../src/schema";
 import type {
   AuthResponse,
   CellEvent,
   CellValue,
   LogRow,
+  SyncRequest,
   SyncResponse,
   Verdict,
 } from "../src/types";
@@ -88,7 +90,7 @@ function remove(entityId: string, kind: string, timestamp: number, device = "dev
 async function sync(
   token: string,
   device: string,
-  cursor: number,
+  version: number,
   events: CellEvent[] = [],
   page?: number,
 ): Promise<SyncResponse & { verdictFor: (index: number) => Verdict }> {
@@ -96,11 +98,12 @@ async function sync(
   const response = await call(`/api/sync${query}`, {
     method: "POST",
     token,
-    body: { device_id: device, cursor, events },
+    body: request(token, device, version, events),
   });
   expect(response.status).toBe(200);
   const body = (await response.json()) as SyncResponse;
   expect(body.verdicts).toHaveLength(events.length);
+  logs.set(token, body.cursor.log!);
   return {
     ...body,
     verdictFor: (index: number) => {
@@ -110,6 +113,29 @@ async function sync(
       }
       return verdict;
     },
+  };
+}
+
+/**
+ * The log each token was last told it is reading. A version alone is not a
+ * position, so the helper always sends the name it learned from the response —
+ * starting with none, which is where a fresh database (or a reset one) stands.
+ */
+const logs = new Map<string, string>();
+
+function request(
+  token: string,
+  device: string,
+  version: number,
+  events: CellEvent[],
+): SyncRequest {
+  const log = logs.get(token);
+  return {
+    protocol: PROTOCOL,
+    schema: SCHEMA_VERSION,
+    device_id: device,
+    cursor: log === undefined ? null : { log, version },
+    events,
   };
 }
 
@@ -157,7 +183,8 @@ describe("accounts", () => {
 
     const pulled = await sync(bob.token, "device-b", 0);
     expect(pulled.events).toEqual([]);
-    expect(pulled.cursor).toBe(0);
+    expect(pulled.cursor.version).toBe(0);
+    expect(pulled.cursor.log).not.toBeNull();
   });
 });
 
@@ -177,13 +204,13 @@ describe("pull", () => {
     const pulled = await sync(account.token, "device-b", 0);
     expect(pulled.events.map((row) => row.field)).toEqual(["", "name"]);
     expect(pulled.events.map((row) => row.version)).toEqual([1, 2]);
-    expect(pulled.cursor).toBe(2);
+    expect(pulled.cursor.version).toBe(2);
     expect(pulled.has_more).toBe(false);
 
     // Nothing new: the cursor is already at the register's head.
-    const again = await sync(account.token, "device-b", pulled.cursor);
+    const again = await sync(account.token, "device-b", pulled.cursor.version);
     expect(again.events).toEqual([]);
-    expect(again.cursor).toBe(pulled.cursor);
+    expect(again.cursor.version).toBe(pulled.cursor.version);
   });
 
   it("suppresses own echoes, except when materialising from nothing", async () => {
@@ -197,9 +224,9 @@ describe("pull", () => {
     expect(rebuild.events.map((row) => row.field)).toEqual(["", "name"]);
 
     // Past that, they are not echoed: the row already reflects them.
-    const delta = await sync(account.token, "device-a", rebuild.cursor);
+    const delta = await sync(account.token, "device-a", rebuild.cursor.version);
     expect(delta.events).toEqual([]);
-    expect(delta.cursor).toBe(rebuild.cursor);
+    expect(delta.cursor.version).toBe(rebuild.cursor.version);
   });
 
   it("serves a deleted entity as its existence cell alone", async () => {
@@ -458,14 +485,13 @@ describe("push validation", () => {
     const refused = await call("/api/sync", {
       method: "POST",
       token: account.token,
-      body: {
-        device_id: "device-a",
-        cursor: 0,
-        events: [cell(task, "task", "", { text: "live" }, ago(1000))],
-      },
+      body: request(account.token, "device-a", 0, [
+        cell(task, "task", "", { text: "live" }, ago(1000)),
+      ]),
     });
     expect(refused.status).toBe(400);
-    expect(await refused.text()).toContain('missing required field "name"');
+    const refusal = (await refused.json()) as { error: string };
+    expect(refusal.error).toContain('missing required field "name"');
 
     // The transaction rolled back: not even the existence cell landed.
     const pulled = await sync(account.token, "device-b", 0);
@@ -490,7 +516,7 @@ describe("push validation", () => {
     const first = await sync(account.token, "device-a", 0, events);
     const retry = await sync(account.token, "device-a", 0, events);
 
-    expect(retry.cursor).toBe(first.cursor);
+    expect(retry.cursor.version).toBe(first.cursor.version);
     expect(retry.verdicts.map((verdict) => verdict.outcome)).toEqual(["accepted", "accepted"]);
     const pulled = await sync(account.token, "device-b", 0);
     expect(pulled.events.map((row) => row.version)).toEqual([1, 2]);
@@ -554,7 +580,7 @@ describe("deletes and links", () => {
 
     // Deleting the mood strands the tracker's link.
     await sync(account.token, "device-b", 0, [remove(mood, "mood", ago(1_000), "device-b")]);
-    const after = await sync(account.token, "device-c", pulled.cursor);
+    const after = await sync(account.token, "device-c", pulled.cursor.version);
     expect(valueOf(after.events, tracker, "mood_id")).toBeNull();
   });
 
@@ -612,7 +638,7 @@ describe("pages", () => {
       ["", "body", "name", "priority", "start_time"].sort(),
     );
     expect(first.has_more).toBe(false);
-    expect(first.cursor).toBe(5);
+    expect(first.cursor.version).toBe(5);
   });
 
   it("delivers every push exactly once across pages", async () => {
@@ -631,7 +657,7 @@ describe("pages", () => {
     for (;;) {
       const page = await sync(account.token, "device-b", cursor, [], 2);
       seen.push(...page.events.map((row) => `${row.entity_id}/${row.field}`));
-      cursor = page.cursor;
+      cursor = page.cursor.version;
       if (!page.has_more) {
         break;
       }
@@ -679,9 +705,9 @@ describe("superseded notices", () => {
     expect(reread.superseded).toHaveLength(1);
 
     // Reading past it is what retires it.
-    const caughtUp = await sync(account.token, "device-a", firstRead.cursor, []);
+    const caughtUp = await sync(account.token, "device-a", firstRead.cursor.version, []);
     expect(caughtUp.superseded).toHaveLength(0);
-    const after = await sync(account.token, "device-a", caughtUp.cursor, []);
+    const after = await sync(account.token, "device-a", caughtUp.cursor.version, []);
     expect(after.superseded).toHaveLength(0);
 
     // The winning device is not told anything: it did not lose.
@@ -706,5 +732,108 @@ describe("superseded notices", () => {
 
     const read = await sync(account.token, "device-a", 0, []);
     expect(read.superseded).toHaveLength(0);
+  });
+});
+
+describe("compatibility", () => {
+  const task = "0190a5a0-0000-7000-8000-000000000701";
+
+  /** A sync that is expected to be refused, so the status and facts can be read. */
+  async function refuse(
+    token: string,
+    body: SyncRequest,
+  ): Promise<{ status: number; code?: string; log_id?: string; head?: number; protocol?: number; schema?: number }> {
+    const response = await call("/api/sync", { method: "POST", token, body });
+    const facts = (await response.json()) as Record<string, unknown>;
+    return { ...facts, status: response.status };
+  }
+
+  it("names its log, and serves a database that has no position yet", async () => {
+    const account = await register("nameless@example.com");
+    const pushed = await sync(
+      account.token,
+      "device-a",
+      0,
+      create(task, "task", [["name", { text: "mine" }]], ago(1000)),
+    );
+    expect(pushed.cursor.log).toMatch(/^[0-9a-f-]{36}$/);
+
+    const adopted = await sync(account.token, "device-b", 0);
+    expect(adopted.cursor.log).toBe(pushed.cursor.log);
+    // No position means no history yet, so the whole log comes back.
+    expect(adopted.events.map((row) => row.field).sort()).toEqual(["", "name"]);
+  });
+
+  it("refuses a cursor minted by another log, and appends nothing", async () => {
+    const account = await register("elsewhere@example.com");
+    const learned = await sync(account.token, "device-a", 0);
+    const mine = learned.cursor.log;
+
+    const refused = await refuse(account.token, {
+      ...request(account.token, "device-a", 0, create(task, "task", [["name", { text: "x" }]], ago(1000))),
+      cursor: { log: "the-other-deployment", version: 0 },
+    });
+    expect(refused.status).toBe(409);
+    expect(refused.code).toBe("log_mismatch");
+    expect(refused.log_id).toBe(mine);
+    expect(refused.head).toBe(0);
+
+    // Refused before the append, so the push left no trace.
+    const pulled = await sync(account.token, "device-b", 0);
+    expect(pulled.events).toEqual([]);
+  });
+
+  it("refuses a cursor past the end of the log", async () => {
+    const account = await register("rewound@example.com");
+    const pushed = await sync(
+      account.token,
+      "device-a",
+      0,
+      create(task, "task", [["name", { text: "mine" }]], ago(1000)),
+    );
+
+    // A log restored from an older copy: same identity, fewer versions. The
+    // device's cursor is not a position in it any more.
+    const refused = await refuse(account.token, {
+      ...request(account.token, "device-a", pushed.cursor.version + 1, []),
+    });
+    expect(refused.status).toBe(409);
+    expect(refused.code).toBe("cursor_ahead");
+    expect(refused.head).toBe(pushed.cursor.version);
+  });
+
+  it("refuses a peer that speaks another protocol, and names both numbers", async () => {
+    const account = await register("skewed@example.com");
+    const body = request(account.token, "device-a", 0, []);
+    const refused = await refuse(account.token, { ...body, protocol: PROTOCOL + 1 });
+    expect(refused.status).toBe(409);
+    expect(refused.code).toBe("version_mismatch");
+    expect(refused.protocol).toBe(PROTOCOL);
+    expect(refused.schema).toBe(SCHEMA_VERSION);
+  });
+
+  it("refuses a peer that speaks another cell vocabulary", async () => {
+    const account = await register("vocabulary@example.com");
+    const body = request(account.token, "device-a", 0, []);
+    const refused = await refuse(account.token, { ...body, schema: SCHEMA_VERSION + 1 });
+    expect(refused.status).toBe(409);
+    expect(refused.code).toBe("version_mismatch");
+    expect(refused.schema).toBe(SCHEMA_VERSION);
+  });
+
+  it("rejects a cursor that is not a position at all", async () => {
+    const account = await register("malformed@example.com");
+    const body = request(account.token, "device-a", 0, []);
+    const refused = await refuse(account.token, {
+      ...body,
+      cursor: { version: 0 } as unknown as SyncRequest["cursor"],
+    });
+    expect(refused.status).toBe(400);
+    // A version with no name is not a position.
+    const numeric = await refuse(account.token, {
+      ...body,
+      cursor: 0 as unknown as SyncRequest["cursor"],
+    });
+    expect(numeric.status).toBe(400);
   });
 });

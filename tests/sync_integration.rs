@@ -157,6 +157,13 @@ async fn sync(pool: &SqlitePool) -> session::SyncReport {
     sync_with(pool, &TrackerSlots::default()).await
 }
 
+/// One round trip that may fail, for the cases where failing is the answer.
+async fn try_sync(pool: &SqlitePool) -> anyhow::Result<session::SyncReport> {
+    let server = server().await;
+    let mut pull = session::Pull::resume(pool).await?;
+    sync_once(pool, &server.base, SYNC_TIMEOUT, &TrackerSlots::default(), &mut pull).await
+}
+
 async fn sync_with(pool: &SqlitePool, slots: &TrackerSlots) -> session::SyncReport {
     let server = server().await;
     let mut pull = session::Pull::resume(pool).await.expect("resume the pull");
@@ -580,4 +587,77 @@ async fn a_device_is_told_when_a_peer_replaces_its_cell() {
         report.notices
     );
     let _ = task;
+}
+
+/// A cursor is a position in one named log. Written by hand because no API can
+/// produce a cursor that belongs elsewhere — that is the point of the test.
+async fn forge_cursor(pool: &SqlitePool, value: &str) {
+    sqlx::query(
+        "INSERT INTO _sync_state (key, value) VALUES ('cursor', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(value)
+    .execute(pool)
+    .await
+    .expect("forge the cursor");
+}
+
+/// A database that last synced somewhere else must not read this log through
+/// its cursor: it would merge two unrelated histories, or — when its version is
+/// past this log's end — silently do nothing at all, forever.
+#[tokio::test]
+async fn a_cursor_from_another_log_is_refused() {
+    let (pool, _token) = device("foreign-cursor").await;
+    let _ = create_task(&pool, &task_object("mine", "body"))
+        .await
+        .unwrap();
+    let report = sync(&pool).await;
+    assert!(report.created > 0 || report.applied > 0);
+    let cursor = session::cursor(&pool).await.expect("read the cursor");
+    let log = cursor.expect("the first sync names the log").log;
+
+    forge_cursor(&pool, "another-log/0").await;
+    let error = try_sync(&pool)
+        .await
+        .expect_err("a foreign cursor is refused");
+    let message = format!("{error:#}");
+    assert!(message.contains("different server log"), "{message}");
+    assert!(message.contains(&log[..8]), "{message}");
+    assert!(message.contains("im :sync --reset"), "{message}");
+
+    // Nothing was applied, and the refusal is repeatable rather than a fluke.
+    assert!(body_of(&pool, "mine").await.is_some());
+    assert!(try_sync(&pool).await.is_err());
+}
+
+/// The same log, rewound by a restore: the versions this device consumed now
+/// name other cells, so reading on from its cursor would skip or mis-file them.
+#[tokio::test]
+async fn a_cursor_past_the_end_of_the_log_is_refused() {
+    let (pool, _token) = device("rewound").await;
+    let _ = create_task(&pool, &task_object("mine", "body"))
+        .await
+        .unwrap();
+    sync(&pool).await;
+    let cursor = session::cursor(&pool)
+        .await
+        .expect("read the cursor")
+        .expect("the first sync names the log");
+    let log = cursor.log;
+
+    forge_cursor(&pool, &format!("{log}/{}", cursor.version + 1000)).await;
+    let error = try_sync(&pool)
+        .await
+        .expect_err("a cursor past the log is refused");
+    let message = format!("{error:#}");
+    assert!(message.contains("restored from an older copy"), "{message}");
+    assert!(
+        message.contains(&format!("ends at {}", cursor.version)),
+        "{message}"
+    );
+
+    // Adopting the server's data is the repair, and it works.
+    session::reset_local_state(&pool).await.expect("reset");
+    try_sync(&pool).await.expect("rebuild from the server");
+    assert!(body_of(&pool, "mine").await.is_some());
 }

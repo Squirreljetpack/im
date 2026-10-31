@@ -92,9 +92,20 @@ impl Client {
     }
 
     /// Push the outbox and pull every cell above the cursor.
+    ///
+    /// A refused database is an error, not a response: the caller cannot merge
+    /// a log it never agreed to read, and the user has to choose what to do
+    /// about it. See [`Refusal`].
     pub fn sync(&self, request: &SyncRequest) -> Result<SyncResponse> {
         let body = serde_json::to_value(request).context("Failed to serialize the push")?;
-        self.send("POST", "/api/sync", Some(&body), true)
+        let (status, text) = self.exchange("POST", "/api/sync", Some(&body), true)?;
+        if let Some(refusal) = Refusal::parse(status, &text, self.base(), request) {
+            return Err(refusal.into());
+        }
+        if !(200..300).contains(&status) {
+            bail!("{}", server_error_message(&text, status));
+        }
+        serde_json::from_str(&text).context("The sync server returned an unexpected response")
     }
 
     fn send<T: serde::de::DeserializeOwned>(
@@ -104,6 +115,22 @@ impl Client {
         body: Option<&serde_json::Value>,
         authorized: bool,
     ) -> Result<T> {
+        let (status, text) = self.exchange(method, path, body, authorized)?;
+        if !(200..300).contains(&status) {
+            bail!("{}", server_error_message(&text, status));
+        }
+        serde_json::from_str(&text).context("The sync server returned an unexpected response")
+    }
+
+    /// One request, status and body read by hand so the server's `{ error }`
+    /// message reaches the user instead of a bare "http status: 409".
+    fn exchange(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        authorized: bool,
+    ) -> Result<(u16, String)> {
         let url = format!("{}{path}", self.base);
         let authorization = self
             .token
@@ -114,8 +141,6 @@ impl Client {
             bail!("not logged in — run `im :sync login`");
         };
 
-        // Status codes are read by hand so the server's `{ error }` message
-        // reaches the user instead of a bare "http status: 409".
         let mut response = match method {
             "GET" => {
                 let mut request = self.agent.get(&url);
@@ -142,12 +167,150 @@ impl Client {
             .body_mut()
             .read_to_string()
             .context("Failed to read the sync server's response")?;
-        if !(200..300).contains(&status) {
-            bail!("{}", server_error_message(&text, status));
-        }
-        serde_json::from_str(&text).context("The sync server returned an unexpected response")
+        Ok((status, text))
     }
 }
+
+/// Why a server refused this database outright.
+///
+/// These are not merge decisions: the round trip carried no cells in either
+/// direction. A cursor only means something inside the log that issued it, so a
+/// database pointed at another log, at a rewound one, or at a build that speaks
+/// another protocol has nothing it can safely do without the user deciding.
+#[derive(Debug, Clone)]
+pub enum Refusal {
+    /// The cursor names a log this server does not have.
+    LogMismatch {
+        base: String,
+        /// The log this device's cursor belongs to.
+        local: String,
+        server_log: String,
+        version: i64,
+        head: Option<i64>,
+    },
+    /// The cursor is past the end of the server's log: the same log, rewound by
+    /// a restore, so the versions this device consumed mean other cells now.
+    CursorAhead {
+        base: String,
+        server_log: String,
+        version: i64,
+        head: Option<i64>,
+    },
+    /// The two builds disagree on the envelope or on the cell vocabulary.
+    Version {
+        protocol: u32,
+        schema: u32,
+        server_protocol: u32,
+        server_schema: u32,
+    },
+}
+
+impl Refusal {
+    fn parse(status: u16, body: &str, base: &str, request: &SyncRequest) -> Option<Self> {
+        if status != 409 {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_str(body).ok()?;
+        let code = value.get("code")?.as_str()?;
+        let number = |key: &str| {
+            value
+                .get(key)
+                .and_then(serde_json::Value::as_u64)
+                .map(|number| number as u32)
+        };
+        let log = || {
+            value
+                .get("log_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        };
+        let head = || value.get("head").and_then(serde_json::Value::as_i64);
+        match code {
+            "log_mismatch" => {
+                // Only a named cursor can belong to another log.
+                let cursor = request.cursor.as_ref()?;
+                Some(Self::LogMismatch {
+                    base: base.to_string(),
+                    local: cursor.log.clone(),
+                    server_log: log()?,
+                    version: cursor.version,
+                    head: head(),
+                })
+            }
+            "cursor_ahead" => {
+                let cursor = request.cursor.as_ref()?;
+                Some(Self::CursorAhead {
+                    base: base.to_string(),
+                    server_log: log()?,
+                    version: cursor.version,
+                    head: head(),
+                })
+            }
+            "version_mismatch" => Some(Self::Version {
+                protocol: super::schema::SCHEMA.protocol,
+                schema: super::schema::SCHEMA.version,
+                server_protocol: number("protocol")?,
+                server_schema: number("schema")?,
+            }),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let short = |log: &str| log.chars().take(8).collect::<String>();
+        match self {
+            Self::LogMismatch {
+                base,
+                local,
+                server_log,
+                version,
+                head,
+            } => {
+                let head = head.map_or_else(|| "unknown".to_string(), |head| head.to_string());
+                write!(
+                    f,
+                    "This database last synced to a different server log.\n  \
+                     this device: cursor {version} in log {}\n  \
+                     {base}: log {} (head {head})\n\
+                     Nothing was sent or applied. `im :sync --reset` rebuilds this database from that server; \
+                     pointing `[sync] server` back at the old one keeps this data.",
+                    short(local),
+                    short(server_log),
+                )
+            }
+            Self::CursorAhead {
+                base,
+                server_log,
+                version,
+                head,
+            } => {
+                let head = head.map_or_else(|| "an unknown version".to_string(), |head| head.to_string());
+                write!(
+                    f,
+                    "This database has read to version {version} of the server's log, but {base} ends at \
+                     {head} (log {}): the server's log was reset or restored from an older copy.\n\
+                     Nothing was sent or applied. `im :sync --reset` rebuilds this database from that server.",
+                    short(server_log),
+                )
+            }
+            Self::Version {
+                protocol,
+                schema,
+                server_protocol,
+                server_schema,
+            } => write!(
+                f,
+                "The server speaks sync protocol {server_protocol}, schema {server_schema}; this build of \
+                 im speaks protocol {protocol}, schema {schema}.\n\
+                 Nothing was sent or applied. Upgrade im (or the server) until they agree.",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Refusal {}
 
 /// The server's `{ error }` message, or a plain status description.
 fn server_error_message(body: &str, status: u16) -> String {

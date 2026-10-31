@@ -15,7 +15,10 @@ end — against a real deployment (§1) and entirely on one machine with Minifla
   defaults to `http://127.0.0.1:8787`. It is **not** stored with the account:
   signing in does not remember it. `IM_SYNC_URL` overrides the config for one
   command, so a stale export wins over the config.
-- Sync ships from v0.2.6 on; v0.2.5 and earlier predate it.
+- Sync ships from v0.2.6 on; v0.2.5 and earlier predate it. A client from
+  v0.2.9 or earlier sends no version of its own, so a server that speaks
+  protocol 1 refuses it with `this server speaks sync protocol 1 and schema 1`.
+  Upgrade the client; there is no compatibility mode.
 - A pre-sync database (v0.2.5) has INTEGER ids and is not migrated. Do not point
   a sync build at an old state dir; move the file aside first (appendix A).
 - `im :sync --reset` deletes every local row and rebuilds from the server log.
@@ -82,8 +85,20 @@ D1 rows and Durable Object logs behind it; only renaming the worker or moving
 to another account changes the URL. Keep the `[[migrations]]` tag `v1` —
 migration tags are append-only, and a deploy that drops one fails.
 
-Deploy the server from the same commit that built the clients; the wire format
-is small but moving.
+Deploy the server from the same commit that built the clients. The client sends
+its protocol and schema versions with every push, and a server that speaks other
+ones refuses the round instead of reading half of it — so a client and a server
+from different releases stop exchanging instead of silently dropping the fields
+they do not share. Redeploy both together.
+
+Each user's log has an identity minted with its Durable Object storage, and each
+client stores it beside its cursor. A database pointed at a log it never synced
+with, or one whose cursor is past the end of the log (a restored backup), is
+refused too: the cursor is a position in one log, and reading another through it
+would either merge two histories or do nothing at all. A database that has read
+nowhere yet sends no cursor at all, so it starts at the beginning of whatever log
+its server answers with. `im :sync --reset` is the way back — it discards the
+local copy and rebuilds it from the server.
 
 ### 1.2 Get a sync-capable client onto both devices
 
@@ -164,7 +179,7 @@ something else) the same account talks to whatever that command resolves.
 server.
 
 A quick two-clients-on-one-machine variant of the whole section: keep the
-deployment and use two throwaway state dirs as in §2.2, with `IM_SYNC_URL`
+deployment and use two throwaway state dirs as in §2.3, with `IM_SYNC_URL`
 pointing at the deployed worker. That exercises the real Worker/D1/DO path
 without a second device.
 
@@ -229,7 +244,7 @@ Rebuild from the server:
 ```sh
 im :sync --reset     # interactive: confirm, local rows are dropped and replayed
 im @                 # everything the server has is back, including A's rows
-im :sync status      # same account; device id rotated
+im :sync status      # same account; device id rotated, new log adopted
 ```
 
 ### 1.5 When it goes wrong
@@ -240,8 +255,25 @@ im :sync status      # same account; device id rotated
   "SELECT id, email, created_at FROM users"` lists registered accounts.
 - The per-user event log lives in the user's Durable Object (`UserSyncDO`):
   Workers & Pages → `im-sync` → Durable Objects → the object for that user.
-- Client side: `im :sync status` (account + queued count), and `im.log` in the
-  state dir (appendix A) for the last run's debug output; `-v` raises verbosity.
+- Client side: `im :sync status` (account, the log and version this database
+  has read to, the protocol and schema versions it speaks, and the queued
+  count), and `im.log` in the state dir (appendix A) for the last run's debug
+  output; `-v` raises verbosity.
+
+`im :sync` refuses a round, sending and applying nothing, when the two sides
+cannot mean the same thing. Each message names both numbers, so a report of one
+is enough to diagnose it:
+
+| Message | Cause | Fix |
+| --- | --- | --- |
+| `This database last synced to a different server log` | the stored cursor names another log: a different deployment, or this user re-registered somewhere else | point `[sync] server` back at the old server, or `im :sync --reset` to adopt this one |
+| `… but <server> ends at <n>` | the same log, rewound: its Durable Object storage was rebuilt or restored from an older copy, and the versions this device consumed name other cells now | `im :sync --reset` |
+| `The server speaks sync protocol … schema …; this build of im speaks …` | a client and a server from different releases | redeploy both from one commit, or upgrade `im` |
+
+Deleting the worker (`npx wrangler delete`) removes every user's Durable Object
+storage — the logs — while D1 keeps the accounts, so the next sync from an old
+device hits the second row. Deleting D1 with it, or re-registering, hits the
+first.
 
 ### 1.6 Teardown
 
@@ -275,7 +307,7 @@ npm run typecheck
 Client end to end. The suite starts its own `wrangler dev` on a free port with a
 temporary `--persist-to` directory, applies the D1 migrations, then drives the
 client engine through registration, replication, conflicts, deletes, pagination,
-retries, offline behaviour and `--reset`:
+retries, refusals, offline behaviour and `--reset`:
 
 ```sh
 # from the repo root; install the sync-server deps first if you have not
@@ -287,7 +319,15 @@ It does not need a dev server already running and does not touch
 `sync-server/.wrangler`. Unit-level client tests live in `src/sync/tests.rs` and
 `src/db/`.
 
-### 2.2 Manual: one server, two clients
+### 2.2 Changing the wire format
+
+`sync_schema.json` holds both numbers the two sides compare: `protocol` for the
+envelope and `version` for the cell vocabulary. Bump the one you changed; a peer
+that speaks another refuses the round rather than reading half of it.
+`sync-server/test/schema.test.ts` pins every `version` to the digest of its
+`kinds`, so editing the vocabulary without a bump fails `npm test`.
+
+### 2.3 Manual: one server, two clients
 
 Terminal 1 — the server:
 
@@ -332,7 +372,7 @@ these with `IM_SYNC_URL=http://127.0.0.1:8787` (or a separate dev config). Notes
 - Debug builds use `im.dev.db`; release builds use `im.db`. Both are fresh under
   a new state dir.
 
-### 2.3 Reset the local server
+### 2.4 Reset the local server
 
 Stop `wrangler dev`, then:
 
@@ -370,4 +410,4 @@ npx wrangler dev --persist-to /tmp/im-sync-local
 The device id, pull cursor and last emitted stamp are in `_sync_state`; the
 signed-in account and bearer token are in `_sync_account` (tokens last 30 days).
 The local outbox is `_sync_events`. A reset rotates the device id but keeps the
-account.
+account. A row with no cursor is a database that has read nowhere yet.
