@@ -14,6 +14,22 @@ pub enum TaskKind {
     Scheduled,
 }
 
+impl TaskKind {
+    /// Derive a task's kind from its two scheduling columns — the same rule
+    /// `sync_schema.json` uses to name a task row's subkind. The kind is never
+    /// stored, so a writer that clears one of these columns reclassifies the
+    /// row; see [`crate::task::validate_edit`].
+    pub fn of(interval_secs: Option<i64>, available_duration_secs: Option<i64>) -> Self {
+        if interval_secs.is_some() {
+            Self::Recurring
+        } else if available_duration_secs.is_some() {
+            Self::Scheduled
+        } else {
+            Self::Oneshot
+        }
+    }
+}
+
 impl std::fmt::Display for TaskKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {

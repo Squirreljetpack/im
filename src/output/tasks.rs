@@ -36,14 +36,16 @@ pub(crate) fn task_rows(task: &crate::db::TaskObject) -> Vec<(String, String)> {
     if task.is_recurring() || task.is_scheduled() {
         // Scheduled/recurring: the start is the window start / recurrence
         // anchor.
-        if let Some(st) = task.start_time {
-            rows.push(("Start".to_string(), crate::date::format_datetime(st)));
-        }
+        rows.push((
+            "Start".to_string(),
+            crate::date::format_datetime(task.start_time),
+        ));
     } else {
         // Oneshot: creation time always, due only when an end time was set.
-        if let Some(st) = task.start_time {
-            rows.push(("Created".to_string(), crate::date::format_datetime(st)));
-        }
+        rows.push((
+            "Created".to_string(),
+            crate::date::format_datetime(task.start_time),
+        ));
         if let Some(et) = task.end_time {
             rows.push(("Due".to_string(), crate::date::format_datetime(et)));
         }
@@ -133,8 +135,9 @@ pub fn format_tasks_simple(tasks: &[TaskRow], config: &Config, done_view: bool) 
             .interval_span()
             .map(|span| crate::date::format_span(&span))
             .unwrap_or_else(|| " ".to_string());
-        let next_available_cell = match (task.start_time, task.interval_span()) {
-            (Some(start), Some(span)) if crate::date::span_rough_seconds(span) > 0.0 => {
+        let next_available_cell = match task.interval_span() {
+            Some(span) if crate::date::span_rough_seconds(span) > 0.0 => {
+                let start = task.start_time;
                 let now = crate::date::now();
                 let next = if now <= start {
                     start
@@ -174,7 +177,7 @@ mod tests {
             name: "pushups".to_string(),
             body: String::new(),
             priority: 5,
-            start_time: Some(1700000000),
+            start_time: 1700000000,
             available_duration_secs: None,
             interval_secs: None,
             target_count: 20,
@@ -198,7 +201,7 @@ mod tests {
         task.interval_secs = Some(crate::date::span_to_db(&jiff::Span::new().days(1)));
         assert_eq!(task_rows(&task)[0].1, "recurring");
         task.interval_secs = None;
-        task.start_time = Some(1700000000);
+        task.start_time = 1700000000;
         task.available_duration_secs = Some(3600);
         // Scheduled is discriminated by available_duration + no interval;
         // construct via is_scheduled helpers used by task_rows.

@@ -185,11 +185,10 @@ pub(super) async fn create_task_command(
                             }
                         }
                         "due" => {
-                            let cur = end_time.map(crate::date::format_datetime);
-                            if let Ok(t) =
-                                crate::prompts::prompt_start_time("Due time:", cur.as_deref())
-                            {
-                                end_time = Some(t);
+                            let cur =
+                                end_time.map(|ts| crate::date::format_human_datetime(ts, true));
+                            if let Ok(e) = crate::prompts::prompt_end("Due time:", cur.as_deref()) {
+                                end_time = e;
                             }
                         }
                         "target" => {
@@ -263,7 +262,7 @@ pub(super) async fn create_task_command(
 
             // `@<time>` is the due time and lands in `end_time`; `start_time`
             // records the creation moment.
-            let start_epoch = Some(crate::date::now());
+            let start_epoch = crate::date::now();
 
             // Both the stable row id and the user-facing short id are
             // assigned by the database layer (see sql.rs).
@@ -336,7 +335,7 @@ pub(super) async fn create_task_command(
                     name: name_str.to_string(),
                     body,
                     priority: config.tasks.default_scheduled_priority,
-                    start_time: Some(start),
+                    start_time: start,
                     available_duration_secs: Some(dur),
                     interval_secs: None,
                     target_count: 0,
@@ -399,14 +398,15 @@ async fn create_recurring_task(
 
     // 3. Interval (prompted before the menu unless `! %<interval>` prefilled
     //    it). Editable from the menu afterwards.
-    let mut interval_label = match cl_interval {
+    let interval_span = match cl_interval {
         Some(i) => {
             cliclack::log::info(format!("Interval: {i}"))?;
-            i
+            parse_span(&i)?
         }
         None => crate::prompts::prompt_interval(None)?,
     };
-    let mut interval_secs = crate::date::span_to_db(&parse_span(&interval_label)?);
+    let mut interval_label = crate::date::format_span(&interval_span);
+    let mut interval_secs = crate::date::span_to_db(&interval_span);
     let mut interval_rough_secs = crate::date::db_span_rough_secs(interval_secs);
 
     // 4. Available duration (prompted before the menu). Blank, or a duration
@@ -493,10 +493,9 @@ async fn create_recurring_task(
                 }
             }
             "interval" => {
-                if let Ok(s) = crate::prompts::prompt_interval(Some(&interval_label)) {
-                    let span = parse_span(&s)?;
-                    interval_secs = crate::date::span_to_db(&span);
+                if let Ok(span) = crate::prompts::prompt_interval(Some(&interval_label)) {
                     interval_label = crate::date::format_span(&span);
+                    interval_secs = crate::date::span_to_db(&span);
                     interval_rough_secs = crate::date::db_span_rough_secs(interval_secs);
                     // A duration that no longer fits the new interval means
                     // always available.
@@ -522,8 +521,8 @@ async fn create_recurring_task(
                 }
             }
             "end" => {
-                let cur = end_time.map(crate::date::format_datetime);
-                if let Ok(e) = crate::prompts::prompt_end(cur.as_deref()) {
+                let cur = end_time.map(|ts| crate::date::format_human_datetime(ts, true));
+                if let Ok(e) = crate::prompts::prompt_end("Duration or end time:", cur.as_deref()) {
                     end_time = e;
                 }
             }
@@ -547,7 +546,7 @@ async fn create_recurring_task(
         name,
         body: body_val,
         priority: priority_val,
-        start_time: Some(start_time),
+        start_time,
         available_duration_secs,
         interval_secs: Some(interval_secs),
         target_count,
@@ -698,7 +697,7 @@ async fn create_scheduled_task(
         name,
         body: body_val,
         priority: priority_val,
-        start_time: Some(start),
+        start_time: start,
         available_duration_secs: Some(duration_secs),
         interval_secs: None,
         target_count: 0,

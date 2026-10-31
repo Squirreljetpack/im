@@ -17,7 +17,7 @@ end — against a real deployment (§1) and entirely on one machine with Minifla
   command, so a stale export wins over the config.
 - Sync ships from v0.2.6 on; v0.2.5 and earlier predate it. A client from
   v0.2.9 or earlier sends no version of its own, so a server that speaks
-  protocol 1 refuses it with `this server speaks sync protocol 1 and schema 1`.
+  protocol 1 refuses it with `this server speaks sync protocol 1 and schema 2`.
   Upgrade the client; there is no compatibility mode.
 - A pre-sync database (v0.2.5) has INTEGER ids and is not migrated. Do not point
   a sync build at an old state dir; move the file aside first (appendix A).

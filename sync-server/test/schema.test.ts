@@ -13,6 +13,7 @@ import { SCHEMA } from "../src/schema";
  */
 const VOCABULARY: Record<number, string> = {
   1: "f7823cffa53a6674",
+  2: "6965e6583b70478e",
 };
 
 /** JSON with every object's keys sorted, so formatting and key order do not matter. */

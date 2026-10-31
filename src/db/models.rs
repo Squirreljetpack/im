@@ -15,7 +15,7 @@ pub struct TaskObject {
     pub name: String,
     pub body: String,
     pub priority: i32,
-    pub start_time: Option<i64>,
+    pub start_time: i64,
     pub available_duration_secs: Option<i64>,
     /// Recurrence interval as a packed [`crate::date::DbSpan`] (see
     /// [`crate::date::span_to_db`]) — NOT seconds despite the name.
@@ -53,7 +53,7 @@ pub struct UpdateTaskObject {
     pub name: String,
     pub body: String,
     pub priority: i32,
-    pub start_time: Option<i64>,
+    pub start_time: i64,
     pub available_duration_secs: Option<i64>,
     /// Recurrence interval as a packed [`crate::date::DbSpan`].
     pub interval_secs: Option<i64>,
@@ -131,7 +131,7 @@ pub struct TaskRow {
     pub name: String,
     pub body: String,
     pub priority: i32,
-    pub start_time: Option<i64>,
+    pub start_time: i64,
     pub available_duration_secs: Option<i64>,
     /// Recurrence interval as a packed [`crate::date::DbSpan`] (see
     /// [`crate::date::span_to_db`]) — NOT seconds despite the name.
@@ -168,13 +168,7 @@ impl TaskRow {
     /// (availability window, no interval) > oneshot. A target count changes
     /// completion behavior but does not change the task kind.
     pub fn kind(&self) -> TaskKind {
-        if self.is_recurring() {
-            TaskKind::Recurring
-        } else if self.is_scheduled() {
-            TaskKind::Scheduled
-        } else {
-            TaskKind::Oneshot
-        }
+        TaskKind::of(self.interval_secs, self.available_duration_secs)
     }
 
     /// A completion sum as the readers use it: a scheduled task stores its
@@ -195,9 +189,9 @@ impl TaskRow {
             match self.completions {
                 Some(c) if c > 0 => true,
                 Some(_) => false,
-                None => match (self.start_time, self.available_duration_secs) {
-                    (Some(st), Some(dur)) => st + dur < crate::date::now(),
-                    _ => false,
+                None => match self.available_duration_secs {
+                    Some(dur) => self.start_time + dur < crate::date::now(),
+                    None => false,
                 },
             }
         } else {
@@ -205,8 +199,8 @@ impl TaskRow {
         }
     }
 
-    pub fn start_datetime(&self) -> Option<String> {
-        self.start_time.map(crate::date::format_datetime)
+    pub fn start_datetime(&self) -> String {
+        crate::date::format_datetime(self.start_time)
     }
 
     pub fn end_datetime(&self, named_months: bool) -> Option<String> {

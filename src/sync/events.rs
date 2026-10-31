@@ -45,7 +45,7 @@ pub async fn task_create(conn: &mut SqliteConnection, id: Id) -> Result<()> {
         ),
         (
             task_field::START_TIME,
-            row.get::<Option<i64>, _>("start_time").map(CellValue::Int),
+            Some(CellValue::Int(row.get::<i64, _>("start_time"))),
         ),
         (
             task_field::AVAILABLE_DURATION_SECS,

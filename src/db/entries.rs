@@ -874,7 +874,7 @@ mod tests {
                 name: name.to_string(),
                 body: String::new(),
                 priority: 5,
-                start_time: Some(1_700_000_000),
+                start_time: 1_700_000_000,
                 available_duration_secs: None,
                 interval_secs: None,
                 target_count: 0,

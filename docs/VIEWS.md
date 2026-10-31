@@ -140,7 +140,7 @@ When stdout is not a TTY (or piped), output is printed as tab-separated columns 
 
 ```pseudocode
 interval_start(t):
-    if t.interval_secs != null and t.start_time != null:
+    if t.interval_secs != null:
         return max(t.start_time, t.start_time + ((now - t.start_time) / t.interval_secs) * t.interval_secs)
     else:
         return t.start_time

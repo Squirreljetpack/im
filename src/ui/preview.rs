@@ -151,33 +151,32 @@ pub fn build_preview(
     }
 
     if task.is_recurring() {
-        if let Some(st) = task.start_time {
-            let next = match (window, task.interval_span()) {
-                // A window row scopes `next` to its own interval: the
-                // following window opens one interval after this row's
-                // window start.
-                (Some(w), Some(span)) if crate::date::span_rough_seconds(span) > 0.0 => {
-                    crate::date::interval_end_unix_secs(w.window_start, span, w.window_start)
-                        .unwrap_or(w.window_end)
+        let st = task.start_time;
+        let next = match (window, task.interval_span()) {
+            // A window row scopes `next` to its own interval: the
+            // following window opens one interval after this row's
+            // window start.
+            (Some(w), Some(span)) if crate::date::span_rough_seconds(span) > 0.0 => {
+                crate::date::interval_end_unix_secs(w.window_start, span, w.window_start)
+                    .unwrap_or(w.window_end)
+            }
+            // Otherwise the next interval opens at the end of the
+            // interval containing now (the anchor itself while it is
+            // still ahead).
+            (None, Some(span)) if crate::date::span_rough_seconds(span) > 0.0 => {
+                let now = date::now();
+                if now <= st {
+                    st
+                } else {
+                    crate::date::interval_end_unix_secs(st, span, now).unwrap_or(st)
                 }
-                // Otherwise the next interval opens at the end of the
-                // interval containing now (the anchor itself while it is
-                // still ahead).
-                (None, Some(span)) if crate::date::span_rough_seconds(span) > 0.0 => {
-                    let now = date::now();
-                    if now <= st {
-                        st
-                    } else {
-                        crate::date::interval_end_unix_secs(st, span, now).unwrap_or(st)
-                    }
-                }
-                _ => st,
-            };
-            lines.push(field_line(
-                "next",
-                date::format_human_datetime(next, config.preview.named_months),
-            ));
-        }
+            }
+            _ => st,
+        };
+        lines.push(field_line(
+            "next",
+            date::format_human_datetime(next, config.preview.named_months),
+        ));
         if let Some(w) = window {
             let now = date::now();
             if now >= w.window_start && now < w.window_end {
@@ -194,23 +193,19 @@ pub fn build_preview(
         }
     } else if task.is_scheduled() {
         // Scheduled tasks show the window start.
-        if let Some(st) = task.start_time {
-            lines.push(field_line(
-                "start",
-                date::format_human_datetime(st, config.preview.named_months),
-            ));
-        }
+        lines.push(field_line(
+            "start",
+            date::format_human_datetime(task.start_time, config.preview.named_months),
+        ));
     } else {
         // Oneshot tasks: the creation time always, and the due time only
         // when one was set (`! name @<time>` → end_time). Overdue tasks
         // color the `due:` label with the configured overdue color
         // (`badge::task_label_color`, falling back to the usual yellow).
-        if let Some(st) = task.start_time {
-            lines.push(field_line(
-                "creation",
-                date::format_human_datetime(st, config.preview.named_months),
-            ));
-        }
+        lines.push(field_line(
+            "creation",
+            date::format_human_datetime(task.start_time, config.preview.named_months),
+        ));
         if let Some(et) = task.end_time {
             let color =
                 crate::badge::task_label_color(task, date::now(), config.tasks.overdue_color)
@@ -234,9 +229,7 @@ pub fn build_preview(
             Some(c) if c > 0 => "completed",
             Some(_) => "failed",
             None => {
-                let elapsed = task.start_time.unwrap_or(now)
-                    + task.available_duration_secs.unwrap_or(0)
-                    < now;
+                let elapsed = task.start_time + task.available_duration_secs.unwrap_or(0) < now;
                 if elapsed { "auto-completed" } else { "ongoing" }
             }
         };
@@ -551,7 +544,7 @@ mod tests {
             name: "water plants".to_string(),
             body: String::new(),
             priority: 3,
-            start_time: Some(1_700_000_000),
+            start_time: 1_700_000_000,
             available_duration_secs: Some(3600),
             interval_secs: Some(crate::date::span_to_db(&jiff::Span::new().days(1))),
             target_count: 0,
@@ -606,7 +599,7 @@ mod tests {
     fn test_build_preview_recurring_window() {
         let task = recurring_row();
         let span = task.interval_span().unwrap();
-        let start = task.start_time.unwrap();
+        let start = task.start_time;
         let window = crate::db::RecurringWindow {
             task: task.clone(),
             window_start: start,
@@ -637,7 +630,7 @@ mod tests {
         // An open window shows the time remaining until it closes.
         let now = date::now();
         let mut task = recurring_row();
-        task.start_time = Some(now - 3_600);
+        task.start_time = now - 3_600;
         let window = crate::db::RecurringWindow {
             task: task.clone(),
             window_start: now - 3_600,
@@ -941,7 +934,7 @@ mod tests {
         let mut task = recurring_row();
         task.interval_secs = None;
         task.available_duration_secs = None; // oneshot: not scheduled
-        task.start_time = Some(date::now() - 86_400);
+        task.start_time = date::now() - 86_400;
         task.end_time = Some(date::now() + 86_400);
         task.completions = None;
         let cfg = config();
@@ -982,7 +975,7 @@ mod tests {
             name: "child task".to_string(),
             body: String::new(),
             priority: 5,
-            start_time: None,
+            start_time: 0,
             available_duration_secs: None,
             interval_secs: None,
             target_count: 0,
@@ -1040,7 +1033,6 @@ mod tests {
         let mut task = recurring_row();
         // A plain oneshot: drop the recurring interval and the schedule.
         task.interval_secs = None;
-        task.start_time = None;
         task.end_time = None;
         task.available_duration_secs = None;
         task.name = "very long child name that exceeds sixteen".to_string();
@@ -1072,7 +1064,7 @@ mod tests {
             name: "a very long parent task name that will not fit".to_string(),
             body: String::new(),
             priority: 5,
-            start_time: Some(1_700_000_000),
+            start_time: 1_700_000_000,
             available_duration_secs: None,
             interval_secs: None,
             target_count: 0,

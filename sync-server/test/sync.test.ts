@@ -70,6 +70,15 @@ function cell(
   };
 }
 
+/**
+ * Cells a create must carry whatever the test is about: a task rows' start
+ * time is required by the schema, and no test inspects its value. A caller
+ * that supplies the field itself keeps its own.
+ */
+const REQUIRED: Record<string, [string, CellValue][]> = {
+  task: [["start_time", { int: 1_700_000_000 }]],
+};
+
 function create(
   entityId: string,
   kind: string,
@@ -77,9 +86,13 @@ function create(
   timestamp: number,
   device = "device-a",
 ): CellEvent[] {
+  const given = new Set(fields.map(([field]) => field));
+  const required = (REQUIRED[kind] ?? []).filter(([field]) => !given.has(field));
   return [
     cell(entityId, kind, "", { text: "live" }, timestamp, device),
-    ...fields.map(([field, value]) => cell(entityId, kind, field, value, timestamp, device)),
+    ...[...fields, ...required].map(([field, value]) =>
+      cell(entityId, kind, field, value, timestamp, device),
+    ),
   ];
 }
 
@@ -202,9 +215,9 @@ describe("pull", () => {
     expect(pushed.verdicts.every((verdict) => verdict.outcome === "accepted")).toBe(true);
 
     const pulled = await sync(account.token, "device-b", 0);
-    expect(pulled.events.map((row) => row.field)).toEqual(["", "name"]);
-    expect(pulled.events.map((row) => row.version)).toEqual([1, 2]);
-    expect(pulled.cursor.version).toBe(2);
+    expect(pulled.events.map((row) => row.field)).toEqual(["", "name", "start_time"]);
+    expect(pulled.events.map((row) => row.version)).toEqual([1, 2, 3]);
+    expect(pulled.cursor.version).toBe(3);
     expect(pulled.has_more).toBe(false);
 
     // Nothing new: the cursor is already at the register's head.
@@ -221,7 +234,7 @@ describe("pull", () => {
 
     // Cursor 0 means "I have no rows", so my own cells must come back.
     const rebuild = await sync(account.token, "device-a", 0);
-    expect(rebuild.events.map((row) => row.field)).toEqual(["", "name"]);
+    expect(rebuild.events.map((row) => row.field)).toEqual(["", "name", "start_time"]);
 
     // Past that, they are not echoed: the row already reflects them.
     const delta = await sync(account.token, "device-a", rebuild.cursor.version);
@@ -506,7 +519,23 @@ describe("push validation", () => {
     expect(accepted.verdicts.map((verdict) => verdict.outcome)).toEqual([
       "accepted",
       "accepted",
+      "accepted",
     ]);
+
+    // `name` is not the only required cell: a task is dated from its start.
+    const undated_task = "0193f000-0000-7000-8000-000000000099";
+    const undated = await call("/api/sync", {
+      method: "POST",
+      token: account.token,
+      body: request(account.token, "device-a", 0, [
+        cell(undated_task, "task", "", { text: "live" }, ago(900)),
+        cell(undated_task, "task", "name", { text: "undated" }, ago(900)),
+      ]),
+    });
+    expect(undated.status).toBe(400);
+    expect(((await undated.json()) as { error: string }).error).toContain(
+      'missing required field "start_time"',
+    );
   });
 
   it("is idempotent for retried pushes", async () => {
@@ -517,9 +546,13 @@ describe("push validation", () => {
     const retry = await sync(account.token, "device-a", 0, events);
 
     expect(retry.cursor.version).toBe(first.cursor.version);
-    expect(retry.verdicts.map((verdict) => verdict.outcome)).toEqual(["accepted", "accepted"]);
+    expect(retry.verdicts.map((verdict) => verdict.outcome)).toEqual([
+      "accepted",
+      "accepted",
+      "accepted",
+    ]);
     const pulled = await sync(account.token, "device-b", 0);
-    expect(pulled.events.map((row) => row.version)).toEqual([1, 2]);
+    expect(pulled.events.map((row) => row.version)).toEqual([1, 2, 3]);
   });
 });
 
@@ -662,8 +695,8 @@ describe("pages", () => {
         break;
       }
     }
-    expect(seen).toHaveLength(4);
-    expect(new Set(seen).size).toBe(4);
+    expect(seen).toHaveLength(5);
+    expect(new Set(seen).size).toBe(5);
     expect(seen).toContain(`${first}/name`);
     expect(seen).toContain(`${second}/mood`);
   });
@@ -761,7 +794,7 @@ describe("compatibility", () => {
     const adopted = await sync(account.token, "device-b", 0);
     expect(adopted.cursor.log).toBe(pushed.cursor.log);
     // No position means no history yet, so the whole log comes back.
-    expect(adopted.events.map((row) => row.field).sort()).toEqual(["", "name"]);
+    expect(adopted.events.map((row) => row.field).sort()).toEqual(["", "name", "start_time"]);
   });
 
   it("refuses a cursor minted by another log, and appends nothing", async () => {

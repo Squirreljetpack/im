@@ -269,9 +269,11 @@ pub fn prompt_name(prefill: Option<&str>) -> Result<String> {
     Ok(name.trim().to_string())
 }
 
-/// Prompt for a recurrence interval (required, valid duration). `default`
-/// pre-fills the input (edit flow).
-pub fn prompt_interval(default: Option<&str>) -> Result<String> {
+/// Prompt for a recurrence interval (required, positive duration). `default`
+/// pre-fills the input (edit flow). Returns the parsed span: the submitted
+/// answer was validated by [`parse_span`](crate::date::parse_span), so
+/// callers never re-parse it.
+pub fn prompt_interval(default: Option<&str>) -> Result<jiff::Span> {
     use cliclack::input;
 
     let raw: String = input("Interval between task occurrences:")
@@ -290,7 +292,8 @@ pub fn prompt_interval(default: Option<&str>) -> Result<String> {
         .interact()
         .map_err(|e| anyhow::anyhow!("Prompt cancelled: {}", e))?;
 
-    Ok(raw)
+    // `validate_on_enter` ran on exactly this string.
+    crate::date::parse_span(&raw)
 }
 
 /// Prompt for an available duration. `Ok(None)` = always available, which a
@@ -312,9 +315,11 @@ pub fn prompt_available_duration(
             if input.is_empty() {
                 Ok(())
             } else {
-                crate::date::parse_duration_secs(input)
-                    .map(|_| ())
-                    .map_err(|e| format!("Invalid duration: {}", e))
+                match crate::date::parse_duration_secs(input) {
+                    Ok(0) => Err(String::from("Duration must be positive")),
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(format!("Invalid duration: {}", e)),
+                }
             }
         })
         .interact()
@@ -377,55 +382,48 @@ fn rewrite_answer_line(typed: &str, shown: &str) {
     }
 }
 
-/// Prompt for a recurring-task end time. The label is "Duration or end time":
-/// input resolves in three passes — a calendar-aware span first (`"1 year"`,
+/// Prompt for an optional end time — an oneshot task's due date or a
+/// recurring task's expiry. `label` says which; `default` seeds the
+/// placeholder with the current value, because the answer is always the new
+/// value: blank (or `never`) clears the end.
+///
+/// Input resolves in three passes — a calendar-aware span first (`"1 year"`,
 /// `"3 months"`, relative to now), then a fixed duration (`"90d"`), then an
 /// absolute date/time via the fixed `crate::date::DATE_DIALECT`.
-/// Blank = never ends.
-/// Returns the resolved Unix-epoch end time, or `None` for never. `default`
-/// is the remaining time in seconds (pre-filled as a formatted duration).
-pub fn prompt_end(default: Option<&str>) -> Result<Option<i64>> {
+pub fn prompt_end(label: &str, default: Option<&str>) -> Result<Option<i64>> {
     use cliclack::input;
 
-    let (default_time, placeholder) = match default {
-        Some(s) => (
-            Some(
-                crate::date::parse_datetime(s, crate::date::DATE_DIALECT)
-                    .expect("Placeholder should parse"),
-            ),
-            s.to_string(),
-        ),
-        None => (None, "never".to_string()),
-    };
-
-    let raw: String = input("Duration or end time:")
-        .placeholder(&placeholder)
+    let raw: String = input(label)
+        .placeholder(default.unwrap_or("never"))
+        // An empty default is what makes a blank answer submittable:
+        // cliclack rejects an empty input when it has no default at all.
         .default_input("")
-        .validate(move |input: &String| {
-            if input.is_empty() || input == "never" {
-                return Ok(());
+        .validate(|input: &String| {
+            if clears_end(input) {
+                Ok(())
+            } else {
+                resolve_end_input(input)
+                    .map(|_| ())
+                    .map_err(|e| format!("Invalid duration or time: {}", e))
             }
-            resolve_end_input(input, default_time)
-                .map(|_| ())
-                .map_err(|e| format!("Invalid duration or time: {}", e))
         })
         .interact()
         .map_err(|e| anyhow::anyhow!("Prompt cancelled: {}", e))?;
 
-    if raw.is_empty() || raw == "never" {
-        Ok(default_time)
-    } else {
-        resolve_end_input(&raw, default_time)
-    }
+    resolve_end_input(&raw)
+}
+
+/// Inputs that clear an optional end time instead of setting one.
+fn clears_end(raw: &str) -> bool {
+    matches!(raw.trim(), "" | "never" | "none")
 }
 
 /// Resolve an end-time input: calendar-aware span relative to now first
 /// (`"1 year"`), then a fixed duration (`"90d"`), then an absolute
-/// date/time. Blank input is the caller's concern; `default_time` is
-/// returned for `"never"`.
-fn resolve_end_input(raw: &str, default_time: Option<i64>) -> Result<Option<i64>> {
-    if raw == "never" {
-        return Ok(default_time);
+/// date/time. Blank, `never` and `none` resolve to no end at all.
+fn resolve_end_input(raw: &str) -> Result<Option<i64>> {
+    if clears_end(raw) {
+        return Ok(None);
     }
     // Calendar spans need a reference date to resolve to seconds.
     if let Ok(span) = crate::date::parse_span(raw) {
@@ -491,19 +489,19 @@ mod tests {
     use super::resolve_end_input;
 
     /// End-time input resolves in three passes: calendar-aware span first
-    /// (`"1 year"`), then fixed duration, then absolute date/time. Blank
-    /// and "never" are handled by the caller/prompt, not here.
+    /// (`"1 year"`), then fixed duration, then absolute date/time. Blank and
+    /// the `never`/`none` keywords clear the end.
     #[test]
     fn end_input_span_duration_datetime_precedence() {
         // Calendar span (rejected by the plain duration parser) resolves
         // relative to now.
-        let end = resolve_end_input("1 year", None).unwrap().unwrap();
+        let end = resolve_end_input("1 year").unwrap().unwrap();
         assert!(end > crate::date::now() + 86_400 * 364);
         assert!(end < crate::date::now() + 86_400 * 367);
 
         // Fixed duration still works ("90d"; a span of 90 calendar days
         // matches the same input first — allow for a DST shift).
-        let end = resolve_end_input("90d", None).unwrap().unwrap();
+        let end = resolve_end_input("90d").unwrap().unwrap();
         assert!(
             (end - (crate::date::now() + 90 * 86_400)).abs() <= 3600,
             "got {end}"
@@ -511,14 +509,15 @@ mod tests {
 
         // Absolute date/time wins last.
         let ts = crate::date::parse_datetime("2030-03-15", crate::date::DATE_DIALECT).unwrap();
-        let end = resolve_end_input("2030-03-15", None).unwrap().unwrap();
+        let end = resolve_end_input("2030-03-15").unwrap().unwrap();
         assert_eq!(end, ts);
 
-        // "never" falls back to the caller's default (None here).
-        assert_eq!(resolve_end_input("never", None).unwrap(), None);
-        assert_eq!(resolve_end_input("never", Some(123)).unwrap(), Some(123));
+        // Blank and the keywords clear the end.
+        assert_eq!(resolve_end_input("").unwrap(), None);
+        assert_eq!(resolve_end_input("never").unwrap(), None);
+        assert_eq!(resolve_end_input("none").unwrap(), None);
 
         // Garbage fails all three passes.
-        assert!(resolve_end_input("nonsense", None).is_err());
+        assert!(resolve_end_input("nonsense").is_err());
     }
 }

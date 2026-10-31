@@ -110,9 +110,7 @@ pub(super) async fn handle_task_edit(
                 select = select.item(
                     "start",
                     "Start time",
-                    start_time
-                        .map(crate::date::format_datetime)
-                        .unwrap_or_else(|| "now".to_string()),
+                    crate::date::format_datetime(start_time),
                 );
                 select = select.item(
                     "interval",
@@ -150,9 +148,7 @@ pub(super) async fn handle_task_edit(
                 select = select.item(
                     "start",
                     "Start time",
-                    start_time
-                        .map(crate::date::format_datetime)
-                        .unwrap_or_else(|| "now".to_string()),
+                    crate::date::format_datetime(start_time),
                 );
                 select = select.item(
                     "available_duration",
@@ -202,22 +198,21 @@ pub(super) async fn handle_task_edit(
                 }
             }
             "due" => {
-                let cur = end_time.map(crate::date::format_datetime);
-                if let Ok(t) = crate::prompts::prompt_start_time("Due time:", cur.as_deref()) {
-                    end_time = Some(t);
+                let cur = end_time.map(|ts| crate::date::format_human_datetime(ts, true));
+                if let Ok(e) = crate::prompts::prompt_end("Due time:", cur.as_deref()) {
+                    end_time = e;
                 }
             }
             "start" => {
-                let cur = start_time.map(crate::date::format_datetime);
+                let cur = Some(crate::date::format_datetime(start_time));
                 if let Ok(t) = crate::prompts::prompt_start_time("Start time:", cur.as_deref()) {
-                    start_time = Some(t);
+                    start_time = t;
                 }
             }
             "interval" => {
                 let cur =
                     interval_secs.map(|s| crate::date::format_span(&crate::date::db_to_span(s)));
-                if let Ok(s) = crate::prompts::prompt_interval(cur.as_deref()) {
-                    let span = crate::date::parse_span(&s)?;
+                if let Ok(span) = crate::prompts::prompt_interval(cur.as_deref()) {
                     let packed = crate::date::span_to_db(&span);
                     interval_secs = Some(packed);
                     // A duration that no longer fits the new interval means
@@ -262,8 +257,8 @@ pub(super) async fn handle_task_edit(
                 }
             }
             "end" => {
-                let cur = end_time.map(crate::date::format_datetime);
-                if let Ok(e) = crate::prompts::prompt_end(cur.as_deref()) {
+                let cur = end_time.map(|ts| crate::date::format_human_datetime(ts, true));
+                if let Ok(e) = crate::prompts::prompt_end("Duration or end time:", cur.as_deref()) {
                     end_time = e;
                 }
             }
@@ -286,7 +281,12 @@ pub(super) async fn handle_task_edit(
                     end_time,
                     parent,
                 };
-                crate::db::edit_task(pool, &update_obj).await?;
+                // The write seam re-checks the kind invariants: a legacy
+                // row that does not satisfy them yet stays editable.
+                if let Err(e) = crate::db::edit_task(pool, &update_obj).await {
+                    cliclack::log::error(format!("{e}"))?;
+                    continue;
+                }
                 if !opts.quiet() {
                     let msg = match short_id {
                         Some(id) => format!("Updated task #{id}: {name}"),

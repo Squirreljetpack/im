@@ -55,13 +55,15 @@ pub async fn create_task(pool: &SqlitePool, task: &TaskObject) -> Result<(Id, i6
 
 /// Update a task row with all editable fields. Returns the number of affected rows.
 pub async fn edit_task(pool: &SqlitePool, update: &UpdateTaskObject) -> Result<u64> {
-    assert!(
-        update.interval_secs.is_none_or(|i| i > 0),
-        "interval_secs must be None or positive, got {:?}",
-        update.interval_secs
-    );
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
     let before = fetch_edit_preimage(&mut tx, update.id).await?;
+    if let Some(before) = &before {
+        let kind = TaskKind::of(
+            before.get::<Option<i64>, _>("interval_secs"),
+            before.get::<Option<i64>, _>("available_duration_secs"),
+        );
+        crate::task::validate_edit(kind, update)?;
+    }
     let res = sqlx::query(
         r#"UPDATE todos SET name = ?, body = ?, priority = ?, short_id = ?, start_time = ?,
                    available_duration_secs = ?, interval_secs = ?, target_count = ?,
@@ -125,7 +127,7 @@ fn edit_diff(
     if before.get::<i32, _>("priority") != update.priority {
         diff.push(crate::sync::TaskUpdate::Priority(update.priority));
     }
-    if before.get::<Option<i64>, _>("start_time") != update.start_time {
+    if before.get::<i64, _>("start_time") != update.start_time {
         diff.push(crate::sync::TaskUpdate::StartTime(update.start_time));
     }
     if before.get::<Option<i64>, _>("available_duration_secs") != update.available_duration_secs {
@@ -199,11 +201,11 @@ pub async fn update_task(pool: &SqlitePool, todo_id: Id, delta: i32) -> Result<i
             .fetch_optional(&mut *tx)
             .await?
             .and_then(|row| {
-                let start: Option<i64> = row.get("start_time");
+                let start: i64 = row.get("start_time");
                 let interval: Option<i64> = row.get("interval_secs");
-                match (start, interval) {
-                    (Some(st), Some(iv)) if iv > 0 => Some(crate::task::current_interval_start(
-                        st,
+                match interval {
+                    Some(iv) if iv > 0 => Some(crate::task::current_interval_start(
+                        start,
                         crate::date::db_to_span(iv),
                         crate::date::now(),
                     )),
@@ -391,14 +393,14 @@ pub async fn sync_short_id(conn: &mut sqlx::SqliteConnection, todo_id: Id) -> Re
     .context("Failed to fetch task for short-id sync")?;
     let Some(row) = row else { return Ok(()) };
 
-    let start_time: Option<i64> = row.get("start_time");
+    let start_time: i64 = row.get("start_time");
     let interval_secs: Option<i64> = row.get("interval_secs");
     let target_count: i32 = row.get("target_count");
     let short_id: Option<i64> = row.get("short_id");
 
-    let boundary = match (start_time, interval_secs) {
-        (Some(st), Some(iv)) if iv > 0 => Some(crate::task::current_interval_start(
-            st,
+    let boundary = match interval_secs {
+        Some(iv) if iv > 0 => Some(crate::task::current_interval_start(
+            start_time,
             crate::date::db_to_span(iv),
             crate::date::now(),
         )),
@@ -986,7 +988,7 @@ mod tests {
                 name: name.to_string(),
                 body: String::new(),
                 priority: 5,
-                start_time: Some(1_700_000_000),
+                start_time: 1_700_000_000,
                 available_duration_secs: None,
                 interval_secs: None,
                 target_count: 0,
