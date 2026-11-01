@@ -32,6 +32,22 @@ pub(super) async fn handle_task_edit(
         Some(task_ref) => super::refs::resolve_task_ref(pool, &task_ref).await?,
     };
 
+    if let Some(msg) = edit_task_by_id(pool, config, opts, task_id).await? {
+        if !opts.quiet() {
+            cliclack::outro(msg)?;
+        }
+    }
+    Ok(())
+}
+
+/// Run the interactive field editor for one task id. Returns the success
+/// message, or `None` when the user cancels.
+pub(crate) async fn edit_task_by_id(
+    pool: &SqlitePool,
+    config: &Config,
+    opts: &CliOpts,
+    task_id: Id,
+) -> Result<Option<String>> {
     let task = crate::db::fetch_task_by_id(pool, task_id, crate::date::now())
         .await?
         .ok_or_else(|| anyhow::anyhow!("Task not found"))?;
@@ -50,7 +66,7 @@ pub(super) async fn handle_task_edit(
 
     crate::output::task_intro("Edit task")?;
 
-    loop {
+    let message = loop {
         let parent_label = if let Some(pid) = parent {
             if let Ok(Some(pt)) = crate::db::fetch_task_by_id(pool, pid, crate::date::now()).await {
                 pt.name
@@ -287,24 +303,21 @@ pub(super) async fn handle_task_edit(
                     cliclack::log::error(format!("{e}"))?;
                     continue;
                 }
-                if !opts.quiet() {
-                    let msg = match short_id {
-                        Some(id) => format!("Updated task #{id}: {name}"),
-                        None => format!("Updated task: {name}"),
-                    };
-                    cliclack::outro(msg)?;
-                }
-                break;
+                let msg = match short_id {
+                    Some(id) => format!("Updated task #{id}: {name}"),
+                    None => format!("Updated task: {name}"),
+                };
+                break Some(msg);
             }
             "cancel" => {
                 cliclack::outro_cancel("Cancelled.")?;
-                break;
+                break None;
             }
             _ => {}
         }
-    }
+    };
 
-    Ok(())
+    Ok(message)
 }
 
 /// Re-validate the edited name before saving: non-empty, no tabs, and

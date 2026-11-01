@@ -6,6 +6,7 @@ use std::io::Write;
 use crate::cli::{CliOpts, Command};
 use crate::config::Config;
 
+mod create;
 mod diagnostics;
 mod edit_task;
 mod entry;
@@ -17,6 +18,12 @@ mod update;
 
 pub use diagnostics::print_embeddings;
 
+// The TUI's in-process execute flows call these directly instead of
+// spawning the `im` binary.
+pub(crate) use create::create_interactive;
+pub(crate) use edit_task::edit_task_by_id;
+pub(crate) use sync::sync_command;
+
 pub async fn execute_command<W: Write>(
     cmd: Command,
     pool: &SqlitePool,
@@ -26,7 +33,9 @@ pub async fn execute_command<W: Write>(
     tui: bool,
 ) -> Result<()> {
     match cmd {
-        Command::Entry(entry) => entry::record_entry(pool, config, opts, _dbg!(entry)).await,
+        Command::Entry(entry) => entry::record_entry(pool, config, opts, _dbg!(entry))
+            .await
+            .map(drop),
 
         Command::View { mode, show } => {
             if tui {
@@ -44,7 +53,9 @@ pub async fn execute_command<W: Write>(
             crate::tracker::write_tracker_grid(pool, config, &axes, opts, period, items, out).await
         }
 
-        Command::Task(task) => task::create_task_command(pool, config, opts, task).await,
+        Command::Task(task) => task::create_task_command(pool, config, opts, task)
+            .await
+            .map(drop),
 
         Command::TaskEdit { task } => edit_task::handle_task_edit(pool, config, opts, task).await,
 
@@ -94,7 +105,9 @@ pub async fn execute_command<W: Write>(
             Ok(())
         }
 
-        Command::Matchmaker => crate::ui::tracker_picker::run_trackers_app(config).await,
+        Command::Matchmaker => crate::ui::tracker_picker::run_trackers_app(config)
+            .await
+            .map(drop),
 
         Command::Db(sub) => match sub {
             crate::cli::DbSubcommand::Prune => maintenance::db_prune(pool, config).await,

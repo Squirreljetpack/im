@@ -29,8 +29,9 @@ use crate::task::{
     reset_task_progress,
 };
 use crate::types::{ViewMode, ViewVariant};
-use crate::ui::action::ImAction;
+use crate::ui::action::{ExecuteAction, ImAction};
 use crate::ui::common::{BADGE_GAP, ct_to_ratatui_color, mode_label};
+use crate::ui::execute;
 use crate::ui::mm_config::get_mm_cfg;
 use crate::ui::overlays::{
     ConfirmOverlay, ConfirmPrompt, InputOverlay, InputPrompt, SharedOverlay,
@@ -254,7 +255,6 @@ impl TasksApp {
             tx: render_tx.clone(),
             confirm: confirm_ov.clone(),
             input: input_ov.clone(),
-            edit: Arc::new(Mutex::new(None)),
         };
 
         // The initializer runs once before the first frame: prime the list
@@ -265,11 +265,11 @@ impl TasksApp {
             move |state| repopulate(state, &ctx)
         });
 
-        // External editor: `Interrupt::Execute` runs with the TUI exited and
-        // the event loop paused, so $EDITOR owns the terminal.
+        // Execute flows: matchmaker runs the handler with the TUI exited and
+        // the event loop paused, so the interactive flows own the terminal.
         mm.register_interrupt_handler(Interrupt::Execute, {
             let ctx = ctx.clone();
-            move |_state| run_edit(&ctx)
+            move |state| run_execute(state, &ctx)
         });
 
         options = options.ext_handler(move |action: ImAction, state| handler(action, state, &ctx));
@@ -355,13 +355,6 @@ pub(crate) struct TaskCtx {
     pub(crate) tx: RenderSender<ImAction>,
     pub(crate) confirm: Arc<Mutex<ConfirmOverlay<TaskRow>>>,
     pub(crate) input: Arc<Mutex<InputOverlay<TaskRow>>>,
-    pub(crate) edit: Arc<Mutex<Option<EditPayload>>>,
-}
-
-/// Payload staged by the Edit action and consumed by the editor interrupt
-/// handler while the TUI is suspended.
-pub(crate) enum EditPayload {
-    TaskBody { id: Id, body: String },
 }
 
 /// Dispatch a custom action on the render thread.
@@ -420,21 +413,38 @@ pub(crate) fn handler(action: ImAction, state: &mut MMState<'_, TaskRow, ()>, ct
         }
         ImAction::Edit => {
             if let Some(task) = state.current_raw().cloned() {
-                *ctx.edit.lock().unwrap() = Some(EditPayload::TaskBody {
-                    id: task.id,
-                    body: task.body,
-                });
-                state.set_interrupt(Interrupt::Execute, String::new());
+                execute::raise(state, ExecuteAction::EditTask, task.id.to_string());
             }
         }
-        // The tasks app has no link targets; the editor payload is always
-        // staged synchronously here, so EditExecute is unused.
+        ImAction::Create => execute::raise(state, ExecuteAction::Create, String::new()),
+        ImAction::Sync => execute::raise(state, ExecuteAction::Sync, String::new()),
+        // The tasks app has no link targets.
         // The tasks view anchors no day, so the date-shift actions are inert
         // (and already filtered out of its binds above).
         ImAction::Yesterday | ImAction::Tomorrow => {}
 
-        ImAction::Link | ImAction::EditExecute => {}
+        ImAction::Link | ImAction::EditExecute | ImAction::Toast(_) | ImAction::ToastError(_) => {}
     }
+}
+
+/// Run the staged in-process execute flow, then refresh the list.
+pub(crate) fn run_execute(state: &mut MMState<'_, TaskRow, ()>, ctx: &TaskCtx) {
+    let fullscreen = ctx.view.lock().unwrap().fullscreen;
+    match execute::take(state) {
+        Some(ExecuteAction::EditTask) => {
+            let Some(id) = state.payload().parse::<Id>().ok() else {
+                return;
+            };
+            execute::edit_task(state, fullscreen, id);
+        }
+        Some(ExecuteAction::Create) => execute::create(state, fullscreen, false),
+        Some(ExecuteAction::Sync) => execute::sync(state),
+        Some(ExecuteAction::EditBody) | None => return,
+    }
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        refresh_tasks(&ctx).await;
+    });
 }
 
 /// Rebuild the worker from the shared view state, refresh the ui border
@@ -683,26 +693,6 @@ fn delete_confirm(task: &TaskRow, ctx: TaskCtx) -> ConfirmPrompt {
                 });
             }
         })),
-    }
-}
-
-/// Runs inside the `Interrupt::Execute` handler: the TUI is exited and the
-/// event loop paused, so the blocking editor call owns the terminal.
-pub(crate) fn run_edit(ctx: &TaskCtx) {
-    let Some(EditPayload::TaskBody { id, body }) = ctx.edit.lock().unwrap().take() else {
-        return;
-    };
-    let ctx = ctx.clone();
-    match crate::editor::open_editor_on_text(&body) {
-        Ok(new_body) => {
-            tokio::spawn(async move {
-                if let Err(e) = crate::db::update_todo_body(&pool(), id, &new_body).await {
-                    log::error!("Failed to update task body: {e}");
-                }
-                refresh_tasks(&ctx).await;
-            });
-        }
-        Err(e) => log::error!("Editor: {e}"),
     }
 }
 

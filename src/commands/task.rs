@@ -59,7 +59,7 @@ pub(super) async fn create_task_command(
     config: &Config,
     opts: &CliOpts,
     task: Task,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let task_type = task.task_type;
     let name = task.name;
     let body = task.body;
@@ -69,7 +69,7 @@ pub(super) async fn create_task_command(
     let available_duration = task.available_duration;
     let interval = task.interval;
 
-    match task_type {
+    let created = match task_type {
         TaskKind::Oneshot => {
             // Only a missing name triggers the interactive creation flow:
             // cliclack intro, then the name (required, unique, no tabs),
@@ -204,7 +204,7 @@ pub(super) async fn create_task_command(
                         "save" => break,
                         "cancel" => {
                             cliclack::outro_cancel("Cancelled.")?;
-                            return Ok(());
+                            return Ok(None);
                         }
                         _ => unreachable!(),
                     }
@@ -284,24 +284,22 @@ pub(super) async fn create_task_command(
             task_obj.id = Some(new_id);
             task_obj.short_id = Some(new_short_id);
 
+            let msg = format!(
+                "Created task #{}: {}",
+                task_obj.short_id.unwrap_or_default(),
+                task_obj.name
+            );
             if !opts.quiet() {
                 if interactive {
-                    cliclack::outro(format!(
-                        "Created task #{}: {}",
-                        task_obj.short_id.unwrap_or_default(),
-                        task_obj.name
-                    ))?;
+                    cliclack::outro(&msg)?;
                 } else {
-                    println!(
-                        "Created task #{}: {}",
-                        task_obj.short_id.unwrap_or_default(),
-                        task_obj.name
-                    );
+                    println!("{msg}");
                 }
                 if opts.verbose() {
                     crate::output::print_rows(&crate::output::task_rows(&task_obj));
                 }
             }
+            Some(msg)
         }
         TaskKind::Recurring => {
             // Create new recurring task via interactive flow, with an
@@ -309,7 +307,7 @@ pub(super) async fn create_task_command(
             // `im ! %<interval> <name>` and an optional body from the body
             // delimiter (editor only when the delimiter is bare — no
             // delimiter means no body).
-            create_recurring_task(pool, config, opts, prefill, body, interval).await?;
+            create_recurring_task(pool, config, opts, prefill, body, interval).await?
         }
         TaskKind::Scheduled => {
             // Scheduled task creation: `! @<time> [:name] [%<duration>]`.
@@ -347,24 +345,26 @@ pub(super) async fn create_task_command(
                 task_obj.id = Some(new_id);
                 task_obj.short_id = Some(new_short_id);
 
+                let msg = format!(
+                    "Created task #{}: {}",
+                    task_obj.short_id.unwrap_or_default(),
+                    task_obj.name
+                );
                 if !opts.quiet() {
-                    println!(
-                        "Created task #{}: {}",
-                        task_obj.short_id.unwrap_or_default(),
-                        task_obj.name
-                    );
+                    println!("{msg}");
                     if opts.verbose() {
                         crate::output::print_rows(&crate::output::task_rows(&task_obj));
                     }
                 }
+                Some(msg)
             } else {
                 create_scheduled_task(pool, config, opts, name, start_epoch, duration_secs, body)
-                    .await?;
+                    .await?
             }
         }
-    }
+    };
 
-    Ok(())
+    Ok(created)
 }
 
 /// Interactive recurring creation flow (`im ! %<interval> [name]`). Prompts
@@ -378,7 +378,7 @@ async fn create_recurring_task(
     prefill: Option<String>,
     body: Result<String, usize>,
     cl_interval: Option<String>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     use crate::date::parse_span;
 
     if !atty::is(atty::Stream::Stdin) {
@@ -534,7 +534,7 @@ async fn create_recurring_task(
             "save" => break,
             "cancel" => {
                 cliclack::outro_cancel("Cancelled.")?;
-                return Ok(());
+                return Ok(None);
             }
             _ => unreachable!(),
         }
@@ -558,18 +558,19 @@ async fn create_recurring_task(
     task_obj.id = Some(new_id);
     task_obj.short_id = Some(new_short_id);
 
+    let msg = format!(
+        "Created task #{}: {}",
+        task_obj.short_id.unwrap_or_default(),
+        task_obj.name
+    );
     if !_opts.quiet() {
-        cliclack::outro(format!(
-            "Created task #{}: {}",
-            task_obj.short_id.unwrap_or_default(),
-            task_obj.name
-        ))?;
+        cliclack::outro(&msg)?;
         if _opts.verbose() {
             crate::output::print_rows(&crate::output::task_rows(&task_obj));
         }
     }
 
-    Ok(())
+    Ok(Some(msg))
 }
 
 /// Interactive scheduled creation flow (`! @<time> [:name] [%<duration>]`
@@ -584,7 +585,7 @@ async fn create_scheduled_task(
     start: Option<i64>,
     duration: Option<i64>,
     body: Result<String, usize>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     if !atty::is(atty::Stream::Stdin) {
         anyhow::bail!("Scheduled task creation requires an interactive terminal");
     }
@@ -685,7 +686,7 @@ async fn create_scheduled_task(
             "save" => break,
             "cancel" => {
                 cliclack::outro_cancel("Cancelled.")?;
-                return Ok(());
+                return Ok(None);
             }
             _ => unreachable!(),
         }
@@ -709,18 +710,19 @@ async fn create_scheduled_task(
     task_obj.id = Some(new_id);
     task_obj.short_id = Some(new_short_id);
 
+    let msg = format!(
+        "Created task #{}: {}",
+        task_obj.short_id.unwrap_or_default(),
+        task_obj.name
+    );
     if !opts.quiet() {
-        cliclack::outro(format!(
-            "Created task #{}: {}",
-            task_obj.short_id.unwrap_or_default(),
-            task_obj.name
-        ))?;
+        cliclack::outro(&msg)?;
         if opts.verbose() {
             crate::output::print_rows(&crate::output::task_rows(&task_obj));
         }
     }
 
-    Ok(())
+    Ok(Some(msg))
 }
 
 /// Validate a task name: non-empty after trimming and free of tab

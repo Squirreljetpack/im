@@ -30,7 +30,7 @@ use crate::ui::action::ImAction;
 use crate::ui::mm_config::get_mm_cfg;
 use crate::ui::overlays::{ConfirmOverlay, InputOverlay, SharedOverlay};
 use crate::ui::tasks::{
-    TaskCtx, TasksApp, handler, repopulate, run_edit, task_columns, tasks_accept_hook,
+    TaskCtx, TasksApp, handler, repopulate, run_execute, task_columns, tasks_accept_hook,
 };
 
 /// A picker over pending tasks (the oneshot parent picker).
@@ -61,7 +61,9 @@ impl OneshotPickerApp {
         binds.filter_action(|a| {
             !matches!(
                 a,
-                MMAction::Custom(ImAction::Yesterday | ImAction::Tomorrow)
+                MMAction::Custom(
+                    ImAction::Yesterday | ImAction::Tomorrow | ImAction::Create | ImAction::Sync
+                )
             )
         });
         // The picker is full-width: no preview pane.
@@ -107,7 +109,6 @@ impl OneshotPickerApp {
             tx: render_tx.clone(),
             confirm: confirm_ov.clone(),
             input: input_ov.clone(),
-            edit: Arc::new(Mutex::new(None)),
         };
 
         // The initializer runs once before the first frame: prime the list
@@ -118,10 +119,10 @@ impl OneshotPickerApp {
             move |state| repopulate(state, &ctx)
         });
 
-        // External editor (Edit on a task row): same flow as the tasks view.
+        // Execute flows (Edit on a task row): same flow as the tasks view.
         mm.register_interrupt_handler(Interrupt::Execute, {
             let ctx = ctx.clone();
-            move |_state| run_edit(&ctx)
+            move |state| run_execute(state, &ctx)
         });
 
         options = options.ext_handler(move |action: ImAction, state| {

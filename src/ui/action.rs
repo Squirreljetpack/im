@@ -21,6 +21,10 @@ pub enum ImAction {
     ToggleSort,
     /// Reload data from the database.
     Refresh,
+    /// Open the creation menu (mood/tracker entry/session/task kinds).
+    Create,
+    /// Run `im :sync` in-process.
+    Sync,
     /// Exit the TUI.
     Quit,
     /// Internal: repopulate the worker from the shared view state.
@@ -30,10 +34,32 @@ pub enum ImAction {
     /// Dispatched by async tasks that had to fetch payload data first;
     /// not user-bindable.
     EditExecute,
+    /// Internal: show a success toast. Dispatched by async flows; not
+    /// user-bindable.
+    Toast(String),
+    /// Internal: show an error toast. Dispatched by async flows; not
+    /// user-bindable.
+    ToastError(String),
     /// Shift the today view to the previous day.
     Yesterday,
     /// Shift the today view to the next day.
     Tomorrow,
+}
+
+/// Discriminant carried by `Interrupt::Execute` for the TUI's in-process
+/// execute flows. The render thread stages one with
+/// [`crate::ui::execute::raise`]; the interrupt handler dispatches on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum ExecuteAction {
+    /// `$EDITOR` body flows; the payload is staged in the view context.
+    EditBody = 0,
+    /// The `im +<task>` field editor; the payload is the task id.
+    EditTask = 1,
+    /// The creation menu.
+    Create = 2,
+    /// `im :sync`.
+    Sync = 3,
 }
 
 impl FromStr for ImAction {
@@ -49,6 +75,8 @@ impl FromStr for ImAction {
             "CycleFilter" => Ok(ImAction::CycleFilter),
             "ToggleSort" => Ok(ImAction::ToggleSort),
             "Refresh" => Ok(ImAction::Refresh),
+            "Create" => Ok(ImAction::Create),
+            "Sync" => Ok(ImAction::Sync),
             "Quit" => Ok(ImAction::Quit),
             "Repopulate" => Ok(ImAction::Repopulate),
             "EditExecute" => Ok(ImAction::EditExecute),

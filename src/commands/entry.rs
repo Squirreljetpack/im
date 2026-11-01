@@ -15,7 +15,7 @@ pub(super) async fn record_entry(
     config: &Config,
     opts: &CliOpts,
     entry: Entry,
-) -> Result<()> {
+) -> Result<bool> {
     let is_session = entry.duration.is_some();
     if is_session && !atty::is(atty::Stream::Stdin) {
         anyhow::bail!("Mood sessions require an interactive terminal");
@@ -131,8 +131,9 @@ pub(super) async fn record_entry(
         let thoughts: String = match thoughts_res {
             Ok(t) => t,
             Err(_) => {
-                // Ctrl-C aborts and skips recording the session (return Ok).
-                return Ok(());
+                // Ctrl-C aborts and skips recording the session (not an
+                // error, but nothing was written).
+                return Ok(false);
             }
         };
 
@@ -349,9 +350,10 @@ pub(super) async fn record_entry(
         }
     }
 
+    let wrote = mood_id.is_some() || !entry_obj.trackers.is_empty() || entry_count.is_some();
     crate::output::display_entry(config, &entry_obj, opts)?;
 
-    Ok(())
+    Ok(wrote)
 }
 
 /// The `[start, end)` replacement slot containing `time_epoch` for a

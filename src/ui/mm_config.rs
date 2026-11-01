@@ -53,6 +53,8 @@ pub fn default_binds() -> BindMap<ImAction> {
         key!(ctrl-s) => ImAction::CycleFilter,
         key!(delete), key!(ctrl-h) => ImAction::Delete,
         key!(ctrl-e) => ImAction::Edit,
+        key!(ctrl-n) => ImAction::Create,
+        key!(ctrl-y) => ImAction::Sync,
         key!(ctrl-l) => ImAction::Link,
         key!(ctrl-r) => ImAction::Refresh,
             // Day-shift (today view only): move the anchored day back/forward.

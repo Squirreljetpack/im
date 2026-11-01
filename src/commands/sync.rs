@@ -22,7 +22,7 @@ use crate::sync::session::{self, Resurrect, sync_once};
 use crate::tracker::TrackerSlots;
 
 /// `im :sync` — sync, or manage the account this device syncs with.
-pub(super) async fn sync_command(
+pub(crate) async fn sync_command(
     pool: &SqlitePool,
     config: &Config,
     sub: Option<SyncSubcommand>,

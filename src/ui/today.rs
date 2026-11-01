@@ -27,8 +27,9 @@ use crate::task::{
 };
 use crate::today::{EntryKind, TodayEntry, fetch_today_entries};
 use crate::types::{TaskKind, TodayHorizon, ViewVariant};
-use crate::ui::action::ImAction;
+use crate::ui::action::{ExecuteAction, ImAction};
 use crate::ui::common::BADGE_GAP;
+use crate::ui::execute;
 use crate::ui::mm_config::get_mm_cfg;
 use crate::ui::overlays::{
     ConfirmOverlay, ConfirmPrompt, InputOverlay, InputPrompt, SharedOverlay,
@@ -360,11 +361,11 @@ impl TodayApp {
         };
         let _ = color_tx.send(initial_rows);
 
-        // External editor: `Interrupt::Execute` runs with the TUI exited and
-        // the event loop paused, so $EDITOR owns the terminal.
+        // Execute flows: matchmaker runs the handler with the TUI exited and
+        // the event loop paused, so the interactive flows own the terminal.
         mm.register_interrupt_handler(Interrupt::Execute, {
             let ctx = ctx.clone();
-            move |_state| run_edit(&ctx)
+            move |state| run_execute(state, &ctx)
         });
 
         if let Some(event_loop) = cfg.event_loop {
@@ -418,10 +419,6 @@ struct TodayCtx {
 /// Payload staged by the Edit action and consumed by the editor interrupt
 /// handler while the TUI is suspended.
 enum EditPayload {
-    TaskBody {
-        id: Id,
-        body: String,
-    },
     MoodBody {
         id: Id,
         body: String,
@@ -510,8 +507,6 @@ fn handler(action: ImAction, state: &mut MMState<'_, TodayEntry, ()>, ctx: &Toda
             };
             edit_selected(ctx, state, &entry);
         }
-        // The editor payload may be staged from an async task (live task
-        // fetch); EditExecute raises the interrupt once it is staged.
         ImAction::Yesterday | ImAction::Tomorrow => {
             let forward = matches!(action, ImAction::Tomorrow);
             let ctx = ctx.clone();
@@ -569,10 +564,41 @@ fn handler(action: ImAction, state: &mut MMState<'_, TodayEntry, ()>, ctx: &Toda
             });
         }
 
+        ImAction::Create => execute::raise(state, ExecuteAction::Create, String::new()),
+        ImAction::Sync => execute::raise(state, ExecuteAction::Sync, String::new()),
+
+        // An editor payload may be staged from an async task (after a live
+        // mood fetch); EditExecute raises the interrupt once it is staged.
         ImAction::EditExecute => {
-            state.set_interrupt(Interrupt::Execute, String::new());
+            execute::raise(state, ExecuteAction::EditBody, String::new());
         }
+        ImAction::Toast(_) | ImAction::ToastError(_) => {}
     }
+}
+
+/// Run the staged in-process execute flow, then refresh the view.
+fn run_execute(state: &mut MMState<'_, TodayEntry, ()>, ctx: &TodayCtx) {
+    let fullscreen = ctx.view.lock().unwrap().fullscreen;
+    match execute::take(state) {
+        // Body edits keep their staged payload and run the $EDITOR flow.
+        Some(ExecuteAction::EditBody) => {
+            run_edit(ctx);
+            return;
+        }
+        Some(ExecuteAction::EditTask) => {
+            let Some(id) = state.payload().parse::<Id>().ok() else {
+                return;
+            };
+            execute::edit_task(state, fullscreen, id);
+        }
+        Some(ExecuteAction::Create) => execute::create(state, fullscreen, true),
+        Some(ExecuteAction::Sync) => execute::sync(state),
+        None => return,
+    }
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        refresh_today(&ctx).await;
+    });
 }
 
 /// Rebuild the worker from the shared view state, refresh the ui border
@@ -1124,36 +1150,19 @@ async fn resolve_link_target(kind: LinkKind, typed: &str) -> Option<Id> {
         .flatten()
 }
 
-/// Edit the selected entry: task/mood bodies and text-tracker payloads
-/// open the external editor (TUI suspended via `Interrupt::Execute`);
-/// number/float trackers open an in-TUI input overlay validated against
-/// the tracker kind.
+/// Edit the selected entry: tasks open the interactive field editor; mood
+/// bodies and text-tracker payloads open the external editor (TUI suspended
+/// via `Interrupt::Execute`); number/float trackers open an in-TUI input
+/// overlay validated against the tracker kind.
 fn edit_selected(ctx: &TodayCtx, state: &mut MMState<'_, TodayEntry, ()>, entry: &TodayEntry) {
     match entry.kind {
         EntryKind::Task(_) => {
-            if let Some(window) = &entry.recurring_window {
-                *ctx.edit.lock().unwrap() = Some(EditPayload::TaskBody {
-                    id: window.task.id,
-                    body: window.task.body.clone(),
-                });
-                state.set_interrupt(Interrupt::Execute, String::new());
-            } else if let Some(task_id) = entry.task_id {
-                let edit = ctx.edit.clone();
-                let tx = ctx.tx.clone();
-                tokio::spawn(async move {
-                    if let Ok(Some(task)) =
-                        crate::db::fetch_task_by_id(&pool(), task_id, crate::date::now()).await
-                    {
-                        *edit.lock().unwrap() = Some(EditPayload::TaskBody {
-                            id: task.id,
-                            body: task.body,
-                        });
-                        let _ = tx.send(RenderCommand::Action(MMAction::Custom(
-                            ImAction::EditExecute,
-                        )));
-                    }
-                });
-            }
+            let task_id = match (&entry.recurring_window, entry.task_id) {
+                (Some(window), _) => window.task.id,
+                (None, Some(id)) => id,
+                (None, None) => return,
+            };
+            execute::raise(state, ExecuteAction::EditTask, task_id.to_string());
         }
         EntryKind::Tracker(kind) => {
             let Some(tracker_id) = entry.id else { return };
@@ -1169,7 +1178,7 @@ fn edit_selected(ctx: &TodayCtx, state: &mut MMState<'_, TodayEntry, ()>, entry:
                         tracker_type: tracker_type.trim().to_string(),
                         value: current.trim().to_string(),
                     });
-                    state.set_interrupt(Interrupt::Execute, String::new());
+                    execute::raise(state, ExecuteAction::EditBody, String::new());
                 }
                 // Integer/Float/Duration payloads route to the Update
                 // prompt — the same overlay as Accept on the row.
@@ -1189,7 +1198,7 @@ fn edit_selected(ctx: &TodayCtx, state: &mut MMState<'_, TodayEntry, ()>, entry:
                 id,
                 body: entry.body.clone(),
             });
-            state.set_interrupt(Interrupt::Execute, String::new());
+            execute::raise(state, ExecuteAction::EditBody, String::new());
         }
     }
 }
@@ -1202,15 +1211,6 @@ fn run_edit(ctx: &TodayCtx) {
     };
     let ctx = ctx.clone();
     match payload {
-        EditPayload::TaskBody { id, body } => match crate::editor::open_editor_on_text(&body) {
-            Ok(new_body) => {
-                tokio::spawn(async move {
-                    let _ = crate::db::update_todo_body(&pool(), id, &new_body).await;
-                    refresh_today(&ctx).await;
-                });
-            }
-            Err(e) => log::error!("Editor: {e}"),
-        },
         EditPayload::MoodBody { id, body } => match crate::editor::open_editor_on_text(&body) {
             Ok(new_body) => {
                 tokio::spawn(async move {
