@@ -1840,6 +1840,12 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_db_doctor() {
+        let cmd = parse_from(args(&[":db", "doctor"])).unwrap();
+        assert_eq!(cmd, Command::Db(DbSubcommand::Doctor));
+    }
+
+    #[test]
     fn test_parse_mood() {
         let cmd = parse_from(args(&[":tool", "mood", "drained"])).unwrap();
         match cmd {

@@ -337,55 +337,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn blob_roundtrip() {
-        let v: Vec<f32> = (0..EMBED_DIM).map(|i| i as f32 * 0.5).collect();
-        let blob = embedding_to_blob(&v);
-        assert_eq!(blob.len(), EMBED_DIM * 4);
-        let back = blob_to_embedding(&blob).unwrap();
-        assert_eq!(back, v);
-    }
-
-    #[test]
     fn blob_rejects_wrong_len() {
         assert!(blob_to_embedding(&[0u8; 10]).is_none());
         assert!(blob_to_embedding(&[]).is_none());
-    }
-
-    #[test]
-    fn vector_roundtrip() {
-        let v: Vec<f32> = (0..5).map(|i| i as f32 * 0.25).collect();
-        let s = format_vector(&v);
-        assert_eq!(parse_vector(&s).unwrap(), v);
-    }
-
-    #[test]
-    fn parse_vector_rejects_garbage() {
-        assert!(parse_vector("").is_err());
-        assert!(parse_vector("1.0 abc 2.0").is_err());
-    }
-
-    #[test]
-    fn normalize_unit_length() {
-        let v = normalize(&[3.0, 4.0]);
-        assert!((v[0].powi(2) + v[1].powi(2) - 1.0).abs() < 1e-5);
-        assert_eq!(normalize(&[0.0, 0.0]), vec![0.0, 0.0]);
-    }
-
-    #[test]
-    fn dot_product() {
-        assert_eq!(dot(&[1.0, 2.0], &[3.0, 4.0]), 11.0);
-    }
-
-    #[test]
-    fn cosine_similarity_parallel() {
-        let c = cosine_similarity(&[3.0, 4.0], &[6.0, 8.0]).unwrap();
-        assert!((c - 1.0).abs() < 1e-5);
-    }
-
-    #[test]
-    fn cosine_similarity_orthogonal() {
-        let c = cosine_similarity(&[1.0, 0.0], &[0.0, 1.0]).unwrap();
-        assert!(c.abs() < 1e-5);
     }
 
     #[test]

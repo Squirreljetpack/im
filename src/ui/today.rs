@@ -318,7 +318,7 @@ impl TodayApp {
         let bg_render_tx = render_tx.clone();
         let backfill = config().moods.backfill;
         let bg_axes = axes;
-        tokio::spawn(async move {
+        let color_task = tokio::spawn(async move {
             let pool_opt = if backfill { Some(&pool) } else { None };
             if let Ok(axes) = bg_axes
                 .get_or_try_init(|| crate::color::ColorAxes::build(&pool, &config().moods))
@@ -386,7 +386,12 @@ impl TodayApp {
             action.into()
         });
 
-        match mm.pick(options).await {
+        let result = mm.pick(options).await;
+        // The view owns the background color fill: stop it once the loop
+        // exits, so nothing keeps querying the pool after the view is gone.
+        color_task.abort();
+        let _ = color_task.await;
+        match result {
             Ok(_) | Err(MatchError::NoMatch) | Err(MatchError::Abort(_)) => Ok(()),
             Err(e) => Err(e.into()),
         }

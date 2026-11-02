@@ -10,7 +10,6 @@
 
 use im::{
     config::Config,
-    db::test_pool,
     types::{TodayHorizon, ViewVariant},
     ui::today::{TodayApp, TodayRunCfg},
 };
@@ -19,12 +18,62 @@ use matchmaker::{
     tui::IoStream,
 };
 use ratatui::layout::Rect;
-use sqlx::SqlitePool;
+use sqlx::{
+    SqlitePool,
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Serialize headless TUI tests: they all share the global capture buffer.
 static TUI_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The process-wide pool, cleared of every row.
+///
+/// The view reads the process-wide pool, which is installed once per process
+/// (`set_pool` keeps the first one), so every test in this binary shares it
+/// and starts from a clean slate instead of seeding a pool the app never
+/// reads.
+async fn empty_pool() -> SqlitePool {
+    static POOL: tokio::sync::OnceCell<SqlitePool> = tokio::sync::OnceCell::const_new();
+    let pool = POOL
+        .get_or_init(|| async {
+            // File-backed: an in-memory database is per connection, and the
+            // pool may open a fresh connection once its previous one is
+            // dropped, which would present an empty database.
+            let path = std::env::temp_dir().join(format!("im-today-tui-{}.db", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            let options = SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true)
+                .foreign_keys(true);
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(options)
+                .await
+                .expect("test database opens");
+            im::db::create_schema(&pool)
+                .await
+                .expect("schema is created");
+            im::global::set_pool(pool.clone());
+            pool
+        })
+        .await
+        .clone();
+    // Children before parents (foreign keys are on).
+    for statement in [
+        "DELETE FROM tracker",
+        "DELETE FROM todo_completions",
+        "DELETE FROM mood",
+        "DELETE FROM todos",
+    ] {
+        sqlx::query(statement)
+            .execute(&pool)
+            .await
+            .expect("test database truncates");
+    }
+    pool
+}
 
 /// Seed a mood row "today" (within `TodayHorizon::Today`).
 async fn seed_mood(pool: &SqlitePool, mood: &str, body: &str) {
@@ -105,8 +154,7 @@ async fn today_tui_row_content_renders() {
     let _guard = TUI_LOCK.lock().await;
     matchmaker::test::clear();
 
-    let pool = test_pool().await.unwrap();
-    im::global::set_pool(pool.clone());
+    let pool = empty_pool().await;
     seed_mood(&pool, "sad", "").await;
 
     let config = Config::default();
@@ -214,12 +262,7 @@ async fn today_tui_rows_sorted_by_time() {
     let _guard = TUI_LOCK.lock().await;
     matchmaker::test::clear();
 
-    let pool = test_pool().await.unwrap();
-    im::global::set_pool(pool.clone());
-    // The integration binary installs the first pool for the whole process
-    // (later `set_pool` calls are ignored), so seed through the installed
-    // pool — the one the app actually reads.
-    let pool = im::global::pool();
+    let pool = empty_pool().await;
     let today = im::date::today_start();
     // Inserted out of order: the rendered list must still be time-sorted.
     // Regression: nucleo's default stability orders equal scores (every row
@@ -263,8 +306,7 @@ async fn today_tui_menu_title() {
     let _guard = TUI_LOCK.lock().await;
     matchmaker::test::clear();
 
-    let pool = test_pool().await.unwrap();
-    im::global::set_pool(pool.clone());
+    let pool = empty_pool().await;
     seed_mood(&pool, "sad", "").await;
     let config = Config::default();
     let app = TodayApp::new(
@@ -306,8 +348,7 @@ async fn today_tui_alt_h_help_toggles() {
     let _guard = TUI_LOCK.lock().await;
     matchmaker::test::clear();
 
-    let pool = test_pool().await.unwrap();
-    im::global::set_pool(pool.clone());
+    let pool = empty_pool().await;
     seed_mood(&pool, "sad", "").await;
     let config = Config::default();
     let app = TodayApp::new(
@@ -408,8 +449,7 @@ async fn today_tui_resize_shrinks_to_small_window() {
     let _guard = TUI_LOCK.lock().await;
     matchmaker::test::clear();
 
-    let pool = test_pool().await.unwrap();
-    im::global::set_pool(pool.clone());
+    let pool = empty_pool().await;
     seed_mood(&pool, "sad", "").await;
     seed_mood(&pool, "okay", "").await;
     let config = Config::default();

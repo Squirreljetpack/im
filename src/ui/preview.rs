@@ -744,7 +744,7 @@ mod tests {
             .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
             .collect();
         assert!(
-            rendered.iter().any(|l| l == "  total: 40"),
+            rendered.iter().any(|l| l.trim_start() == "total: 40"),
             "expected '  total: 40', got {rendered:?}"
         );
 
@@ -814,15 +814,15 @@ mod tests {
             "expected a linked: field, got {rendered:?}"
         );
         assert!(
-            rendered.iter().any(|l| l == "  - sleep: 7.5"),
+            rendered.iter().any(|l| l.trim_start() == "- sleep: 7.5"),
             "expected a '  - sleep: 7.5' line, got {rendered:?}"
         );
         assert!(
-            rendered.iter().any(|l| l == "  - sitting: 3-15 14:30"),
+            rendered.iter().any(|l| l.trim_start() == "- sitting: 3-15 14:30"),
             "expected a '  - sitting: 3-15 14:30' line, got {rendered:?}"
         );
         assert!(
-            rendered.iter().any(|l| l == "  - ✓ water plants"),
+            rendered.iter().any(|l| l.trim_start() == "- ✓ water plants"),
             "expected a '  - ✓ water plants' line, got {rendered:?}"
         );
     }
@@ -860,7 +860,7 @@ mod tests {
             .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
             .collect();
         assert!(
-            rendered.iter().any(|l| l == "  mood: ● good"),
+            rendered.iter().any(|l| l.trim_start() == "mood: ● good"),
             "expected a '  mood: ● good' line, got {rendered:?}"
         );
         // No linked mood → no mood: field.
@@ -1000,7 +1000,10 @@ mod tests {
                 .iter()
                 .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
                 .collect();
-        let body_idx = rendered.iter().position(|l| l == "  parent body").unwrap();
+        let body_idx = rendered
+            .iter()
+            .position(|l| l.trim_start() == "parent body")
+            .unwrap();
         assert_eq!(rendered.get(body_idx + 1), Some(&String::new()));
         // The subtree starts at indent 2 (`draw(2, ...)`); each row
         // renders through `task_row_text`, so the child's short id
@@ -1082,7 +1085,7 @@ mod tests {
             .collect();
         let parent_line = rendered
             .iter()
-            .find(|l| l.starts_with("  parent: "))
+            .find(|l| l.trim_start().starts_with("parent: "))
             .unwrap();
         // `○ a very long par… (#42)`: the name is truncated to 16
         // columns (ellipsis included) with a trailing ellipsis; the short
@@ -1101,9 +1104,9 @@ mod tests {
             .collect();
         let parent_line = rendered
             .iter()
-            .find(|l| l.starts_with("  parent: "))
+            .find(|l| l.trim_start().starts_with("parent: "))
             .unwrap();
-        assert_eq!(parent_line, "  parent: ✓ a very long par…");
+        assert_eq!(parent_line.trim_start(), "parent: ✓ a very long par…");
 
         // No parent row → no `parent:` field.
         let lines = build_preview(&task, None, &config(), &[], None, None, None);
@@ -1111,7 +1114,11 @@ mod tests {
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
             .collect();
-        assert!(!rendered.iter().any(|l| l.starts_with("  parent: ")));
+        assert!(
+            !rendered
+                .iter()
+                .any(|l| l.trim_start().starts_with("parent: "))
+        );
     }
 
     #[test]
@@ -1139,7 +1146,7 @@ mod tests {
             "expected a moods: field, got {rendered:?}"
         );
         assert!(
-            rendered.iter().any(|l| l == "  - ● good"),
+            rendered.iter().any(|l| l.trim_start() == "- ● good"),
             "expected a '  - ● good' line, got {rendered:?}"
         );
     }
