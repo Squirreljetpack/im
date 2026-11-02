@@ -6057,6 +6057,57 @@ async fn test_fetch_today_entries_carries_tracker_ids() {
 }
 
 #[tokio::test]
+async fn test_null_tracker_entry_badge_uses_palette() {
+    // Null tracker entries label themselves with the bare tracker name (no
+    // `: value` suffix), so the today view's badge used to fail the label
+    // lookup and paint them with the neutral fallback instead of the
+    // tracker's own palette.
+    let pool = test_pool().await.unwrap();
+    let (first, last) = (
+        crossterm::style::Color::Rgb { r: 1, g: 2, b: 3 },
+        crossterm::style::Color::Rgb { r: 4, g: 5, b: 6 },
+    );
+    let mut config = Config::default();
+    config.tracker.insert(
+        "sleep".to_string(),
+        im::config::TrackerSetting {
+            kind: TrackerKind::Null,
+            interval: Some(day_interval()),
+            low: Some(20.0 * 3600.0),
+            high: Some(4.0 * 3600.0),
+            colors: Ok(im::config::ColorBins::from(vec![first, last])),
+            ..Default::default()
+        },
+    );
+    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'sleep', 0, ?)")
+        .bind(im::db::Id::new())
+        .bind(im::date::now())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
+        &pool,
+        &config,
+        im::types::TodayHorizon::Today,
+        im::date::today_start(),
+        im::types::ViewVariant::All,
+    )
+    .await
+    .unwrap();
+    let entry = entries
+        .iter()
+        .find(|e| e.kind == im::today::EntryKind::Tracker(TrackerKind::Null))
+        .expect("null tracker entry must appear in today view");
+    let (_, color) = entry.badge(&config);
+    use ratatui::{backend::FromCrossterm, style::Color as RatColor};
+    assert!(
+        color == RatColor::from_crossterm(first) || color == RatColor::from_crossterm(last),
+        "null tracker badge must come from the tracker palette, got {color:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_fetch_today_entries_completed_task_has_check_badge() {
     // The today view renders one row per task; a completed task's row
     // carries the ✓ badge — completion rows are no longer emitted (WP9 9e).

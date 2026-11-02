@@ -273,6 +273,10 @@ impl TasksApp {
         });
 
         options = options.ext_handler(move |action: ImAction, state| handler(action, state, &ctx));
+        options = options.ext_aliaser(|action, state| {
+            crate::ui::toast::clear_on_cursor_move(state, &action);
+            action.into()
+        });
 
         match mm.pick(options).await {
             Ok(_) | Err(MatchError::NoMatch) | Err(MatchError::Abort(_)) => Ok(()),
@@ -599,6 +603,7 @@ async fn run_task_accept(ctx: &TaskCtx, task: TaskRow) {
             let task_id = task.id;
             let prompt = InputPrompt {
                 title: "Update".to_string(),
+                hint: None,
                 label: "Count: ".to_string(),
                 placeholder: Some("1".to_string()),
                 input: String::new(),

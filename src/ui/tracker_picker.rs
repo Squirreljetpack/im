@@ -16,7 +16,7 @@ use matchmaker::{
 };
 use ratatui::{
     backend::FromCrossterm,
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span, Text},
 };
 use std::sync::{
@@ -29,14 +29,16 @@ use crate::config::{Config, TrackerKind, TrackerSetting};
 use crate::date;
 use crate::db::{EntryObject, TrackerObject, TrackerValue};
 use crate::global::pool;
-use crate::tracker::{enforce_strict, null_zone_contains, parse_tracker_value, text_len_chars};
+use crate::tracker::{enforce_strict, null_zone_contains, parse_tracker_value};
 use crate::ui::action::ImAction;
 use crate::ui::mm_config::get_mm_cfg;
 use crate::ui::overlays::{
     ConfirmOverlay, ConfirmPrompt, InputOverlay, InputPrompt, SharedOverlay,
 };
 use crate::ui::previewer::Previewer;
+use crate::ui::styles;
 use crate::ui::toast::{self, Level};
+use crate::ui::tracker_prompt;
 
 /// One row in the picker: the tracker's config key and its resolved settings
 /// (cloned so the worker owns a `'static` copy).
@@ -51,7 +53,7 @@ pub struct TrackerRow {
 /// like the other previews.
 fn field_line(label: &str, value: String) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("  {}: ", label), Style::default().fg(Color::Yellow)),
+        Span::styled(format!("  {}: ", label), styles::INPUT_LABEL),
         Span::raw(value),
     ])
 }
@@ -64,6 +66,28 @@ fn kind_label(kind: TrackerKind) -> &'static str {
         TrackerKind::Float => "float",
         TrackerKind::Duration => "duration",
         TrackerKind::Null => "null",
+    }
+}
+
+/// Render a low/high bound in the units that kind logs in: durations as
+/// `6m 30s`, text as a character count, null replace offsets as durations,
+/// and everything else as a plain number.
+fn bound_label(setting: &TrackerSetting, value: f64) -> String {
+    match setting.kind {
+        TrackerKind::Duration => date::format_tracker_duration(value),
+        TrackerKind::Text => {
+            let n = value.round() as i64;
+            if n == 1 {
+                "1 char".to_string()
+            } else {
+                format!("{n} chars")
+            }
+        }
+        TrackerKind::Null => match setting.interval {
+            Some(iv) if !iv.cumulative => date::format_tracker_duration(value),
+            _ => (value.round() as i64).to_string(),
+        },
+        _ => value.to_string(),
     }
 }
 
@@ -84,13 +108,10 @@ fn build_tracker_preview(
     lines.push(Line::default());
 
     // Header: the tracker name, uncolored, over a rule.
-    lines.push(Line::from(Span::styled(
-        format!(" {name}"),
-        Style::default().add_modifier(Modifier::BOLD),
-    )));
+    lines.push(Line::from(Span::styled(format!(" {name}"), styles::HEADER)));
     lines.push(Line::from(Span::styled(
         "─".repeat(name.len() + 2),
-        Style::default().fg(Color::DarkGray),
+        styles::HINT,
     )));
 
     // Blank line, then the fields (kind leads them).
@@ -102,11 +123,11 @@ fn build_tracker_preview(
     if setting.low.is_some() || setting.high.is_some() {
         let low = setting
             .low
-            .map(|v| v.to_string())
+            .map(|v| bound_label(setting, v))
             .unwrap_or_else(|| "-".into());
         let high = setting
             .high
-            .map(|v| v.to_string())
+            .map(|v| bound_label(setting, v))
             .unwrap_or_else(|| "-".into());
         lines.push(field_line("min", low));
         lines.push(field_line("max", high));
@@ -134,7 +155,9 @@ fn build_tracker_preview(
     // The palette stores crossterm colors; convert to ratatui colors for
     // styling the cells.
     let rat_colors: Vec<Color> = palette.iter().map(|c| Color::from_crossterm(*c)).collect();
-    let mut cells: Vec<Span<'static>> = Vec::with_capacity(rat_colors.len() * 2);
+    let mut cells: Vec<Span<'static>> = Vec::with_capacity(rat_colors.len() * 2 + 1);
+    // Align the strip with the two-space indent of the field lines.
+    cells.push(Span::raw("  "));
     for color in &rat_colors {
         cells.push(Span::styled("  ", Style::default().bg(*color)));
         cells.push(Span::raw(" "));
@@ -309,6 +332,10 @@ pub async fn run_trackers_app(config: &Config) -> Result<bool> {
 
     let logged = ctx.logged.clone();
     options = options.ext_handler(move |action: ImAction, state| handler(action, state, &ctx));
+    options = options.ext_aliaser(|action, state| {
+        crate::ui::toast::clear_on_cursor_move(state, &action);
+        action.into()
+    });
 
     match mm.pick(options).await {
         Ok(_) | Err(MatchError::NoMatch) | Err(MatchError::Abort(_)) => {
@@ -334,12 +361,53 @@ fn handler(action: ImAction, state: &mut MMState<'_, TrackerRow, ()>, ctx: &Trac
 fn entry_prompt(ctx: TrackerCtx, row: TrackerRow) {
     match row.setting.kind {
         TrackerKind::Null => {
+            if row.setting.interval.is_none() {
+                ctx.error(format!(
+                    "tracker '{}' requires an interval to log",
+                    row.name
+                ));
+                return;
+            }
+            if row.setting.strict && !null_zone_contains(&row.setting, date::now()) {
+                ctx.error(format!(
+                    "tracker '{}': cannot log now — {}",
+                    row.name,
+                    null_strict_hint(&row.setting)
+                ));
+                return;
+            }
             let prompt = null_confirm(row, ctx.clone());
             open_confirm(ctx, prompt);
         }
         _ => {
-            let prompt = value_prompt(row, ctx.clone());
-            open_input(ctx, prompt);
+            let now = date::now();
+            let slot = row
+                .setting
+                .interval
+                .and_then(|iv| date::interval_slot_unix_secs(iv.anchor, iv.span, now));
+            let replacing = row.setting.interval.is_some_and(|iv| !iv.cumulative);
+            if replacing && slot.is_none() {
+                ctx.error(format!(
+                    "tracker '{}': could not compute the interval slot",
+                    row.name
+                ));
+                return;
+            }
+            if replacing {
+                let ctx2 = ctx.clone();
+                let row2 = row.clone();
+                tokio::spawn(async move {
+                    let replaced = match slot {
+                        Some(slot) => replaced_value(&row2, slot).await,
+                        None => None,
+                    };
+                    let prompt = value_prompt(row2, ctx2.clone(), slot, replaced);
+                    open_input(ctx2, prompt);
+                });
+            } else {
+                let prompt = value_prompt(row, ctx.clone(), slot, None);
+                open_input(ctx, prompt);
+            }
         }
     }
 }
@@ -356,29 +424,9 @@ fn open_input(ctx: TrackerCtx, prompt: InputPrompt) {
     let _ = ctx.tx.send(RenderCommand::Action(MMAction::Overlay(1)));
 }
 
-/// Null trackers take no value: Enter is a confirm to log one at now. The
-/// confirm shows the interval behavior (replace vs accumulate) and whether a
-/// strict time zone applies.
+/// Null trackers take no value: Enter is a confirm to log one now.
 fn null_confirm(row: TrackerRow, ctx: TrackerCtx) -> ConfirmPrompt {
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            "Log",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::ITALIC),
-        ),
-        Span::raw(format!(" '{}' now?", row.name)),
-    ])];
-    lines.push(Line::from(Span::styled(
-        format!("  {}", interval_hint(&row.setting)),
-        Style::default().fg(Color::DarkGray),
-    )));
-    if row.setting.strict {
-        lines.push(Line::from(Span::styled(
-            "  strict: only inside its configured time zone",
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
+    let lines = vec![Line::from(format!("Log '{}'?", row.name))];
 
     let name = row.name.clone();
     let setting = row.setting.clone();
@@ -400,40 +448,30 @@ fn null_confirm(row: TrackerRow, ctx: TrackerCtx) -> ConfirmPrompt {
 }
 
 /// Value-bearing trackers: a kind-filtered input, validated (form and the
-/// strict gate) as it is typed. The title says whether a submission replaces
-/// the current interval slot or appends to it.
-fn value_prompt(row: TrackerRow, ctx: TrackerCtx) -> InputPrompt {
+/// strict gate) as it is typed. The title shows the interval slot being
+/// logged; when a replace-mode slot already holds a value, it is shown above
+/// the input.
+fn value_prompt(
+    row: TrackerRow,
+    ctx: TrackerCtx,
+    slot: Option<(i64, i64)>,
+    replaced: Option<String>,
+) -> InputPrompt {
     let name = row.name.clone();
     let setting = row.setting.clone();
     let kind = setting.kind;
     let validator_name = name.clone();
     let validator_setting = setting.clone();
     InputPrompt {
-        title: log_title(&name, &setting),
+        title: log_title(&name, slot),
+        hint: replaced.map(replaces_hint),
         label: "Value: ".to_string(),
-        placeholder: None,
+        placeholder: (kind == TrackerKind::Duration).then(|| "6m 30s".to_string()),
         input: String::new(),
         error: None,
-        allowed: Some(Box::new(move |c: char| match kind {
-            TrackerKind::Integer => c.is_ascii_digit() || c == '-',
-            TrackerKind::Float => c.is_ascii_digit() || c == '-' || c == '.',
-            // humantime strings like "1h 30m": digits, letters, space, dot.
-            TrackerKind::Duration => c.is_ascii_alphanumeric() || c == ' ' || c == '.' || c == '-',
-            TrackerKind::Text => true,
-            TrackerKind::Null => false,
-        })),
+        allowed: Some(Box::new(tracker_prompt::chars(kind))),
         validator: Some(Box::new(move |s: &str| {
-            let s = s.trim();
-            if s.is_empty() {
-                return Err("requires a value".to_string());
-            }
-            let parsed =
-                parse_tracker_value(&validator_name, kind, s).map_err(|e| format!("{e:#}"))?;
-            if validator_setting.strict {
-                enforce_strict(&validator_name, &validator_setting, measure(&parsed))
-                    .map_err(|e| e.to_string())?;
-            }
-            Ok(())
+            tracker_prompt::validate(&validator_name, Some(&validator_setting), kind, s)
         })),
         on_submit: Some(Box::new(move |val| {
             let val = val.trim().to_string();
@@ -447,30 +485,99 @@ fn value_prompt(row: TrackerRow, ctx: TrackerCtx) -> InputPrompt {
     }
 }
 
-fn log_title(name: &str, setting: &TrackerSetting) -> String {
-    match setting.interval {
-        Some(iv) if iv.cumulative => format!("Log {name} (append)"),
-        Some(_) => format!("Log {name} (replace slot)"),
-        None => format!("Log {name}"),
+fn log_title(name: &str, slot: Option<(i64, i64)>) -> String {
+    match slot {
+        Some((start, end)) => format!(
+            "Log '{name}' ({} - {})",
+            date::format_datetime_short(start),
+            date::format_datetime_short(end)
+        ),
+        None => format!("Log '{name}'"),
     }
 }
 
-fn interval_hint(setting: &TrackerSetting) -> String {
-    match setting.interval {
-        Some(iv) if iv.cumulative => "appends to this interval slot".to_string(),
-        Some(_) => "replaces this interval slot's entry".to_string(),
-        None => "no interval".to_string(),
-    }
+/// The value currently in `slot` for a replace-mode tracker, formatted the
+/// way that kind displays itself. `None` when the slot is empty.
+async fn replaced_value(row: &TrackerRow, slot: (i64, i64)) -> Option<String> {
+    let (start, end) = slot;
+    let entries =
+        match crate::db::fetch_tracker_entries(&pool(), &row.name, start, end.saturating_sub(1))
+            .await
+        {
+            Ok(entries) => entries,
+            Err(e) => {
+                log::warn!("Failed to fetch the replaced tracker value: {e:#}");
+                return None;
+            }
+        };
+    let entry = entries.last()?;
+    Some(format_replaced(row.setting.kind, &entry.score))
 }
 
-/// The strict-gate measure for a parsed tracker value: the numeric score or,
-/// for text, the message length in characters.
-fn measure(value: &TrackerValue) -> f64 {
-    match value {
-        TrackerValue::Text(s) => text_len_chars(s) as f64,
-        TrackerValue::Integer(n) => *n as f64,
-        TrackerValue::Float(f) => *f,
+/// Render a stored tracker score in the tracker's own units.
+fn format_replaced(kind: TrackerKind, raw: &str) -> String {
+    let value = match kind {
+        TrackerKind::Duration => raw
+            .parse::<f64>()
+            .map(date::format_tracker_duration)
+            .unwrap_or_else(|_| raw.to_string()),
+        TrackerKind::Float => raw
+            .parse::<f64>()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|_| raw.to_string()),
+        TrackerKind::Integer => raw
+            .parse::<i64>()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|_| raw.to_string()),
+        TrackerKind::Text | TrackerKind::Null => raw.to_string(),
+    };
+    value.replace('\n', " ").replace('\r', " ")
+}
+
+/// The line above the value input: the entry the replace-mode log overwrites.
+fn replaces_hint(value: String) -> Line<'static> {
+    let value = truncate_hint(value);
+    let value = if value.is_empty() {
+        "(empty)".to_string()
+    } else {
+        value
+    };
+    Line::from(vec![
+        Span::styled("replaces:", styles::HINT_EMPHASIS),
+        Span::styled(format!(" {value}"), styles::HINT_VALUE),
+    ])
+}
+
+/// Keep an unusually long text value from turning the prompt into a wall.
+fn truncate_hint(value: String) -> String {
+    const MAX_CHARS: usize = 120;
+    if value.chars().count() <= MAX_CHARS {
+        return value;
     }
+    let mut shortened: String = value.chars().take(MAX_CHARS).collect();
+    shortened.push('…');
+    shortened
+}
+
+fn null_strict_hint(setting: &TrackerSetting) -> String {
+    let (Some(low), Some(high)) = (setting.low, setting.high) else {
+        return "strict".to_string();
+    };
+    let lo = date::format_tracker_duration(low);
+    let hi = date::format_tracker_duration(high);
+    let zone = if low == high {
+        format!("exactly at {lo}")
+    } else if low < high {
+        format!("{lo}–{hi}")
+    } else {
+        format!("{lo}–{hi} (wrap)")
+    };
+    let status = if null_zone_contains(setting, date::now()) {
+        "inside"
+    } else {
+        "outside"
+    };
+    format!("strict {zone} · now {status}")
 }
 
 /// Parse, strict-gate, and insert one tracker entry — the same pipeline as
@@ -487,7 +594,8 @@ async fn insert_entry(ctx: &TrackerCtx, name: &str, setting: &TrackerSetting, ra
             };
             if setting.strict && !null_zone_contains(setting, now) {
                 ctx.error(format!(
-                    "tracker '{name}': cannot log at this time — outside the strict zone"
+                    "tracker '{name}': cannot log now — {}",
+                    null_strict_hint(setting)
                 ));
                 return;
             }
@@ -516,14 +624,27 @@ async fn insert_entry(ctx: &TrackerCtx, name: &str, setting: &TrackerSetting, ra
                 }
             };
             if setting.strict
-                && let Err(e) = enforce_strict(name, setting, measure(&value))
+                && enforce_strict(name, setting, tracker_prompt::measure(&value)).is_err()
             {
-                ctx.error(e);
+                ctx.error(tracker_prompt::strict_message(
+                    name,
+                    setting,
+                    setting.kind,
+                    &value,
+                ));
                 return;
             }
             let replace_slot = match setting.interval {
                 Some(iv) if !iv.cumulative => {
-                    date::interval_slot_unix_secs(iv.anchor, iv.span, now)
+                    match date::interval_slot_unix_secs(iv.anchor, iv.span, now) {
+                        Some(slot) => Some(slot),
+                        None => {
+                            ctx.error(format!(
+                                "tracker '{name}': could not compute the interval slot"
+                            ));
+                            return;
+                        }
+                    }
                 }
                 _ => None,
             };

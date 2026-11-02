@@ -176,8 +176,8 @@ high = 100
 # mile run time, e.g. -mile "6m 30s"
 [tracker.mile]
 kind = "duration"
-low = "4m"
-high = "10m"
+low = "10m"
+high = "4m" # lower -> better (brighter)
 
 [tracker.win]
 kind = "text"

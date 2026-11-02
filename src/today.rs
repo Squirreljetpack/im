@@ -153,10 +153,7 @@ impl TodayEntry {
             },
             EntryKind::Tracker(_) => {
                 let glyph = config.badges.tracker.unwrap_or(TEXT_ENTRY_BADGE);
-                let Some((tracker_type, _)) = self.label.split_once(':') else {
-                    return (Some(glyph), RatColor::DarkGray);
-                };
-                let Some(tracker) = config.tracker.get(tracker_type.trim()) else {
+                let Some(tracker) = config.tracker.get(tracker_entry_type(&self.label)) else {
                     return (Some(glyph), RatColor::DarkGray);
                 };
                 (
@@ -182,6 +179,16 @@ impl TodayEntry {
             }
         }
     }
+}
+
+/// The tracker type a tracker entry's label carries: `"<type>: <value>"`
+/// for value-bearing kinds, the bare name for null markers (they have no
+/// payload to show).
+pub(crate) fn tracker_entry_type(label: &str) -> &str {
+    label
+        .split_once(':')
+        .map_or(label, |(tracker_type, _)| tracker_type)
+        .trim()
 }
 
 /// Today-view time cell for a timestamp: "HH:MM" when it falls on the

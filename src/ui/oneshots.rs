@@ -132,6 +132,11 @@ impl OneshotPickerApp {
             handler(action, state, &ctx);
         });
 
+        options = options.ext_aliaser(|action, state| {
+            crate::ui::toast::clear_on_cursor_move(state, &action);
+            action.into()
+        });
+
         match mm.pick(options).await {
             Ok(v) => Ok(v.into_iter().next()),
             Err(MatchError::NoMatch) | Err(MatchError::Abort(_)) => Ok(None),

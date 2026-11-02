@@ -76,8 +76,8 @@ Usage:
                                                         (optionally attached to a mood)
 
   im ! [name] [@<time>]                          create a task (interactive without a name)
-  im ! %[<interval>] [[:]name]                   create a recurring task (interactive)
-  im ! @[<time>] [:<name>] [%<duration>]         scheduled a task (interactive if partial)
+  im ! %[interval] [[:]name]                   create a recurring task (interactive)
+  im ! @[time] [:<name>] [%<duration>]         scheduled a task (interactive if partial)
   im +[task] [count]                             edit or update a task by its reference
                                                         (see `im -vh`)
 

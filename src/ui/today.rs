@@ -20,12 +20,12 @@ use ratatui::{
 use std::sync::{Arc, Mutex};
 
 use crate::config::{Config, TrackerKind};
-use crate::db::{Id, TaskRow, TrackerValue};
+use crate::db::{Id, TaskRow};
 use crate::global::{GLOBAL_CONFIG, config, pool};
 use crate::task::{
     AcceptAction, accept_action, apply_accept_action, apply_completion_delta, reset_task_progress,
 };
-use crate::today::{EntryKind, TodayEntry, fetch_today_entries};
+use crate::today::{EntryKind, TodayEntry, fetch_today_entries, tracker_entry_type};
 use crate::types::{TaskKind, TodayHorizon, ViewVariant};
 use crate::ui::action::{ExecuteAction, ImAction};
 use crate::ui::common::BADGE_GAP;
@@ -35,6 +35,7 @@ use crate::ui::overlays::{
     ConfirmOverlay, ConfirmPrompt, InputOverlay, InputPrompt, SharedOverlay,
 };
 use crate::ui::previewer::Previewer;
+use crate::ui::tracker_prompt;
 
 // ---------- Today View App ----------
 
@@ -380,6 +381,10 @@ impl TodayApp {
         }
 
         options = options.ext_handler(move |action: ImAction, state| handler(action, state, &ctx));
+        options = options.ext_aliaser(|action, state| {
+            crate::ui::toast::clear_on_cursor_move(state, &action);
+            action.into()
+        });
 
         match mm.pick(options).await {
             Ok(_) | Err(MatchError::NoMatch) | Err(MatchError::Abort(_)) => Ok(()),
@@ -777,7 +782,7 @@ async fn tracker_accept(ctx: &TodayCtx, kind: TrackerKind, tracker_id: Option<Id
         // the row's timestamp to now — nothing else (no score change, no
         // deletes; both modes). The move must stay within the row's current
         // interval slot, and the strict when-zone gate applies to `now`.
-        let tracker_type = label.trim();
+        let tracker_type = tracker_entry_type(label);
         let Some(setting) = config().tracker.get(tracker_type).cloned() else {
             log::error!("Unknown tracker '{tracker_type}' in today view");
             return;
@@ -824,16 +829,6 @@ async fn tracker_accept(ctx: &TodayCtx, kind: TrackerKind, tracker_id: Option<Id
     );
 }
 
-/// The strict-gate measure for a parsed tracker value: the numeric score
-/// or, for text, the message length in characters.
-fn tracker_measure(parsed: &TrackerValue) -> f64 {
-    match parsed {
-        TrackerValue::Text(s) => crate::tracker::text_len_chars(s) as f64,
-        TrackerValue::Integer(n) => *n as f64,
-        TrackerValue::Float(f) => *f,
-    }
-}
-
 /// Parse, strict-gate, and write one tracker value — the same pipeline as
 /// the CLI (`parse_tracker_value` → `enforce_strict` →
 /// `db::update_tracker_score`). Shared by the Update prompt's submit and
@@ -853,10 +848,14 @@ async fn submit_tracker_update(
         }
     };
     if let Some(setting) = config().tracker.get(tracker_type)
-        && let Err(e) =
-            crate::tracker::enforce_strict(tracker_type, setting, tracker_measure(&parsed))
+        && setting.strict
+        && crate::tracker::enforce_strict(tracker_type, setting, tracker_prompt::measure(&parsed))
+            .is_err()
     {
-        log::error!("{e}");
+        log::error!(
+            "{}",
+            tracker_prompt::strict_message(tracker_type, setting, kind, &parsed)
+        );
         return;
     }
     let _ = crate::db::update_tracker_score(&pool(), id, &parsed).await;
@@ -864,7 +863,7 @@ async fn submit_tracker_update(
 }
 
 /// The "Update:" prompt for a value-bearing tracker: kind-filtered input,
-/// validated (form and the strict gate) as it is typed, then submitted
+/// validated (form and the strict gate) on submit, then submitted
 /// through the shared strict pipeline. Used by Accept on a tracker row and
 /// by Edit on Integer/Float/Duration trackers.
 fn update_tracker_prompt(
@@ -878,30 +877,15 @@ fn update_tracker_prompt(
     let validator_type = tracker_type.clone();
     InputPrompt {
         title: "Update".to_string(),
+        hint: None,
         label: "Update: ".to_string(),
-        placeholder: None,
+        placeholder: (kind == TrackerKind::Duration).then(|| "6m 30s".to_string()),
         input: String::new(),
         error: None,
-        allowed: Some(Box::new(move |c: char| match kind {
-            TrackerKind::Integer => c.is_ascii_digit() || c == '-',
-            TrackerKind::Float => c.is_ascii_digit() || c == '-' || c == '.',
-            // humantime strings like "1h 30m": digits, letters, space, dot.
-            TrackerKind::Duration => c.is_ascii_alphanumeric() || c == ' ' || c == '.' || c == '-',
-            TrackerKind::Text => true,
-            TrackerKind::Null => false,
-        })),
+        allowed: Some(Box::new(tracker_prompt::chars(kind))),
         validator: Some(Box::new(move |s: &str| {
-            let s = s.trim();
-            if s.is_empty() {
-                return Err("requires a value".to_string());
-            }
-            let parsed = crate::tracker::parse_tracker_value(&validator_type, kind, s)
-                .map_err(|e| format!("{e:#}"))?;
-            if let Some(setting) = config().tracker.get(&validator_type) {
-                crate::tracker::enforce_strict(&validator_type, setting, tracker_measure(&parsed))
-                    .map_err(|e| e.to_string())?;
-            }
-            Ok(())
+            let setting = config().tracker.get(&validator_type);
+            tracker_prompt::validate(&validator_type, setting, kind, s)
         })),
         on_submit: Some(Box::new(move |val| {
             let val = val.trim().to_string();
@@ -949,6 +933,7 @@ async fn run_today_task_accept(ctx: &TodayCtx, task: TaskRow) {
             let task_id = task.id;
             let prompt = InputPrompt {
                 title: "Update".to_string(),
+                hint: None,
                 label: "Count: ".to_string(),
                 placeholder: Some("1".to_string()),
                 input: String::new(),
@@ -1098,6 +1083,7 @@ fn open_link(ctx: TodayCtx, entry: &TodayEntry) {
     let ctx2 = ctx.clone();
     let prompt = InputPrompt {
         title: "Link".to_string(),
+        hint: None,
         label: "Link: ".to_string(),
         placeholder: None,
         input: String::new(),

@@ -6,13 +6,14 @@ use matchmaker::{
 };
 use ratatui::{
     layout::{Alignment, Position, Rect},
-    style::{Color, Modifier, Style},
+    style::Modifier,
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, Padding, Paragraph},
+    widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
 };
 use std::sync::{Arc, Mutex};
 
 use crate::ui::action::ImAction as AppAction;
+use crate::ui::styles;
 
 /// Fired once with the chosen option index.
 pub type ConfirmCallback = Box<dyn FnOnce(usize) + Send + Sync>;
@@ -132,7 +133,7 @@ impl<T: matchmaker::SSS> Overlay<AppAction, T, ()> for ConfirmOverlay<T> {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::White))
+            .border_style(styles::OVERLAY_BORDER)
             .padding(Padding::new(2, 2, 0, 1));
         let inner_area = block.inner(area);
         frame.render_widget(block, area);
@@ -151,12 +152,9 @@ impl<T: matchmaker::SSS> Overlay<AppAction, T, ()> for ConfirmOverlay<T> {
             }
             let selected = i == self.prompt.cursor;
             let style = if selected {
-                Style::default()
-                    .bg(Color::White)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::ITALIC)
+                styles::CONFIRM_OPTION_SELECTED
             } else {
-                Style::default().add_modifier(Modifier::ITALIC)
+                styles::CONFIRM_OPTION
             };
             for (ci, ch) in label.chars().enumerate() {
                 let s = if ci == 0 {
@@ -180,6 +178,9 @@ impl<T: matchmaker::SSS> Overlay<AppAction, T, ()> for ConfirmOverlay<T> {
 pub struct InputPrompt {
     /// Border title.
     pub title: String,
+    /// Optional note rendered above the input row, e.g. the value a replace
+    /// log will overwrite.
+    pub hint: Option<Line<'static>>,
     /// Prompt label rendered before the input, flush against the border.
     pub label: String,
     /// Shown in place of the input while it is empty (e.g. the count
@@ -202,6 +203,7 @@ impl Default for InputPrompt {
     fn default() -> Self {
         Self {
             title: "Input:".to_string(),
+            hint: None,
             label: "> ".to_string(),
             placeholder: None,
             input: String::new(),
@@ -212,6 +214,14 @@ impl Default for InputPrompt {
         }
     }
 }
+
+/// Minimum total width of an input overlay (borders included), so the
+/// border title is legible before anything is typed.
+const MIN_INPUT_WIDTH: u16 = 40;
+
+/// An input overlay may grow to 90% of the host area to fit its title and
+/// error text; beyond that the error wraps.
+const MAX_INPUT_WIDTH_PERCENT: u32 = 90;
 
 /// A single-line text input: type to append, Backspace/Delete pops,
 /// Ctrl+W removes the trailing word, Ctrl+U clears, Enter submits,
@@ -247,21 +257,64 @@ impl<T: matchmaker::SSS> InputOverlay<T> {
         self.prompt = prompt;
     }
 
-    /// Content width: label + shown input + trailing space, plus borders.
-    fn content_width(&self) -> u16 {
-        let shown = self
-            .prompt
+    fn shown(&self) -> &str {
+        self.prompt
             .placeholder
             .as_ref()
             .filter(|_| self.prompt.input.is_empty())
             .map(String::as_str)
-            .unwrap_or(&self.prompt.input);
-        (self.prompt.label.len() + shown.len() + 1) as u16 + 2
+            .unwrap_or(&self.prompt.input)
     }
 
-    /// Content height: one line (two with an error), plus borders.
-    fn content_height(&self) -> u16 {
-        (if self.prompt.error.is_some() { 2 } else { 1 }) + 2
+    /// Total width (borders included): enough for the label/input, the border
+    /// title, and the current error, capped at 90% of the host area. When the
+    /// cap is hit, `error_lines` wraps the error instead.
+    fn width_for(&self, ui_area: &Rect) -> u16 {
+        let input =
+            (self.prompt.label.chars().count() + self.shown().chars().count() + 1 + 2) as u16;
+        let title = self.prompt.title.chars().count().saturating_add(4) as u16;
+        let hint = self.prompt.hint.as_ref().map_or(0, |line| {
+            line.width().saturating_add(2).min(u16::MAX as usize) as u16
+        });
+        let error = self.prompt.error.as_ref().map_or(0, |err| {
+            err.chars().count().saturating_add(5).min(u16::MAX as usize) as u16
+        });
+        let max = (u32::from(ui_area.width) * MAX_INPUT_WIDTH_PERCENT / 100) as u16;
+        input
+            .max(title)
+            .max(hint)
+            .max(error)
+            .max(MIN_INPUT_WIDTH)
+            .min(max)
+            .max(1)
+    }
+
+    /// Number of lines the hint occupies at `inner_width` (0 without one).
+    fn hint_lines(&self, inner_width: u16) -> u16 {
+        let Some(hint) = &self.prompt.hint else {
+            return 0;
+        };
+        Paragraph::new(hint.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(inner_width.max(1))
+            .min(usize::from(u16::MAX)) as u16
+    }
+
+    /// Number of lines the error occupies at `inner_width` (0 without one).
+    fn error_lines(&self, inner_width: u16) -> u16 {
+        let Some(err) = &self.prompt.error else {
+            return 0;
+        };
+        let paragraph = Paragraph::new(format!(" ✗ {err}")).wrap(Wrap { trim: false });
+        paragraph
+            .line_count(inner_width.max(1))
+            .min(usize::from(u16::MAX)) as u16
+    }
+
+    /// Total height: the wrapped hint, the input line, the wrapped error
+    /// lines, and borders.
+    fn height_for(&self, inner_width: u16) -> u16 {
+        1 + self.hint_lines(inner_width) + self.error_lines(inner_width) + 2
     }
 
     fn submit(&mut self) -> OverlayEffect {
@@ -321,8 +374,8 @@ impl<T: matchmaker::SSS> Overlay<AppAction, T, ()> for InputOverlay<T> {
     fn area(&mut self, ui_area: &Rect, layout: &OverlayLayoutSettings) {
         self.ui_area = *ui_area;
         self.layout = layout.clone();
-        let width = self.content_width();
-        let height = self.content_height();
+        let width = self.width_for(ui_area);
+        let height = self.height_for(width.saturating_sub(2));
         self.area = utils::default_area(
             [SizeHint::from(width), SizeHint::from(height)],
             layout,
@@ -332,11 +385,12 @@ impl<T: matchmaker::SSS> Overlay<AppAction, T, ()> for InputOverlay<T> {
 
     fn draw(&mut self, frame: &mut Frame<'_>) {
         // The box tracks the input: re-center and re-size every frame.
+        let width = self.width_for(&self.ui_area).min(self.ui_area.width);
+        let height = self
+            .height_for(width.saturating_sub(2))
+            .min(self.ui_area.height);
         self.area = utils::default_area(
-            [
-                SizeHint::from(self.content_width().min(self.ui_area.width)),
-                SizeHint::from(self.content_height().min(self.ui_area.height)),
-            ],
+            [SizeHint::from(width), SizeHint::from(height)],
             &self.layout,
             &self.ui_area,
         );
@@ -345,44 +399,52 @@ impl<T: matchmaker::SSS> Overlay<AppAction, T, ()> for InputOverlay<T> {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::White))
+            .border_style(styles::OVERLAY_BORDER)
             .title(self.prompt.title.clone());
         let inner_area = block.inner(area);
         frame.render_widget(block, area);
 
-        let shown = self
-            .prompt
-            .placeholder
-            .as_ref()
-            .filter(|_| self.prompt.input.is_empty())
-            .map(|s| s.as_str())
-            .unwrap_or(&self.prompt.input);
+        let hint_height = self.hint_lines(inner_area.width);
+        if let Some(ref hint) = self.prompt.hint {
+            frame.render_widget(
+                Paragraph::new(hint.clone()).wrap(Wrap { trim: false }),
+                Rect::new(inner_area.x, inner_area.y, inner_area.width, hint_height),
+            );
+        }
+        let input_y = inner_area.y + hint_height;
+
+        let placeholder = self.prompt.input.is_empty() && self.prompt.placeholder.is_some();
+        let shown = self.shown().to_string();
+        let shown_style = if placeholder {
+            styles::PLACEHOLDER
+        } else {
+            styles::INPUT_TEXT
+        };
         let input_line = Line::from(vec![
-            Span::styled(
-                self.prompt.label.clone(),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::styled(shown.to_string(), Style::default().fg(Color::White)),
+            Span::styled(self.prompt.label.clone(), styles::INPUT_LABEL),
+            Span::styled(shown, shown_style),
         ]);
         frame.render_widget(
             Paragraph::new(input_line),
-            Rect::new(inner_area.x, inner_area.y, inner_area.width, 1),
+            Rect::new(inner_area.x, input_y, inner_area.width, 1),
         );
 
         let cursor_x = area.x + 1 + self.prompt.label.len() as u16 + self.prompt.input.len() as u16;
         frame.set_cursor_position(Position::new(
             cursor_x.min(area.right().saturating_sub(1)),
-            area.y + 1,
+            input_y,
         ));
 
         if let Some(ref err) = self.prompt.error {
-            let err_line = Line::from(Span::styled(
-                format!(" ✗ {err}"),
-                Style::default().fg(Color::LightRed),
-            ));
+            let err_line = Line::from(Span::styled(format!(" ✗ {err}"), styles::ERROR));
             frame.render_widget(
-                Paragraph::new(err_line),
-                Rect::new(inner_area.x, inner_area.y + 1, inner_area.width, 1),
+                Paragraph::new(err_line).wrap(Wrap { trim: false }),
+                Rect::new(
+                    inner_area.x,
+                    input_y + 1,
+                    inner_area.width,
+                    self.error_lines(inner_area.width),
+                ),
             );
         }
     }
@@ -441,5 +503,44 @@ impl<A: matchmaker::action::ActionExt, T: matchmaker::SSS, D: 'static, O: Overla
 
     fn draw(&mut self, frame: &mut Frame<'_>) {
         self.inner.lock().unwrap().draw(frame)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_width_has_a_floor_and_a_90_percent_ceiling() {
+        let mut overlay = InputOverlay::<String>::new();
+        overlay.prompt.title = "Log mile (10-31 23:00 - 11-1 23:00)".into();
+        let host = Rect::new(0, 0, 80, 40);
+        assert!(overlay.width_for(&host) >= MIN_INPUT_WIDTH);
+
+        overlay.prompt.error = Some("Cannot parse a very long value: ".repeat(8));
+        assert_eq!(overlay.width_for(&host), 72);
+        assert!(overlay.error_lines(70) > 1);
+    }
+
+    #[test]
+    fn input_width_never_exceeds_a_narrow_host() {
+        let overlay = InputOverlay::<String>::new();
+        let host = Rect::new(0, 0, 30, 20);
+        assert!(overlay.width_for(&host) <= 27);
+    }
+
+    #[test]
+    fn input_hint_adds_a_row_and_wraps_when_capped() {
+        let mut overlay = InputOverlay::<String>::new();
+        let host = Rect::new(0, 0, 80, 40);
+        assert_eq!(overlay.height_for(38), 3);
+
+        overlay.prompt.hint = Some(Line::from("replaces: 20m"));
+        assert_eq!(overlay.hint_lines(38), 1);
+        assert_eq!(overlay.height_for(38), 4);
+
+        overlay.prompt.hint = Some(Line::from("replaces: ".to_string() + &"x".repeat(200)));
+        assert_eq!(overlay.width_for(&host), 72);
+        assert!(overlay.hint_lines(70) > 1);
     }
 }
