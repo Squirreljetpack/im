@@ -154,6 +154,9 @@ kind = "null"
 interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }
 low = "4h"
 high = "12h"
+# strict gates *when* the marker may be logged: the entry time must fall in
+# the circular [low, high] zone, measured 4h..12h after the day slot starts.
+strict = true
 colors = "awake"
 
 [tracker.rating]
