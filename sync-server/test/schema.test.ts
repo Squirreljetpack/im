@@ -15,7 +15,7 @@ const VOCABULARY: Record<number, string> = {
   1: "f7823cffa53a6674",
   2: "6965e6583b70478e",
   3: "076fe7c17ad05e43",
-  4: "03d1a14aad28d044",
+  4: "67581b0068f24ed7",
 };
 
 /** JSON with every object's keys sorted, so formatting and key order do not matter. */

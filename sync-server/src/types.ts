@@ -88,6 +88,7 @@ export type RejectReason =
   | "field"
   | "class"
   | "deleted"
+  | "target_deleted"
   | "dangling"
   | "self_parent"
   | "kind_change"

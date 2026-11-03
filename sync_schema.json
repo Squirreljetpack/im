@@ -20,7 +20,7 @@
       "cascade": [
         { "kind": "task", "field": "parent_id", "action": "set_null" },
         { "kind": "mood", "field": "todo_id", "action": "set_null" },
-        { "kind": "completion", "action": "delete" }
+        { "kind": "completion", "field": "todo_id", "action": "delete" }
       ],
       "subkind": {
         "default": "oneshot",
@@ -48,7 +48,7 @@
       "fields": {
         "type": { "class": "text", "required": true, "immutable": true },
         "score": { "class": "scalar", "required": true },
-        "time": { "class": "int", "immutable": true },
+        "time": { "class": "int", "required": true, "immutable": true },
         "tz_offset": { "class": "int", "required": true, "immutable": true },
         "location": { "class": "text", "required": true, "immutable": true },
         "mood_id": { "class": "text", "column": "mood", "link": "mood" }

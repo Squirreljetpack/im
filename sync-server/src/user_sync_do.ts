@@ -278,8 +278,17 @@ export class UserSyncDO implements DurableObject {
       const verdicts: (Verdict | null)[] = body.events.map(() => null);
       const pushed: { index: number; entity_id: string; field: string; event_id: string }[] = [];
       const creating = this.validateCreates(sql, body.events);
+      const rejectedCreates = this.prevalidateCreates(sql, body.events, creating, device, now);
 
       body.events.forEach((raw, index) => {
+        const candidate = raw as Partial<CellEvent> | null;
+        const entityId = typeof candidate?.entity_id === "string" ? candidate.entity_id : "";
+        const rejectedCreate = rejectedCreates.get(entityId);
+        if (rejectedCreate !== undefined) {
+          const eventId = typeof candidate?.event_id === "string" ? candidate.event_id : "";
+          verdicts[index] = { ...rejectedCreate, event_id: eventId };
+          return;
+        }
         const result = this.push(sql, raw, device, now, creating, batch);
         if (result.verdict.outcome === "rejected") {
           verdicts[index] = result.verdict;
@@ -287,7 +296,6 @@ export class UserSyncDO implements DurableObject {
           pushed.push({ index, ...result.cell });
         }
       });
-      this.cleanupIncompleteCreates(sql, creating, batch);
       // A cell is only accepted or superseded once the whole batch has landed:
       // a later event of the same push can legitimately take the cell away
       // from an earlier one.
@@ -358,27 +366,187 @@ export class UserSyncDO implements DurableObject {
   }
 
   /**
-   * Drop any create whose required field cell was rejected during the batch so
-   * no half-born entity remains in the log or register.
+   * Pre-validate every create burst before appending any cell. If the existence
+   * cell, any required field, or any cell's clock stamp fails validation (or a
+   * required link points to another create in the batch that failed), the whole
+   * create is rejected up front and never touches the log or register. Optional
+   * field failures (such as an optional link to a deleted entity) are rejected
+   * individually during `push()` without dropping the entity create itself.
    */
-  private cleanupIncompleteCreates(sql: Sql, creating: Set<string>, batch: number): void {
-    for (const entity of creating) {
-      const existence = this.cell(sql, entity, EXISTENCE);
-      if (existence === undefined) {
-        continue;
-      }
-      const spec = kindSpec(existence.kind);
-      if (spec === undefined) {
-        continue;
-      }
-      const missingRequired = Object.entries(spec.fields).some(
-        ([name, field]) => field.required === true && !this.present(sql, entity, name),
-      );
-      if (missingRequired) {
-        sql.exec("DELETE FROM sync_log WHERE batch = ? AND entity_id = ?", batch, entity);
-        sql.exec("DELETE FROM sync_register WHERE entity_id = ?", entity);
+  private prevalidateCreates(
+    sql: Sql,
+    events: unknown[],
+    creating: Set<string>,
+    device: string,
+    now: number,
+  ): Map<string, Verdict> {
+    const acceptedCreates = new Map<string, string>();
+    for (const raw of events) {
+      if (isCellEvent(raw) && raw.field === EXISTENCE && creating.has(raw.entity_id)) {
+        acceptedCreates.set(raw.entity_id, raw.kind);
       }
     }
+    const rejectedCreates = new Map<string, Verdict>();
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const raw of events) {
+        const candidate = raw as Partial<CellEvent> | null;
+        const entityId = typeof candidate?.entity_id === "string" ? candidate.entity_id : "";
+        if (!acceptedCreates.has(entityId)) {
+          continue;
+        }
+        const fallbackId = typeof candidate?.event_id === "string" ? candidate.event_id : "";
+        if (!isCellEvent(candidate)) {
+          acceptedCreates.delete(entityId);
+          creating.delete(entityId);
+          rejectedCreates.set(entityId, {
+            event_id: fallbackId,
+            outcome: "rejected",
+            reason: "shape",
+          });
+          changed = true;
+          continue;
+        }
+        if (this.logged(sql, candidate.event_id)) {
+          continue;
+        }
+        const field = fieldSpec(candidate.kind, candidate.field);
+        if (
+          candidate.field !== EXISTENCE &&
+          field?.required !== true &&
+          candidate.timestamp <= now + SKEW_MS
+        ) {
+          continue;
+        }
+        const rejection = this.validateCell(
+          sql,
+          candidate,
+          device,
+          now,
+          creating,
+          acceptedCreates,
+        );
+        if (rejection !== null) {
+          acceptedCreates.delete(entityId);
+          creating.delete(entityId);
+          rejectedCreates.set(entityId, rejection);
+          changed = true;
+        }
+      }
+    }
+    return rejectedCreates;
+  }
+
+  /**
+   * Validate one cell event against the schema, clock, and register state.
+   * Returns a rejection verdict on failure, or `null` when the cell is valid.
+   */
+  private validateCell(
+    sql: Sql,
+    event: CellEvent,
+    device: string,
+    now: number,
+    creating: Set<string>,
+    acceptedCreates?: Map<string, string>,
+  ): Verdict | null {
+    const reject = (reason: RejectReason, withCells = true): Verdict => ({
+      event_id: event.event_id,
+      outcome: "rejected",
+      reason,
+      ...(withCells ? this.context(sql, event) : {}),
+    });
+
+    if (event.device_id !== device) {
+      return reject("device", false);
+    }
+    const spec = kindSpec(event.kind);
+    if (spec === undefined) {
+      return reject("kind", false);
+    }
+    if (event.field !== EXISTENCE && !Object.hasOwn(spec.fields, event.field)) {
+      return reject("field", false);
+    }
+    if (!Number.isInteger(event.timestamp) || event.timestamp < 0) {
+      return reject("shape", false);
+    }
+    if (event.timestamp > now + SKEW_MS) {
+      return reject("clock_ahead", false);
+    }
+    if (event.value !== null && !isCellValue(event.value)) {
+      return reject("class", false);
+    }
+
+    const existence = this.cell(sql, event.entity_id, EXISTENCE);
+    const dead = existence?.value === DEAD;
+    if (existence !== undefined && existence.kind !== event.kind) {
+      return reject("kind");
+    }
+
+    if (event.field === EXISTENCE) {
+      const marker = event.value !== null && "text" in event.value ? event.value.text : null;
+      if (marker !== "live" && marker !== "deleted") {
+        return reject("class", false);
+      }
+      if (marker === "live" && dead) {
+        return reject("deleted");
+      }
+      return null;
+    }
+
+    if (existence === undefined && !acceptedCreates?.has(event.entity_id)) {
+      return reject("dangling");
+    }
+    if (dead) {
+      return reject("deleted");
+    }
+
+    const field = fieldSpec(event.kind, event.field);
+    if (field === undefined) {
+      return reject("field", false);
+    }
+    if (event.value === null) {
+      if (field.required === true) {
+        return reject("class", false);
+      }
+    } else if (!classMatches(field.class, event.value)) {
+      return reject("class", false);
+    }
+    if (field.immutable === true && this.cell(sql, event.entity_id, event.field) !== undefined) {
+      return reject("immutable");
+    }
+    if (field.link !== undefined && event.value !== null) {
+      const referent = "text" in event.value ? event.value.text : null;
+      if (referent === null) {
+        return reject("class", false);
+      }
+      if (event.field === "parent_id" && referent === event.entity_id) {
+        return reject("self_parent", false);
+      }
+      const target = this.cell(sql, referent, EXISTENCE);
+      const inBatchKind = acceptedCreates?.get(referent);
+      if ((target === undefined || target.kind !== field.link) && inBatchKind !== field.link) {
+        return reject("dangling");
+      }
+      if (target?.value === DEAD) {
+        return reject("target_deleted");
+      }
+    }
+    if (
+      spec.subkind !== undefined &&
+      !creating.has(event.entity_id) &&
+      spec.subkind.from.some(([name]) => name === event.field)
+    ) {
+      const rule = spec.subkind;
+      const before = subkindFrom(rule, (name) => this.present(sql, event.entity_id, name));
+      const after = subkindFrom(rule, (name) =>
+        name === event.field ? event.value !== null : this.present(sql, event.entity_id, name),
+      );
+      if (before !== after) {
+        return reject("kind_change");
+      }
+    }
+    return null;
   }
 
   /**
@@ -405,57 +573,33 @@ export class UserSyncDO implements DurableObject {
       };
     }
     const event = candidate;
-    const reject = (reason: RejectReason, withCells = true): ReturnType<typeof this.push> => ({
-      verdict: {
-        event_id: event.event_id,
-        outcome: "rejected",
-        reason,
-        ...(withCells ? this.context(sql, event) : {}),
-      },
-      cell: { entity_id: event.entity_id, field: event.field, event_id: event.event_id },
-    });
-
-    if (event.device_id !== device) {
-      return reject("device", false);
-    }
-    const spec = kindSpec(event.kind);
-    if (spec === undefined) {
-      return reject("kind", false);
-    }
-    if (event.field !== EXISTENCE && !Object.hasOwn(spec.fields, event.field)) {
-      return reject("field", false);
-    }
-    // A retried push is a no-op: the log's copy is authoritative and the
-    // verdict is re-derived from the register.
     if (this.logged(sql, event.event_id)) {
       return {
         verdict: { event_id: event.event_id, outcome: "accepted" },
         cell: { entity_id: event.entity_id, field: event.field, event_id: event.event_id },
       };
     }
-    if (!Number.isInteger(event.timestamp) || event.timestamp < 0) {
-      return reject("shape", false);
-    }
-    if (event.timestamp > now + SKEW_MS) {
-      return reject("clock_ahead", false);
-    }
-    if (event.value !== null && !isCellValue(event.value)) {
-      return reject("class", false);
-    }
-
-    const existence = this.cell(sql, event.entity_id, EXISTENCE);
-    const dead = existence?.value === DEAD;
-    if (existence !== undefined && existence.kind !== event.kind) {
-      return reject("kind");
+    const rejection = this.validateCell(sql, event, device, now, creating);
+    if (rejection !== null) {
+      return {
+        verdict: rejection,
+        cell: { entity_id: event.entity_id, field: event.field, event_id: event.event_id },
+      };
     }
 
     if (event.field === EXISTENCE) {
       const marker = event.value !== null && "text" in event.value ? event.value.text : null;
-      if (marker !== "live" && marker !== "deleted") {
-        return reject("class", false);
-      }
-      if (marker === "live" && dead) {
-        return reject("deleted");
+      const existence = this.cell(sql, event.entity_id, EXISTENCE);
+      // A repeat `live` (deterministic ID collision) or repeat `deleted` is an
+      // idempotent no-op: keep the original existence cell untouched.
+      if (
+        (marker === "live" && existence?.value === LIVE) ||
+        (marker === "deleted" && existence?.value === DEAD)
+      ) {
+        return {
+          verdict: { event_id: event.event_id, outcome: "accepted" },
+          cell: { entity_id: event.entity_id, field: EXISTENCE, event_id: event.event_id },
+        };
       }
       const appended = this.append(sql, event, now, batch);
       if (marker === "deleted" && appended.won) {
@@ -465,74 +609,6 @@ export class UserSyncDO implements DurableObject {
         verdict: { event_id: event.event_id, outcome: "accepted" },
         cell: { entity_id: event.entity_id, field: EXISTENCE, event_id: event.event_id },
       };
-    }
-
-    if (existence === undefined) {
-      // Every value write names an entity this device must already have, and a
-      // create pushes its existence cell first.
-      return reject("dangling");
-    }
-    if (dead) {
-      return reject("deleted");
-    }
-
-    const field = fieldSpec(event.kind, event.field);
-    if (field === undefined) {
-      return reject("field", false);
-    }
-    if (event.value === null) {
-      if (field.required === true) {
-        return reject("class", false);
-      }
-    } else if (!classMatches(field.class, event.value)) {
-      return reject("class", false);
-    }
-    if (field.immutable === true && this.cell(sql, event.entity_id, event.field) !== undefined) {
-      return reject("immutable");
-    }
-    // A tracker's `time` decides which slot the row occupies, so it is held to
-    // the same clock rule as a stamp: the number that decides data loss must
-    // not be the unvalidated one.
-    if (
-      event.kind === "tracker" &&
-      event.field === "time" &&
-      event.value !== null &&
-      "int" in event.value &&
-      event.value.int > Math.floor((now + SKEW_MS) / 1000)
-    ) {
-      return reject("clock_ahead", false);
-    }
-    if (field.link !== undefined && event.value !== null) {
-      const referent = "text" in event.value ? event.value.text : null;
-      if (referent === null) {
-        return reject("class", false);
-      }
-      if (event.field === "parent_id" && referent === event.entity_id) {
-        return reject("self_parent", false);
-      }
-      const target = this.cell(sql, referent, EXISTENCE);
-      if (target === undefined || target.kind !== field.link) {
-        return reject("dangling");
-      }
-      if (target.value === DEAD) {
-        return reject("deleted");
-      }
-    }
-    if (
-      spec.subkind !== undefined &&
-      !creating.has(event.entity_id) &&
-      spec.subkind.from.some(([name]) => name === event.field)
-    ) {
-      const rule = spec.subkind;
-      const before = subkindFrom(rule, (name) => this.present(sql, event.entity_id, name));
-      const after = subkindFrom(rule, (name) =>
-        name === event.field ? event.value !== null : this.present(sql, event.entity_id, name),
-      );
-      if (before !== after) {
-        // Kind is fixed at creation: a write may update a defining field but
-        // may never introduce one or clear one.
-        return reject("kind_change");
-      }
     }
 
     this.append(sql, event, now, batch);
@@ -620,6 +696,33 @@ export class UserSyncDO implements DurableObject {
    * always wins over `live` regardless of clock skew between the two devices.
    */
   private fold(sql: Sql, event: CellEvent, version: number, value: string | null): void {
+    if (event.field === EXISTENCE) {
+      sql.exec(
+        `INSERT INTO sync_register
+           (entity_id, field, kind, value, timestamp, device_id, event_id, winner_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(entity_id, field) DO UPDATE SET
+           kind           = excluded.kind,
+           value          = excluded.value,
+           timestamp      = excluded.timestamp,
+           device_id      = excluded.device_id,
+           event_id       = excluded.event_id,
+           winner_version = excluded.winner_version
+         WHERE excluded.value = ? AND sync_register.value != ?`,
+        event.entity_id,
+        EXISTENCE,
+        event.kind,
+        value,
+        event.timestamp,
+        event.device_id,
+        event.event_id,
+        version,
+        DEAD,
+        DEAD,
+      );
+      return;
+    }
+
     sql.exec(
       `INSERT INTO sync_register
          (entity_id, field, kind, value, timestamp, device_id, event_id, winner_version)
@@ -631,12 +734,8 @@ export class UserSyncDO implements DurableObject {
          device_id      = excluded.device_id,
          event_id       = excluded.event_id,
          winner_version = excluded.winner_version
-       WHERE CASE
-         WHEN excluded.field = ? AND excluded.value = ? THEN 0
-         WHEN excluded.field = ? AND sync_register.value != ? THEN 1
-         ELSE (excluded.timestamp, excluded.device_id, excluded.event_id)
-            > (sync_register.timestamp, sync_register.device_id, sync_register.event_id)
-       END`,
+       WHERE (excluded.timestamp, excluded.device_id, excluded.event_id)
+           > (sync_register.timestamp, sync_register.device_id, sync_register.event_id)`,
       event.entity_id,
       event.field,
       event.kind,
@@ -645,10 +744,6 @@ export class UserSyncDO implements DurableObject {
       event.device_id,
       event.event_id,
       version,
-      EXISTENCE,
-      LIVE,
-      EXISTENCE,
-      DEAD,
     );
   }
 
@@ -673,7 +768,7 @@ export class UserSyncDO implements DurableObject {
     }
     const link = encode({ text: entityId });
     for (const edge of spec.cascade) {
-      const edgeField = edge.field ?? "todo_id";
+      const edgeField = edge.field;
       if (edge.action === "delete") {
         const doomed = sql
           .exec(
@@ -763,56 +858,13 @@ export class UserSyncDO implements DurableObject {
     device: string,
     limit: number,
   ): { rows: LogRow[]; cursor: number; hasMore: boolean } {
-    // Own-authored cells are skipped because the client's rows already reflect
-    // them — except at cursor 0, where there is no row that could.
-    // A dead entity is served as its existence cell alone: nothing may write a
-    // value into a row that no longer exists.
-    const query = (bounded: boolean): string =>
-      `SELECT r.entity_id, r.field, r.kind, r.value, r.timestamp, r.device_id,
-              r.event_id, r.winner_version
-         FROM sync_register r
-        WHERE r.winner_version > ?
-          AND (? = 0 OR r.device_id != ?)
-          AND (r.field = ?
-               OR NOT EXISTS (SELECT 1 FROM sync_register e
-                               WHERE e.entity_id = r.entity_id
-                                 AND e.field = ? AND e.value = ?))
-          ${
-            bounded
-              ? `AND (r.winner_version <= ?
-                      OR EXISTS (SELECT 1 FROM sync_register c
-                                  WHERE c.entity_id = r.entity_id
-                                    AND c.field = ? AND c.value = ?
-                                    AND c.winner_version > ? AND c.winner_version <= ?))`
-              : ""
-          }
-        ORDER BY r.winner_version ASC
-        LIMIT ?`;
-    const params = (
-      limit: number,
-      through?: number,
-    ): (string | number | null)[] => [
-      cursor,
-      cursor,
-      device,
-      EXISTENCE,
-      EXISTENCE,
-      DEAD,
-      ...(through === undefined ? [] : [through, EXISTENCE, LIVE, cursor, through]),
-      limit,
-    ];
-
-    let rows = sql
-      .exec(query(false), ...params(limit))
-      .toArray() as unknown as CellRow[];
+    let rows = this.selectPage(sql, cursor, device, limit);
     const pageFull = rows.length === limit;
     let cutoff: number | undefined;
     if (pageFull) {
       const last = rows[rows.length - 1];
       // Extend to the last version of the batch that delivered the cut, so the
-      // page ends where a push ended. Counting extra rows instead would rest on
-      // "a batch is one push", which a delete violates: its cascade appends a
-      // cell per affected neighbour in the same batch.
+      // page ends where a push ended.
       // SAFETY: the query selects one column, aliased `through`.
       const through = sql
         .exec(
@@ -822,10 +874,16 @@ export class UserSyncDO implements DurableObject {
         )
         .one() as { through: number };
       cutoff = Number(through.through);
-      // A negative limit means none: the bound above is the whole cut.
-      rows = sql
-        .exec(query(true), ...params(-1, cutoff))
-        .toArray() as unknown as CellRow[];
+      const cutRows = this.selectPage(sql, cursor, device, -1, cutoff);
+      const hydratedRows = this.hydrateCreates(sql, cursor, cutoff);
+      const seen = new Set(cutRows.map((row) => `${row.entity_id}\0${row.field}`));
+      for (const extra of hydratedRows) {
+        if (!seen.has(`${extra.entity_id}\0${extra.field}`)) {
+          cutRows.push(extra);
+        }
+      }
+      cutRows.sort((a, b) => Number(a.winner_version) - Number(b.winner_version));
+      rows = cutRows;
     }
     // SAFETY: the query selects one column, aliased `version`.
     const head = sql
@@ -851,6 +909,96 @@ export class UserSyncDO implements DurableObject {
     const hasMore = pageFull && Number(beyond.more) === 1;
     const next = hasMore ? delivered : Math.max(Number(head.version), cursor);
     return { rows: rows.map(toLogRow), cursor: Math.max(next, cursor), hasMore };
+  }
+
+  /**
+   * Select register cells after `cursor` (and optionally at or below `through`).
+   * At `cursor === 0` (fresh/reset pull), own-authored cells are included;
+   * above `0`, own echoes are suppressed. Dead entities serve only their
+   * existence tombstone.
+   */
+  private selectPage(
+    sql: Sql,
+    cursor: number,
+    device: string,
+    limit: number,
+    through?: number,
+  ): CellRow[] {
+    const bound = through === undefined ? "" : "AND r.winner_version <= ?";
+    const boundParams = through === undefined ? [] : [through];
+    if (cursor === 0) {
+      return sql
+        .exec(
+          `SELECT r.entity_id, r.field, r.kind, r.value, r.timestamp, r.device_id,
+                  r.event_id, r.winner_version
+             FROM sync_register r
+            WHERE r.winner_version > 0
+              AND (r.field = ?
+                   OR NOT EXISTS (SELECT 1 FROM sync_register e
+                                   WHERE e.entity_id = r.entity_id
+                                     AND e.field = ? AND e.value = ?))
+              ${bound}
+            ORDER BY r.winner_version ASC
+            LIMIT ?`,
+          EXISTENCE,
+          EXISTENCE,
+          DEAD,
+          ...boundParams,
+          limit,
+        )
+        .toArray() as unknown as CellRow[];
+    }
+    return sql
+      .exec(
+        `SELECT r.entity_id, r.field, r.kind, r.value, r.timestamp, r.device_id,
+                r.event_id, r.winner_version
+           FROM sync_register r
+          WHERE r.winner_version > ?
+            AND r.device_id != ?
+            AND (r.field = ?
+                 OR NOT EXISTS (SELECT 1 FROM sync_register e
+                                 WHERE e.entity_id = r.entity_id
+                                   AND e.field = ? AND e.value = ?))
+            ${bound}
+          ORDER BY r.winner_version ASC
+          LIMIT ?`,
+        cursor,
+        device,
+        EXISTENCE,
+        EXISTENCE,
+        DEAD,
+        ...boundParams,
+        limit,
+      )
+      .toArray() as unknown as CellRow[];
+  }
+
+  /**
+   * Fetch current register cells whose `winner_version` moved past `through` for
+   * any live entity born within `(cursor, through]`, so bounded pages always
+   * deliver complete creates.
+   */
+  private hydrateCreates(sql: Sql, cursor: number, through: number): CellRow[] {
+    return sql
+      .exec(
+        `SELECT r.entity_id, r.field, r.kind, r.value, r.timestamp, r.device_id,
+                r.event_id, r.winner_version
+           FROM sync_register r
+          WHERE r.winner_version > ?
+            AND EXISTS (
+              SELECT 1 FROM sync_register c
+               WHERE c.entity_id = r.entity_id
+                 AND c.field = ? AND c.value = ?
+                 AND c.winner_version > ? AND c.winner_version <= ?
+            )
+          ORDER BY r.winner_version ASC`,
+        through,
+        EXISTENCE,
+        LIVE,
+        cursor,
+        through,
+      )
+      .toArray() as unknown as CellRow[];
   }
 
   /**
@@ -898,7 +1046,7 @@ export class UserSyncDO implements DurableObject {
     if (winner === undefined) {
       return { event_id: event.event_id, outcome: "superseded", winner: null };
     }
-    if (winner.event_id === event.event_id) {
+    if (event.field === EXISTENCE || winner.event_id === event.event_id) {
       return { event_id: event.event_id, outcome: "accepted" };
     }
     return { event_id: event.event_id, outcome: "superseded", winner: toLogRow(winner) };

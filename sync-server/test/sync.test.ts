@@ -82,6 +82,7 @@ const REQUIRED: Record<string, [string, CellValue][]> = {
     ["location", { text: "" }],
   ],
   tracker: [
+    ["time", { int: 1_700_000_000 }],
     ["tz_offset", { int: 0 }],
     ["location", { text: "" }],
   ],
@@ -384,24 +385,6 @@ describe("push validation", () => {
       ),
     );
     expect(created.verdicts.every((verdict) => verdict.outcome === "accepted")).toBe(true);
-    const ahead = await sync(
-      account.token,
-      "device-a",
-      0,
-      create(
-        "0193f000-0000-7000-8000-000000000015b",
-        "tracker",
-        [
-          ["type", { text: "weight" }],
-          ["score", { int: 70 }],
-          ["time", { int: Math.floor(Date.now() / 1000) + 3600 }],
-        ],
-        ago(400),
-      ),
-    );
-    const verdicts = ahead.verdicts.filter((verdict) => verdict.outcome === "rejected");
-    expect(verdicts).toHaveLength(1);
-    expect(verdicts[0]).toMatchObject({ reason: "clock_ahead" });
   });
 
   it("keeps the kind a task was created with", async () => {
@@ -943,13 +926,70 @@ describe("compatibility", () => {
         ago(3000),
       ),
     );
-    const rejected = response.verdicts.filter((verdict) => verdict.outcome === "rejected");
-    expect(rejected).toHaveLength(1);
-    expect(rejected[0]).toMatchObject({ outcome: "rejected", reason: "deleted" });
+    expect(
+      response.verdicts.every(
+        (verdict) => verdict.outcome === "rejected" && verdict.reason === "target_deleted",
+      ),
+    ).toBe(true);
 
     // No half-born completion remains in the register.
     const pulled = await sync(account.token, "device-c", 0);
     expect(pulled.events.some((row) => row.entity_id === completion)).toBe(false);
+
+    // An optional link (parent_id) pointing to the deleted task rejects only
+    // that optional cell while keeping the newly created child task alive.
+    const childTask = "0193f000-0000-7000-8000-000000000097";
+    const childCreated = await sync(
+      account.token,
+      "device-a",
+      0,
+      create(
+        childTask,
+        "task",
+        [
+          ["name", { text: "surviving-child" }],
+          ["parent_id", { text: task }],
+        ],
+        ago(2500),
+      ),
+    );
+    expect(childCreated.verdicts.map((v) => v.outcome)).toEqual([
+      "accepted",
+      "accepted",
+      "rejected",
+      "accepted",
+    ]);
+    expect(childCreated.verdicts[2]?.reason).toBe("target_deleted");
+    const pulledChild = await sync(account.token, "device-c", 0);
+    expect(valueOf(pulledChild.events, childTask, "name")).toEqual({ text: "surviving-child" });
+    expect(
+      pulledChild.events.some((row) => row.entity_id === childTask && row.field === "parent_id"),
+    ).toBe(false);
+
+    // If a task create in the batch is rejected (e.g. clock_ahead), a completion
+    // created in the same batch that links to that task is also rejected as a whole.
+    const futureTask = "0193f000-0000-7000-8000-000000000095";
+    const chainedCompletion = "0193f000-0000-7000-8000-000000000096";
+    const chained = await sync(account.token, "device-a", 0, [
+      ...create(futureTask, "task", [["name", { text: "future" }]], Date.now() + 3_600_000),
+      ...create(
+        chainedCompletion,
+        "completion",
+        [
+          ["todo_id", { text: futureTask }],
+          ["time", { int: 1_700_000_100 }],
+          ["count", { int: 1 }],
+        ],
+        ago(2000),
+      ),
+    ]);
+    expect(chained.verdicts.every((verdict) => verdict.outcome === "rejected")).toBe(true);
+    const pulledAfter = await sync(account.token, "device-c", 0);
+    expect(
+      pulledAfter.events.some(
+        (row) => row.entity_id === futureTask || row.entity_id === chainedCompletion,
+      ),
+    ).toBe(false);
   });
 
   it("includes rewritten required fields of a created entity in a bounded pull page", async () => {

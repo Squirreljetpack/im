@@ -24,7 +24,7 @@ export interface FieldSpec {
 
 export interface CascadeEdge {
   kind: string;
-  field?: string;
+  field: string;
   action: "set_null" | "delete";
 }
 
