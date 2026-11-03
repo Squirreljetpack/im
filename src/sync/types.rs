@@ -304,18 +304,14 @@ impl TaskUpdate {
 /// An edit of one mood field.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MoodUpdate {
-    Mood(String),
     Body(String),
-    Duration(Option<i64>),
     TodoId(Option<Id>),
 }
 
 impl MoodUpdate {
     pub fn cell(&self) -> (&'static str, Option<CellValue>) {
         match self {
-            Self::Mood(mood) => (mood_field::MOOD, Some(CellValue::text(mood))),
             Self::Body(body) => (mood_field::BODY, Some(CellValue::text(body))),
-            Self::Duration(duration) => (mood_field::DURATION, duration.map(CellValue::Int)),
             Self::TodoId(todo) => (
                 mood_field::TODO_ID,
                 todo.map(|id| CellValue::text(id.to_string())),

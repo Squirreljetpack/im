@@ -433,7 +433,12 @@ pub async fn link_tracker_to_mood(pool: &SqlitePool, tracker_id: Id, mood_id: Id
         .await
         .context("Failed to link tracker entry to mood")?;
     if result.rows_affected() > 0 {
-        crate::sync::events::tracker_create(&mut tx, tracker_id).await?;
+        crate::sync::events::tracker_update(
+            &mut tx,
+            tracker_id,
+            crate::sync::TrackerUpdate::MoodId(Some(mood_id)),
+        )
+        .await?;
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(result.rows_affected())
@@ -703,7 +708,12 @@ pub async fn update_mood_body(pool: &SqlitePool, id: Id, body: &str) -> Result<u
         .await
         .context("Failed to update mood body")?;
     if res.rows_affected() > 0 {
-        crate::sync::events::mood_create(&mut tx, id).await?;
+        crate::sync::events::mood_update(
+            &mut tx,
+            id,
+            crate::sync::MoodUpdate::Body(body.to_string()),
+        )
+        .await?;
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(res.rows_affected())
@@ -834,14 +844,14 @@ pub async fn delete_mood(pool: &SqlitePool, id: Id) -> Result<()> {
         crate::sync::events::delete(&mut tx, *tracker, "tracker").await?;
     }
 
-    // Publish while the row still exists so the delete carries its content.
-    crate::sync::events::delete(&mut tx, id, "mood").await?;
-    sqlx::query("DELETE FROM mood WHERE id = ?")
+    let res = sqlx::query("DELETE FROM mood WHERE id = ?")
         .bind(id)
         .execute(&mut *tx)
         .await
         .context("Failed to delete mood row")?;
-    crate::sync::events::delete(&mut tx, id, "mood").await?;
+    if res.rows_affected() > 0 {
+        crate::sync::events::delete(&mut tx, id, "mood").await?;
+    }
 
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(())
