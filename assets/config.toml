@@ -100,8 +100,8 @@ persist_pending_seconds = 300
 # Each tracker is its own section; log it with `-<name> <value>`.
 #
 # Intervals: with an interval, entries bin into slots of the given span,
-# starting from the interval anchor (RFC 3339 timestamps with an explicit
-# UTC offset). By default (replace) a new log in a slot replaces the slot's
+# starting from the unzoned civil interval anchor (no Z or numeric offset);
+# the grid resolves it in the current local time zone. By default (replace) a new log in a slot replaces the slot's
 # previous entry; `cumulative = true` keeps every log and the slot's value
 # is the sum of its entries at display time.
 #
@@ -120,7 +120,8 @@ persist_pending_seconds = 300
 #
 # Kinds:
 # null:
-#  - Timestamp marker (no payload; log with `im -<name>`). Requires an interval.
+#  - Timestamp marker (no displayed payload; log with `im -<name>`). Requires
+#    an interval; replace mode stores the marker's position in the slot.
 #  - Replace mode: one marker per period; low/high are seconds-from-interval-start
 #    offsets defining the circular color range (and the strict "when" zone).
 #  - Cumulative mode: counts occurrences; low/high are count thresholds.
@@ -141,7 +142,7 @@ persist_pending_seconds = 300
 
 [tracker.sleep]
 kind = "null"
-interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }
+interval = { anchor = "2026-01-01T00:00:00", span = "1 day" }
 # Replace mode: low/high are seconds-from-interval-start offsets for the
 # circular color range — 20:00 local is the "low" end, 04:00 the "high" end
 # (wrapping past midnight).
@@ -151,7 +152,7 @@ colors = "sleep"
 
 [tracker.awake]
 kind = "null"
-interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }
+interval = { anchor = "2026-01-01T00:00:00", span = "1 day" }
 low = "4h"
 high = "12h"
 # strict gates *when* the marker may be logged: the entry time must fall in
@@ -161,7 +162,7 @@ colors = "awake"
 
 [tracker.rating]
 kind = "float"
-interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }
+interval = { anchor = "2026-01-01T00:00:00", span = "1 day" }
 low = 0
 high = 9
 # strict rejects values outside the inclusive [0, 9] span at log time.
@@ -170,7 +171,7 @@ colors = "forest"
 
 [tracker.pushups]
 kind = "integer"
-interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day", cumulative = true }
+interval = { anchor = "2026-01-01T00:00:00", span = "1 day", cumulative = true }
 low = 10
 high = 100
 # cumulative: every log in the period is kept; the period's grid dot shows

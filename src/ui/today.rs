@@ -654,7 +654,7 @@ fn today_header(v: &TodayApp) -> String {
 fn day_label_for(day_epoch: i64) -> String {
     if day_epoch == crate::date::today_start() {
         "Today".to_string()
-    } else if day_epoch == crate::date::today_start() - 86400 {
+    } else if day_epoch == crate::date::shift_days(crate::date::today_start(), -1) {
         "Yesterday".to_string()
     } else {
         crate::date::format_date(day_epoch)
@@ -784,9 +784,10 @@ async fn tracker_accept(ctx: &TodayCtx, kind: TrackerKind, tracker_id: Option<Id
     };
     if kind == TrackerKind::Null {
         // Null rows show their name as the label; the update action moves
-        // the row's timestamp to now — nothing else (no score change, no
-        // deletes; both modes). The move must stay within the row's current
-        // interval slot, and the strict when-zone gate applies to `now`.
+        // the row's timestamp to now. A replace-mode null row also rewrites
+        // its stored seconds-from-slot-start position. The move must stay
+        // within the row's current interval slot, and the strict when-zone
+        // gate applies to `now`.
         let tracker_type = tracker_entry_type(label);
         let Some(setting) = config().tracker.get(tracker_type).cloned() else {
             log::error!("Unknown tracker '{tracker_type}' in today view");
@@ -809,18 +810,30 @@ async fn tracker_accept(ctx: &TodayCtx, kind: TrackerKind, tracker_id: Option<Id
             log::error!("Tracker entry {tracker_id} not found");
             return;
         };
+        let mut score_override = None;
         if let Some(interval) = setting.interval {
-            let current =
-                crate::date::interval_slot_unix_secs(interval.anchor, interval.span, row_time);
-            let target = crate::date::interval_slot_unix_secs(interval.anchor, interval.span, now);
+            let current = interval.slot_for(row_time);
+            let target_stamp = crate::date::LogTime::local(now);
+            let target = interval.slot_for(target_stamp);
             if !matches!((current, target), (Some(c), Some(t)) if c == t) {
                 log::error!(
                     "tracker '{tracker_type}': cannot move the entry into a different interval slot"
                 );
                 return;
             }
+            if setting.kind == crate::config::TrackerKind::Null && !interval.cumulative {
+                if let Some((start, _)) = target {
+                    score_override = Some(now - start);
+                }
+            }
         }
-        let _ = crate::db::update_tracker_time(&pool(), tracker_id, now).await;
+        let _ = crate::db::update_tracker_time(
+            &pool(),
+            tracker_id,
+            crate::date::LogTime::local(now),
+            score_override,
+        )
+        .await;
         refresh_today(ctx).await;
         return;
     }
@@ -1238,7 +1251,10 @@ mod tests {
         assert_eq!(day_label_for(today), "Today");
         assert_eq!(day_label_for(today), "Today");
         // Yesterday.
-        assert_eq!(day_label_for(today - 86400), "Yesterday");
+        assert_eq!(
+            day_label_for(crate::date::shift_days(today, -1)),
+            "Yesterday"
+        );
         // Any other day → DD-MM-YY.
         let other = crate::date::parse_datetime("2024-03-15", crate::date::DATE_DIALECT).unwrap();
         assert_eq!(day_label_for(crate::date::day_start(other)), "15-03-24");

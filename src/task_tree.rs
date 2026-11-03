@@ -41,7 +41,7 @@ impl TaskTree {
                    UNION
                    SELECT t.id FROM todos t JOIN subtree s ON t.parent = s.id
                )
-               SELECT t.*, NULL AS completions, NULL AS last_time
+               SELECT t.*, NULL AS completions, NULL AS last_time, NULL AS last_tz_offset, '' AS last_location
                FROM todos t
                WHERE t.id IN (SELECT id FROM subtree)
                ORDER BY t.priority DESC, t.start_time ASC, t.id ASC"#,
@@ -266,13 +266,16 @@ mod tests {
         .unwrap();
         // Completion in a *previous* interval (2 days before the start of
         // the current one) must not count.
-        sqlx::query("INSERT INTO todo_completions (todo_id, time, count) VALUES (?, ?, ?)")
-            .bind(id)
-            .bind(1_600_000_000 + 100)
-            .bind(1)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO todo_completions (todo_id, time, tz_offset, count, location) VALUES (?, ?, ?, ?, '')",
+        )
+        .bind(id)
+        .bind(1_600_000_000 + 100)
+        .bind(crate::date::system_offset_secs(1_600_000_100))
+        .bind(1)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let tree = TaskTree::load(&pool, id).await.unwrap().unwrap();
         assert_eq!(tree.root.row.completions, None);

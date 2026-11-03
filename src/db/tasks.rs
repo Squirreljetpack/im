@@ -192,6 +192,7 @@ pub async fn delete_task(pool: &SqlitePool, id: Id) -> Result<u64> {
 /// never syncs.
 pub async fn update_task(pool: &SqlitePool, todo_id: Id, delta: i32) -> Result<i32> {
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+    let now = crate::date::now();
 
     // Determine the current interval boundary for recurring tasks so we never
     // touch completion events from before the current interval started.
@@ -207,7 +208,7 @@ pub async fn update_task(pool: &SqlitePool, todo_id: Id, delta: i32) -> Result<i
                     Some(iv) if iv > 0 => Some(crate::task::current_interval_start(
                         start,
                         crate::date::db_to_span(iv),
-                        crate::date::now(),
+                        now,
                     )),
                     _ => None,
                 }
@@ -215,10 +216,15 @@ pub async fn update_task(pool: &SqlitePool, todo_id: Id, delta: i32) -> Result<i
 
     if delta > 0 {
         let completion_id = Id::new();
-        sqlx::query("INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, ?)")
+        let stamp = crate::date::LogTime::local(now);
+        sqlx::query(
+            "INSERT INTO todo_completions (id, todo_id, time, tz_offset, location, count) VALUES (?, ?, ?, ?, ?, ?)",
+        )
             .bind(completion_id)
             .bind(todo_id)
-            .bind(crate::date::now())
+            .bind(stamp.epoch)
+            .bind(stamp.offset)
+            .bind(crate::date::current_location())
             .bind(delta)
             .execute(&mut *tx)
             .await?;
@@ -239,12 +245,28 @@ pub async fn update_task(pool: &SqlitePool, todo_id: Id, delta: i32) -> Result<i
         // changes, so a reader that groups by time shows the net at that
         // moment instead of a completion followed by a smaller one later. The
         // undo's own moment survives only as the event's stamp.
-        let (held, cancelled_at): (i32, Option<i64>) = match interval_start {
+        let (held, cancelled_at, cancelled_offset, cancelled_location): (
+            i32,
+            Option<i64>,
+            Option<i32>,
+            Option<String>,
+        ) = match interval_start {
             Some(boundary) => {
                 sqlx::query_as(
-                    "SELECT COALESCE(SUM(count), 0), MAX(CASE WHEN count > 0 THEN time END)
+                    "SELECT COALESCE(SUM(count), 0),
+                            MAX(CASE WHEN count > 0 THEN time END),
+                            (SELECT tz_offset FROM todo_completions
+                             WHERE todo_id = ? AND count > 0 AND time >= ?
+                             ORDER BY time DESC LIMIT 1),
+                            (SELECT location FROM todo_completions
+                             WHERE todo_id = ? AND count > 0 AND time >= ?
+                             ORDER BY time DESC LIMIT 1)
                        FROM todo_completions WHERE todo_id = ? AND time >= ?",
                 )
+                .bind(todo_id)
+                .bind(boundary)
+                .bind(todo_id)
+                .bind(boundary)
                 .bind(todo_id)
                 .bind(boundary)
                 .fetch_one(&mut *tx)
@@ -252,9 +274,18 @@ pub async fn update_task(pool: &SqlitePool, todo_id: Id, delta: i32) -> Result<i
             }
             None => {
                 sqlx::query_as(
-                    "SELECT COALESCE(SUM(count), 0), MAX(CASE WHEN count > 0 THEN time END)
+                    "SELECT COALESCE(SUM(count), 0),
+                            MAX(CASE WHEN count > 0 THEN time END),
+                            (SELECT tz_offset FROM todo_completions
+                             WHERE todo_id = ? AND count > 0
+                             ORDER BY time DESC LIMIT 1),
+                            (SELECT location FROM todo_completions
+                             WHERE todo_id = ? AND count > 0
+                             ORDER BY time DESC LIMIT 1)
                        FROM todo_completions WHERE todo_id = ?",
                 )
+                .bind(todo_id)
+                .bind(todo_id)
                 .bind(todo_id)
                 .fetch_one(&mut *tx)
                 .await?
@@ -267,10 +298,15 @@ pub async fn update_task(pool: &SqlitePool, todo_id: Id, delta: i32) -> Result<i
             return Ok(held);
         }
         let completion_id = Id::new();
-        sqlx::query("INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, ?)")
+        let cancelled_at = cancelled_at.unwrap_or(now);
+        sqlx::query(
+            "INSERT INTO todo_completions (id, todo_id, time, tz_offset, location, count) VALUES (?, ?, ?, ?, ?, ?)",
+        )
             .bind(completion_id)
             .bind(todo_id)
-            .bind(cancelled_at.unwrap_or_else(crate::date::now))
+            .bind(cancelled_at)
+            .bind(cancelled_offset.unwrap_or_else(|| crate::date::LogTime::local(cancelled_at).offset))
+            .bind(cancelled_location.unwrap_or_else(crate::date::current_location))
             .bind(delta)
             .execute(&mut *tx)
             .await?;
@@ -540,7 +576,7 @@ pub async fn task_name_exists(
 /// last_time is unscoped.
 pub async fn fetch_task_by_id(pool: &SqlitePool, id: Id, now: i64) -> Result<Option<TaskRow>> {
     let row = sqlx::query_as::<_, TaskRow>(
-        r#"SELECT t.*, NULL AS completions, NULL AS last_time
+        r#"SELECT t.*, NULL AS completions, NULL AS last_time, NULL AS last_tz_offset, '' AS last_location
            FROM todos t WHERE t.id = ?"#,
     )
     .bind(id)
@@ -551,24 +587,27 @@ pub async fn fetch_task_by_id(pool: &SqlitePool, id: Id, now: i64) -> Result<Opt
     let Some(mut task) = row else { return Ok(None) };
     // Scope the completion sum to the current interval for recurring tasks
     // (calendar-aware jiff math); last_time stays unscoped.
-    let rows =
-        sqlx::query(
-            "SELECT time, count FROM todo_completions WHERE todo_id = ? ORDER BY time ASC",
-        )
-            .bind(id)
-            .fetch_all(pool)
-            .await
-            .context("Failed to fetch task completions")?;
+    let rows = sqlx::query(
+        "SELECT time, tz_offset, location, count FROM todo_completions WHERE todo_id = ? ORDER BY time ASC",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch task completions")?;
     let completions: Vec<super::models::CompletionRow> = rows
         .iter()
         .map(|r| super::models::CompletionRow {
-            time: r.get("time"),
+            time: super::models::log_time(r),
+            location: r.get("location"),
             count: r.get("count"),
         })
         .collect();
     let sum = match crate::task::interval_start(&task, now) {
         Some(floor) => {
-            let scoped: Vec<_> = completions.iter().filter(|c| c.time >= floor).collect();
+            let scoped: Vec<_> = completions
+                .iter()
+                .filter(|c| c.time.epoch >= floor)
+                .collect();
             if scoped.is_empty() {
                 None
             } else {
@@ -584,7 +623,7 @@ pub async fn fetch_task_by_id(pool: &SqlitePool, id: Id, now: i64) -> Result<Opt
         }
     };
     task.completions = task.normalize_completions(sum);
-    task.last_time = super::views::last_standing(&task, &completions);
+    super::views::set_last_completion(&mut task, &completions);
     Ok(Some(task))
 }
 
@@ -602,7 +641,7 @@ pub async fn fetch_tasks_by_ids(
         return Ok(map);
     }
     let sql = format!(
-        "SELECT t.*, NULL AS completions, NULL AS last_time FROM todos t WHERE t.id IN ({})",
+        "SELECT t.*, NULL AS completions, NULL AS last_time, NULL AS last_tz_offset, '' AS last_location FROM todos t WHERE t.id IN ({})",
         ids.iter().map(|_| "?").collect::<Vec<_>>().join(",")
     );
     let mut q = sqlx::query_as::<_, TaskRow>(sqlx::AssertSqlSafe(sql.as_str()));
@@ -774,7 +813,7 @@ pub async fn fetch_task_matching_words(
     words: &[String],
 ) -> Result<Vec<TaskRow>> {
     let rows = sqlx::query_as::<_, TaskRow>(
-        r#"SELECT t.*, NULL AS completions, NULL AS last_time FROM todos t"#,
+        r#"SELECT t.*, NULL AS completions, NULL AS last_time, NULL AS last_tz_offset, '' AS last_location FROM todos t"#,
     )
     .fetch_all(pool)
     .await
@@ -867,14 +906,13 @@ pub async fn set_scheduled_completion(
 
     // Rows a pre-derivation build left behind for this task: one state per
     // task, so anything else is a leftover to retire.
-    let stale: Vec<Id> = sqlx::query_scalar(
-        "SELECT id FROM todo_completions WHERE todo_id = ? AND id <> ?",
-    )
-    .bind(todo_id)
-    .bind(completion_id)
-    .fetch_all(&mut *tx)
-    .await
-    .context("Failed to read the replaced scheduled completions")?;
+    let stale: Vec<Id> =
+        sqlx::query_scalar("SELECT id FROM todo_completions WHERE todo_id = ? AND id <> ?")
+            .bind(todo_id)
+            .bind(completion_id)
+            .fetch_all(&mut *tx)
+            .await
+            .context("Failed to read the replaced scheduled completions")?;
     for id in &stale {
         sqlx::query("DELETE FROM todo_completions WHERE id = ?")
             .bind(id)
@@ -884,20 +922,23 @@ pub async fn set_scheduled_completion(
         crate::sync::events::delete(&mut tx, *id, "completion").await?;
     }
 
-    let existing: Option<Id> =
-        sqlx::query_scalar("SELECT id FROM todo_completions WHERE id = ?")
-            .bind(completion_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .context("Failed to read the scheduled completion")?;
+    let existing: Option<Id> = sqlx::query_scalar("SELECT id FROM todo_completions WHERE id = ?")
+        .bind(completion_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("Failed to read the scheduled completion")?;
     if existing.is_some() {
         // The row is the task's state, so its time is the moment of the state
         // it holds: marking a task failed in the evening belongs to the
         // evening, not to whenever the row was first created.
-        let at = crate::date::now();
-        sqlx::query("UPDATE todo_completions SET count = ?, time = ? WHERE id = ?")
+        let stamp = crate::date::LogTime::local(crate::date::now());
+        sqlx::query(
+            "UPDATE todo_completions SET count = ?, time = ?, tz_offset = ?, location = ? WHERE id = ?",
+        )
             .bind(count)
-            .bind(at)
+            .bind(stamp.epoch)
+            .bind(stamp.offset)
+            .bind(crate::date::current_location())
             .bind(completion_id)
             .execute(&mut *tx)
             .await
@@ -905,10 +946,15 @@ pub async fn set_scheduled_completion(
         crate::sync::events::completion_count(&mut tx, completion_id, count).await?;
         crate::sync::events::completion_time(&mut tx, completion_id).await?;
     } else {
-        sqlx::query("INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, ?)")
+        let stamp = crate::date::LogTime::local(crate::date::now());
+        sqlx::query(
+            "INSERT INTO todo_completions (id, todo_id, time, tz_offset, location, count) VALUES (?, ?, ?, ?, ?, ?)",
+        )
             .bind(completion_id)
             .bind(todo_id)
-            .bind(crate::date::now())
+            .bind(stamp.epoch)
+            .bind(stamp.offset)
+            .bind(crate::date::current_location())
             .bind(count)
             .execute(&mut *tx)
             .await

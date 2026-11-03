@@ -14,7 +14,7 @@ pub fn current_interval_start(start_time: i64, span: jiff::Span, now: i64) -> i6
 /// window end); pending tasks use their schedule-specific availability key.
 pub fn pending_sort_time(task: &crate::db::TaskRow, now: i64) -> i64 {
     if task.is_done() {
-        return task.last_time.unwrap_or_else(|| {
+        return task.last_time.map(|stamp| stamp.epoch).unwrap_or_else(|| {
             task.start_time
                 .saturating_add(task.available_duration_secs.unwrap_or(0))
         });
@@ -32,7 +32,7 @@ pub fn pending_sort_time(task: &crate::db::TaskRow, now: i64) -> i64 {
 /// an entry-less scheduled/recurring history row.
 pub fn completed_sort_time(task: &crate::db::TaskRow) -> i64 {
     if let Some(last) = task.last_time {
-        return last;
+        return last.epoch;
     }
     let start = task.start_time;
     if task.interval_secs.is_none() {

@@ -32,10 +32,10 @@ pub(super) async fn handle_task_edit(
         Some(task_ref) => super::refs::resolve_task_ref(pool, &task_ref).await?,
     };
 
-    if let Some(msg) = edit_task_by_id(pool, config, opts, task_id).await? {
-        if !opts.quiet() {
-            cliclack::outro(msg)?;
-        }
+    if let Some(msg) = edit_task_by_id(pool, config, opts, task_id).await?
+        && !opts.quiet()
+    {
+        cliclack::outro(msg)?;
     }
     Ok(())
 }

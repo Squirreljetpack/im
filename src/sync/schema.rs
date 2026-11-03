@@ -156,6 +156,8 @@ mod tests {
             mood_field::MOOD,
             mood_field::BODY,
             mood_field::TIME,
+            mood_field::TZ_OFFSET,
+            mood_field::LOCATION,
             mood_field::DURATION,
             mood_field::TODO_ID,
         ];
@@ -163,11 +165,15 @@ mod tests {
             tracker_field::TRACKER_TYPE,
             tracker_field::SCORE,
             tracker_field::TIME,
+            tracker_field::TZ_OFFSET,
+            tracker_field::LOCATION,
             tracker_field::MOOD_ID,
         ];
         let completion = [
             completion_field::TODO_ID,
             completion_field::TIME,
+            completion_field::TZ_OFFSET,
+            completion_field::LOCATION,
             completion_field::COUNT,
         ];
 

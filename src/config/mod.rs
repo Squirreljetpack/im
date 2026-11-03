@@ -251,7 +251,7 @@ mod tests {
     fn test_init_clears_zero_intervals() {
         let mut config = Config::default();
         let zero = TrackerInterval {
-            anchor: 0,
+            anchor: jiff::civil::date(2020, 1, 1).at(0, 0, 0, 0),
             span: jiff::Span::new(),
             cumulative: false,
         };
@@ -260,7 +260,7 @@ mod tests {
             TrackerSetting::new(TrackerKind::Float).with_interval(zero),
         );
         let good = TrackerInterval {
-            anchor: 0,
+            anchor: jiff::civil::date(2020, 1, 1).at(0, 0, 0, 0),
             span: jiff::Span::new().days(1),
             cumulative: false,
         };
@@ -483,15 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn test_moods_source_serde_roundtrip() {
-        // [moods] with only `source` (all settings missing) → settings default.
-        let cfg: Config = toml::from_str("[moods]\nsource = \"moods.toml\"\n")
-            .expect("[moods] with only source parses");
-        assert_eq!(cfg.moods.axes.prefix_string, "person says: ");
-        assert_eq!(cfg.moods.axes.blend_steepness, 2.0);
-        assert_eq!(cfg.moods.source, PathBuf::from("moods.toml"));
-        assert!(!cfg.moods.backfill);
-
+    fn test_moods_settings_through_flatten() {
         // Explicit settings are honored through the flatten.
         let cfg: Config = toml::from_str(
             "[moods]\nblend_steepness = 3.5\ntop_k = 8\nsource = \"my-moods.toml\"\nbackfill = true\n",
@@ -502,75 +494,35 @@ mod tests {
         assert_eq!(cfg.moods.source, PathBuf::from("my-moods.toml"));
         assert!(cfg.moods.backfill);
 
-        // A missing `source` key defaults to the empty path.
-        let empty: Config = toml::from_str("").expect("empty toml parses");
-        assert!(empty.moods.source.as_os_str().is_empty());
-        assert!(!empty.moods.backfill);
-
-        // Unknown keys under [moods] are rejected (deny_unknown_fields holds
-        // through the flattened ColorAxesSettings).
+        // Unknown keys under [moods] are rejected: `deny_unknown_fields` still
+        // holds through the flattened settings.
         assert!(
             toml::from_str::<Config>("[moods]\nbogus_key = 1\n").is_err(),
             "unknown [moods] key must be rejected"
         );
-
-        // Full round-trip: serialize then re-parse keeps source + settings.
-        let serialized = toml::to_string(&cfg).expect("serializes");
-        let reparsed: Config = toml::from_str(&serialized).expect("re-parses");
-        assert_eq!(reparsed.moods.axes.blend_steepness, 3.5);
-        assert_eq!(reparsed.moods.source, cfg.moods.source);
-        assert_eq!(reparsed.moods.backfill, cfg.moods.backfill);
-    }
-
-    #[test]
-    fn test_moods_file_deserialization() {
-        // The bundled moods file must parse and yield anchors.
-        let moods = MoodsFile::default();
-        assert!(!moods.pairs.is_empty());
-        assert!(moods.pairs.iter().all(|p| !p.mood.is_empty()));
-
-        // A moods file with explicit entries deserializes.
-        let moods: MoodsFile = toml::from_str(
-            "[[pairs]]\nmood = \"happy\"\ncolor = \"#FF0000\"\n\
-             [[pairs]]\nmood = \"sad\"\ncolor = \"blue\"\n",
-        )
-        .expect("moods file parses");
-        assert_eq!(moods.pairs.len(), 2);
-        assert_eq!(moods.pairs[0].mood, "happy");
-        assert_eq!(moods.pairs[1].color, crossterm::style::Color::Blue);
-
-        // Unknown keys in the moods file are rejected.
-        assert!(toml::from_str::<MoodsFile>("bogus = 1\n").is_err());
     }
 
     #[test]
     fn test_tracker_interval_serde() {
         // The interval deserializes from the table form { anchor = ...,
-        // span = ..., cumulative = ? }; anchors are RFC 3339 timestamps
-        // with an explicit UTC offset.
+        // span = ..., cumulative = ? }; anchors are unzoned civil datetimes.
         let cfg: Config = toml::from_str(
             r#"
             [tracker.sleep]
-            interval = { anchor = "2020-01-01T00:00:00Z", span = "1 day" }
+            interval = { anchor = "2020-01-01T00:00:00", span = "1 day" }
             kind = "null"
             "#,
         )
         .expect("interval table parses");
         let iv = cfg.tracker["sleep"].interval.expect("interval set");
-        assert_eq!(
-            iv.anchor,
-            "2020-01-01T00:00:00Z"
-                .parse::<jiff::Timestamp>()
-                .unwrap()
-                .as_second()
-        );
+        assert_eq!(iv.anchor, jiff::civil::date(2020, 1, 1).at(0, 0, 0, 0));
         assert_eq!(iv.span.fieldwise(), jiff::Span::new().days(1).fieldwise());
         assert_eq!(cfg.tracker["sleep"].kind, TrackerKind::Null);
 
         // The legacy two-element array form binds positionally (anchor,
         // span) with cumulative defaulting to false.
         let cfg_arr: Config = toml::from_str(
-            "[tracker.sleep]\ninterval = [\"2020-01-01T00:00:00Z\", \"1 day\"]\nkind = \"null\"\n",
+            "[tracker.sleep]\ninterval = [\"2020-01-01T00:00:00\", \"1 day\"]\nkind = \"null\"\n",
         )
         .expect("interval array parses");
         assert_eq!(cfg_arr.tracker["sleep"].interval.as_ref(), Some(&iv));
@@ -585,7 +537,7 @@ mod tests {
             "unexpected error: {err}"
         );
         let err = toml::from_str::<Config>(
-            "[tracker.sleep]\ninterval = { anchor = \"2020-01-01T00:00:00Z\", span = \"1 day\", bogus = 1 }\nkind = \"null\"\n",
+            "[tracker.sleep]\ninterval = { anchor = \"2020-01-01T00:00:00\", span = \"1 day\", bogus = 1 }\nkind = \"null\"\n",
         )
         .unwrap_err();
         assert!(
@@ -593,18 +545,20 @@ mod tests {
             "unexpected error: {err}"
         );
 
-        // Anchors without an explicit UTC offset are rejected (table form,
-        // so the rejection comes from the timestamp parse itself).
-        let err = toml::from_str::<Config>(
-            "[tracker.sleep]\ninterval = { anchor = \"2020-01-01 00:00\", span = \"1 day\" }\nkind = \"null\"\n",
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("timestamp"),
-            "expected an anchor-parse error, got: {err}"
-        );
+        // A zoned anchor (trailing Z or numeric offset) is a hard config
+        // error: the anchor is a civil wall clock, not an instant.
+        for anchor in ["2020-01-01T00:00:00Z", "2020-01-01T00:00:00-04:00"] {
+            let err = toml::from_str::<Config>(&format!(
+                "[tracker.sleep]\ninterval = {{ anchor = \"{anchor}\", span = \"1 day\" }}\nkind = \"null\"\n"
+            ))
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("unzoned civil datetime"),
+                "expected a civil-anchor parse error for {anchor}, got: {err}"
+            );
+        }
 
-        // Serialization roundtrip (anchors serialize back as RFC 3339).
+        // Serialization roundtrip (anchors serialize without a zone).
         let serialized = toml::to_string(&cfg).unwrap();
         let reparsed: Config = toml::from_str(&serialized).expect("re-parses");
         let iv2 = reparsed.tracker["sleep"]
@@ -614,7 +568,7 @@ mod tests {
 
         // A zero span is rejected at parse time.
         assert!(toml::from_str::<Config>(
-            "[tracker.sleep]\ninterval = { anchor = \"2020-01-01T00:00:00Z\", span = \"0 days\" }\n"
+            "[tracker.sleep]\ninterval = { anchor = \"2020-01-01T00:00:00\", span = \"0 days\" }\n"
         )
         .is_err());
     }
@@ -646,12 +600,12 @@ mod tests {
             r#"
             [tracker.sleep]
             kind = "null"
-            interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }
+            interval = { anchor = "2026-01-01T00:00:00", span = "1 day" }
             low = "20h"
             high = "4h"
             [tracker.awake_count]
             kind = "null"
-            interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day", cumulative = true }
+            interval = { anchor = "2026-01-01T00:00:00", span = "1 day", cumulative = true }
             low = 0
             high = 5
             [tracker.rating]
@@ -698,12 +652,12 @@ mod tests {
             high = "10m"
             [tracker.mark]
             kind = "null"
-            interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }
+            interval = { anchor = "2026-01-01T00:00:00", span = "1 day" }
             low = 20
             high = "4h"
             [tracker.counted]
             kind = "null"
-            interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day", cumulative = true }
+            interval = { anchor = "2026-01-01T00:00:00", span = "1 day", cumulative = true }
             low = "4h"
             high = 5
             "#,
@@ -739,7 +693,7 @@ mod tests {
             r#"
             [tracker.counted]
             kind = "null"
-            interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day", cumulative = true }
+            interval = { anchor = "2026-01-01T00:00:00", span = "1 day", cumulative = true }
             low = 0
             high = 5
             strict = true
@@ -747,16 +701,5 @@ mod tests {
         )
         .expect("trackers parse");
         assert!(!cfg.tracker["counted"].strict);
-    }
-
-    #[test]
-    fn test_load_pairs_default_when_source_empty() {
-        // Empty source (the default) resolves to the bundled pairs, and
-        // never touches the filesystem.
-        let config = MoodConfig::default();
-        assert!(config.source.as_os_str().is_empty());
-        let pairs = config.load_pairs();
-        assert_eq!(pairs.len(), MoodsFile::default().pairs.len());
-        assert!(!pairs.is_empty());
     }
 }

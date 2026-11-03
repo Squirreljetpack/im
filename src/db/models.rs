@@ -1,6 +1,8 @@
-use sqlx::FromRow;
+use sqlx::sqlite::SqliteRow;
+use sqlx::{FromRow, Row};
 
 use super::Id;
+use crate::date::LogTime;
 use crate::types::TaskKind;
 
 /// A task as seen by the creation/edit flows. `id` is the stable row id
@@ -72,7 +74,9 @@ pub struct UpdateTaskObject {
 pub struct EntryObject {
     pub mood: String,
     pub body: String,
-    pub time: i64,
+    pub time: LogTime,
+    /// Location string committed at write time (empty when the system had no name).
+    pub location: String,
     pub embedding: Option<Vec<u8>>,
     /// Cached emotional-saliency score for the mood text, computed at entry
     /// creation (`None` for journal-only rows or failed embeddings).
@@ -124,7 +128,7 @@ impl std::fmt::Display for TrackerValue {
 
 /// A full todos row plus the aggregate completion count for the current
 /// view/interval context (the `completions` column comes from the query).
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone)]
 pub struct TaskRow {
     pub id: Id,
     pub short_id: Option<i64>,
@@ -142,8 +146,42 @@ pub struct TaskRow {
     /// Parent task id (task tree); `None` for root-level tasks.
     pub parent: Option<Id>,
     pub completions: Option<i32>,
-    #[sqlx(default)]
-    pub last_time: Option<i64>,
+    pub last_time: Option<LogTime>,
+    /// Location of the completion `last_time` names; empty when there is none.
+    pub last_location: String,
+}
+
+impl<'r> FromRow<'r, SqliteRow> for TaskRow {
+    fn from_row(row: &'r SqliteRow) -> Result<Self, sqlx::Error> {
+        let last_time = match row.try_get::<Option<i64>, _>("last_time") {
+            Ok(Some(epoch)) => Some(LogTime::new(epoch, log_offset(row, "last_tz_offset"))),
+            Ok(None) => None,
+            Err(sqlx::Error::ColumnNotFound(_)) => None,
+            Err(err) => return Err(err),
+        };
+        let last_location = row
+            .try_get::<Option<String>, _>("last_location")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        Ok(Self {
+            id: row.try_get("id")?,
+            short_id: row.try_get("short_id")?,
+            name: row.try_get("name")?,
+            body: row.try_get("body")?,
+            priority: row.try_get("priority")?,
+            start_time: row.try_get("start_time")?,
+            available_duration_secs: row.try_get("available_duration_secs")?,
+            interval_secs: row.try_get("interval_secs")?,
+            target_count: row.try_get("target_count")?,
+            optional: row.try_get("optional")?,
+            end_time: row.try_get("end_time")?,
+            parent: row.try_get("parent")?,
+            completions: row.try_get("completions")?,
+            last_time,
+            last_location,
+        })
+    }
 }
 
 impl TaskRow {
@@ -215,7 +253,8 @@ pub struct MoodRow {
     pub id: Id,
     pub mood: String,
     pub body: String,
-    pub time: i64,
+    pub time: LogTime,
+    pub location: String,
     pub embedding: Option<Vec<u8>>,
     /// Cached emotional-saliency score for the mood text, backfilled by
     /// `ColorAxes::mood_color_cached`; `None` until first computed.
@@ -234,14 +273,15 @@ pub struct TrackerEntryRow {
     pub id: Id,
     pub tracker_type: String,
     pub score: String,
-    pub time: i64,
+    pub time: LogTime,
+    pub location: String,
     pub mood: Option<Id>,
 }
 
 /// One `GROUP BY type, typeof(score)` bucket over the `tracker` table, for
 /// `:db doctor`: the storage-class distribution of a tracker type's entries
-/// plus how many of the integer entries are nonzero (time-marker null
-/// trackers must carry score 0).
+/// plus how many of the integer entries are nonzero (informational; null
+/// replacement markers store their slot position there).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackerScoreKindRow {
     pub tracker_type: String,
@@ -250,7 +290,7 @@ pub struct TrackerScoreKindRow {
     pub storage: String,
     /// Entries in this bucket.
     pub count: i64,
-    /// Of `count`, how many have `score != 0` (only meaningful for integer
+    /// Of `count`, how many have `score != 0` (informational for integer
     /// buckets).
     pub nonzero: i64,
 }
@@ -267,13 +307,61 @@ pub struct RecurringTaskMeta {
     pub target_count: i32,
 }
 
-/// A completion event (time, count) for a task. `count` mirrors the i32
+/// A completion event (time, location, count) for a task. `count` mirrors the i32
 /// type of the `todo_completions.count` column (every writer binds an i32
 /// value — see `update_task` and `set_scheduled_completion`).
 #[derive(Debug, Clone)]
 pub struct CompletionRow {
-    pub time: i64,
+    pub time: LogTime,
+    /// Location string committed when the completion was written; may be empty.
+    pub location: String,
     pub count: i32,
+}
+
+/// A log timestamp read from the `time`/`tz_offset` columns.
+pub fn log_time(row: &SqliteRow) -> LogTime {
+    LogTime::new(row.get("time"), log_offset(row, "tz_offset"))
+}
+
+/// A stored `tz_offset` cell as seconds east of UTC.
+///
+/// Sync applies the cell as a 64-bit integer, so a foreign writer can store a
+/// value `i32` cannot express. Such a value is not a UTC offset, so it reads as
+/// UTC instead of failing the row that carries it.
+pub fn log_offset(row: &SqliteRow, column: &str) -> i32 {
+    row.try_get::<i64, _>(column)
+        .ok()
+        .and_then(|secs| i32::try_from(secs).ok())
+        .unwrap_or(0)
+}
+
+/// A mood row read from a query selecting `id`, `mood`, `body`, `time`,
+/// `tz_offset`, `location`, `embedding`, `score`, `duration`, and `todo_id`.
+pub fn mood_row(row: &SqliteRow) -> MoodRow {
+    MoodRow {
+        id: row.get("id"),
+        mood: row.get("mood"),
+        body: row.get("body"),
+        time: log_time(row),
+        location: row.get("location"),
+        embedding: row.get("embedding"),
+        score: row.get("score"),
+        duration: row.get("duration"),
+        todo_id: row.get("todo_id"),
+    }
+}
+
+/// A tracker entry read from a query selecting `id`, `type`, `score` (cast to
+/// text), `time`, `tz_offset`, `location`, and `mood`.
+pub fn tracker_entry_row(row: &SqliteRow) -> TrackerEntryRow {
+    TrackerEntryRow {
+        id: row.get("id"),
+        tracker_type: row.get("type"),
+        score: row.get("score"),
+        time: log_time(row),
+        location: row.get("location"),
+        mood: row.get("mood"),
+    }
 }
 
 /// A task deleted by `prune_tasks`, with the reason it was pruned. The

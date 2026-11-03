@@ -9,7 +9,7 @@
 use anyhow::{Context, Result};
 use sqlx::{Row, SqliteConnection};
 
-use crate::db::{EventId, Id};
+use crate::db::{EventId, Id, log_offset};
 
 use super::schema::{self, Class};
 use super::state;
@@ -54,7 +54,8 @@ pub async fn task_create(conn: &mut SqliteConnection, id: Id) -> Result<()> {
         ),
         (
             task_field::INTERVAL_SECS,
-            row.get::<Option<i64>, _>("interval_secs").map(CellValue::Int),
+            row.get::<Option<i64>, _>("interval_secs")
+                .map(CellValue::Int),
         ),
         (
             task_field::TARGET_COUNT,
@@ -86,11 +87,13 @@ pub async fn task_update(conn: &mut SqliteConnection, id: Id, update: TaskUpdate
 
 /// Emit the creation of a mood entry.
 pub async fn mood_create(conn: &mut SqliteConnection, id: Id) -> Result<()> {
-    let row = sqlx::query("SELECT mood, body, time, duration, todo_id FROM mood WHERE id = ?")
-        .bind(id)
-        .fetch_optional(&mut *conn)
-        .await
-        .context("Failed to read the mood for its sync event")?;
+    let row = sqlx::query(
+        "SELECT mood, body, time, tz_offset, location, duration, todo_id FROM mood WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await
+    .context("Failed to read the mood for its sync event")?;
     let Some(row) = row else { return Ok(()) };
     // `score` is not here on purpose: it is a cache of a function of `body`,
     // so it is derived on read rather than replicated.
@@ -106,6 +109,14 @@ pub async fn mood_create(conn: &mut SqliteConnection, id: Id) -> Result<()> {
         (
             mood_field::TIME,
             Some(CellValue::int(row.get::<i64, _>("time"))),
+        ),
+        (
+            mood_field::TZ_OFFSET,
+            Some(CellValue::int(log_offset(&row, "tz_offset"))),
+        ),
+        (
+            mood_field::LOCATION,
+            Some(CellValue::text(row.get::<String, _>("location"))),
         ),
         (
             mood_field::DURATION,
@@ -130,7 +141,8 @@ pub async fn mood_update(conn: &mut SqliteConnection, id: Id, update: MoodUpdate
 /// Emit the creation of a tracker entry.
 pub async fn tracker_create(conn: &mut SqliteConnection, id: Id) -> Result<()> {
     let row = sqlx::query(
-        "SELECT type, typeof(score) AS score_kind, CAST(score AS TEXT) AS score_text, time, mood
+        "SELECT type, typeof(score) AS score_kind, CAST(score AS TEXT) AS score_text,
+                time, tz_offset, location, mood
          FROM tracker WHERE id = ?",
     )
     .bind(id)
@@ -138,7 +150,8 @@ pub async fn tracker_create(conn: &mut SqliteConnection, id: Id) -> Result<()> {
     .await
     .context("Failed to read the tracker for its sync event")?;
     let Some(row) = row else { return Ok(()) };
-    let score = crate::db::tracker_value(row.get("score_kind"), &row.get::<String, _>("score_text"));
+    let score =
+        crate::db::tracker_value(row.get("score_kind"), &row.get::<String, _>("score_text"));
     let cells = [
         (
             tracker_field::TRACKER_TYPE,
@@ -148,6 +161,14 @@ pub async fn tracker_create(conn: &mut SqliteConnection, id: Id) -> Result<()> {
         (
             tracker_field::TIME,
             Some(CellValue::int(row.get::<i64, _>("time"))),
+        ),
+        (
+            tracker_field::TZ_OFFSET,
+            Some(CellValue::int(log_offset(&row, "tz_offset"))),
+        ),
+        (
+            tracker_field::LOCATION,
+            Some(CellValue::text(row.get::<String, _>("location"))),
         ),
         (
             tracker_field::MOOD_ID,
@@ -172,22 +193,30 @@ pub async fn tracker_update(
 /// Emit a completion row. A delta is an ordinary one-cell entity: its `count`
 /// is signed, and totals are the sum of the rows that survive LWW.
 pub async fn completion(conn: &mut SqliteConnection, id: Id) -> Result<()> {
-    let row = sqlx::query("SELECT todo_id, time, count FROM todo_completions WHERE id = ?")
-        .bind(id)
-        .fetch_optional(&mut *conn)
-        .await
-        .context("Failed to read the completion for its sync event")?;
+    let row = sqlx::query(
+        "SELECT todo_id, time, tz_offset, location, count FROM todo_completions WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await
+    .context("Failed to read the completion for its sync event")?;
     let Some(row) = row else { return Ok(()) };
     let cells = [
         (
             completion_field::TODO_ID,
-            Some(CellValue::text(
-                row.get::<Id, _>("todo_id").to_string(),
-            )),
+            Some(CellValue::text(row.get::<Id, _>("todo_id").to_string())),
         ),
         (
             completion_field::TIME,
             Some(CellValue::int(row.get::<i64, _>("time"))),
+        ),
+        (
+            completion_field::TZ_OFFSET,
+            Some(CellValue::int(log_offset(&row, "tz_offset"))),
+        ),
+        (
+            completion_field::LOCATION,
+            Some(CellValue::text(row.get::<String, _>("location"))),
         ),
         (
             completion_field::COUNT,
@@ -214,19 +243,36 @@ pub async fn completion_count(conn: &mut SqliteConnection, id: Id, value: i32) -
 
 /// Emit the moment a completion row describes, for a row edited in place.
 pub async fn completion_time(conn: &mut SqliteConnection, id: Id) -> Result<()> {
-    let time: Option<i64> =
-        sqlx::query_scalar("SELECT time FROM todo_completions WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&mut *conn)
-            .await
-            .context("Failed to read a completion's time")?;
-    if let Some(time) = time {
+    let row = sqlx::query("SELECT time, tz_offset, location FROM todo_completions WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await
+        .context("Failed to read a completion's time")?;
+    if let Some(row) = row {
         append(
             conn,
             id,
             "completion",
             completion_field::TIME,
-            Some(CellValue::int(time)),
+            Some(CellValue::int(row.get::<i64, _>("time"))),
+            None,
+        )
+        .await?;
+        append(
+            conn,
+            id,
+            "completion",
+            completion_field::TZ_OFFSET,
+            Some(CellValue::int(log_offset(&row, "tz_offset"))),
+            None,
+        )
+        .await?;
+        append(
+            conn,
+            id,
+            "completion",
+            completion_field::LOCATION,
+            Some(CellValue::text(row.get::<String, _>("location"))),
             None,
         )
         .await?;
@@ -272,9 +318,9 @@ async fn append(
     let timestamp = state::next_stamp(&mut *conn).await?;
     let event_id = EventId::new();
     let json = match &value {
-        Some(value) => Some(
-            serde_json::to_string(value).context("Failed to serialize a cell value")?,
-        ),
+        Some(value) => {
+            Some(serde_json::to_string(value).context("Failed to serialize a cell value")?)
+        }
         None => None,
     };
     sqlx::query(
@@ -328,9 +374,7 @@ async fn row_image(conn: &mut SqliteConnection, id: Id, kind: &str) -> Result<Op
     for (name, field) in &spec.fields {
         let column = field.column.as_deref().unwrap_or(name);
         let value = match field.class {
-            Class::Text => row
-                .get::<Option<String>, _>(column)
-                .map(CellValue::Text),
+            Class::Text => row.get::<Option<String>, _>(column).map(CellValue::Text),
             Class::Int => row.get::<Option<i64>, _>(column).map(CellValue::Int),
             Class::Real => row.get::<Option<f64>, _>(column).map(CellValue::Real),
             Class::Scalar => {
@@ -339,9 +383,7 @@ async fn row_image(conn: &mut SqliteConnection, id: Id, kind: &str) -> Result<Op
                 let storage: Option<String> = row.get(kind_key.as_str());
                 let text: Option<String> = row.get(text_key.as_str());
                 match (storage.as_deref(), text) {
-                    (Some("integer"), Some(text)) => {
-                        text.parse().ok().map(CellValue::Int)
-                    }
+                    (Some("integer"), Some(text)) => text.parse().ok().map(CellValue::Int),
                     (Some("real"), Some(text)) => text.parse().ok().map(CellValue::Real),
                     (Some("text"), Some(text)) => Some(CellValue::Text(text)),
                     _ => None,

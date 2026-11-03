@@ -4,9 +4,14 @@ use sqlx::{Row, SqlitePool};
 use super::Id;
 use super::models::{
     CompletionRow, EntryObject, MoodRow, RecurringTaskMeta, TaskRow, TrackerEntryRow,
-    TrackerScoreKindRow, TrackerValue,
+    TrackerScoreKindRow, TrackerValue, log_offset, log_time, mood_row, tracker_entry_row,
 };
 use super::views::attach_full_completions;
+use crate::date::CivilRange;
+
+/// Raw-fetch margin for rebased tracker membership: the widest possible
+/// difference between a recorded and a current UTC offset is under two days.
+pub const CIVIL_FETCH_MARGIN: i64 = 2 * 86_400;
 
 /// Insert a mood entry and its linked tracker values in one transaction.
 /// For Text/Float interval trackers, `replace_slot` deletes the previous
@@ -24,12 +29,14 @@ pub async fn create_entry(pool: &SqlitePool, entry: &EntryObject) -> Result<Opti
         let id = Id::new();
         if let Some(blob) = &entry.embedding {
             sqlx::query(
-                "INSERT INTO mood (id, mood, body, time, embedding, score, duration, todo_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO mood (id, mood, body, time, tz_offset, location, embedding, score, duration, todo_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(id)
             .bind(&entry.mood)
             .bind(&entry.body)
-            .bind(entry.time)
+            .bind(entry.time.epoch)
+            .bind(entry.time.offset)
+            .bind(&entry.location)
             .bind(blob)
             .bind(entry.score)
             .bind(entry.duration)
@@ -39,12 +46,14 @@ pub async fn create_entry(pool: &SqlitePool, entry: &EntryObject) -> Result<Opti
             .context("Failed to insert mood")?;
         } else {
             sqlx::query(
-                "INSERT INTO mood (id, mood, body, time, score, duration, todo_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO mood (id, mood, body, time, tz_offset, location, score, duration, todo_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(id)
             .bind(&entry.mood)
             .bind(&entry.body)
-            .bind(entry.time)
+            .bind(entry.time.epoch)
+            .bind(entry.time.offset)
+            .bind(&entry.location)
             .bind(entry.score)
             .bind(entry.duration)
             .bind(entry.todo_id)
@@ -60,12 +69,13 @@ pub async fn create_entry(pool: &SqlitePool, entry: &EntryObject) -> Result<Opti
 
     for tracker in &entry.trackers {
         if let Some((slot_start, slot_end)) = tracker.replace_slot {
-            let replaced: Vec<Id> = sqlx::query_scalar(
-                "SELECT id FROM tracker WHERE type = ? AND time >= ? AND time < ?",
+            let candidates = sqlx::query(
+                "SELECT id, time, tz_offset FROM tracker \
+                 WHERE type = ? AND time >= ? AND time < ?",
             )
             .bind(&tracker.tracker_type)
-            .bind(slot_start)
-            .bind(slot_end)
+            .bind(slot_start - CIVIL_FETCH_MARGIN)
+            .bind(slot_end + CIVIL_FETCH_MARGIN)
             .fetch_all(&mut *tx)
             .await
             .with_context(|| {
@@ -74,34 +84,39 @@ pub async fn create_entry(pool: &SqlitePool, entry: &EntryObject) -> Result<Opti
                     tracker.tracker_type, slot_start, slot_end
                 )
             })?;
-            sqlx::query("DELETE FROM tracker WHERE type = ? AND time >= ? AND time < ?")
-                .bind(&tracker.tracker_type)
-                .bind(slot_start)
-                .bind(slot_end)
-                .execute(&mut *tx)
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to delete old entry for tracker '{}' in slot {}..{}",
-                        tracker.tracker_type, slot_start, slot_end
-                    )
-                })?;
+            let replaced: Vec<Id> = candidates
+                .iter()
+                .filter(|row| {
+                    let stamp = log_time(row);
+                    let rebased = stamp.rebased();
+                    rebased >= slot_start && rebased < slot_end
+                })
+                .map(|row| row.get::<Id, _>("id"))
+                .collect();
             for id in &replaced {
+                sqlx::query("DELETE FROM tracker WHERE id = ?")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await
+                    .with_context(|| format!("Failed to delete replaced tracker row {id:?}"))?;
                 crate::sync::events::delete(&mut tx, *id, "tracker").await?;
             }
         }
 
         let tracker_id = Id::new();
-        let mut q =
-            sqlx::query("INSERT INTO tracker (id, type, score, time, mood) VALUES (?, ?, ?, ?, ?)")
-                .bind(tracker_id)
-                .bind(&tracker.tracker_type);
+        let mut q = sqlx::query(
+            "INSERT INTO tracker (id, type, score, time, tz_offset, location, mood) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(tracker_id)
+        .bind(&tracker.tracker_type);
         q = match &tracker.value {
             TrackerValue::Text(s) => q.bind(s),
             TrackerValue::Integer(n) => q.bind(n),
             TrackerValue::Float(f) => q.bind(f),
         };
-        q.bind(entry.time)
+        q.bind(entry.time.epoch)
+            .bind(entry.time.offset)
+            .bind(&entry.location)
             .bind(mood_id)
             .execute(&mut *tx)
             .await
@@ -184,7 +199,7 @@ pub async fn clear_moods(
 /// Moods in `[start, end]`, oldest first.
 pub async fn fetch_moods_between(pool: &SqlitePool, start: i64, end: i64) -> Result<Vec<MoodRow>> {
     let rows = sqlx::query(
-        "SELECT id, mood, body, time, embedding, score, duration, todo_id FROM mood WHERE time >= ? AND time <= ? ORDER BY time ASC",
+        "SELECT id, mood, body, time, tz_offset, location, embedding, score, duration, todo_id FROM mood WHERE time >= ? AND time <= ? ORDER BY time ASC",
     )
     .bind(start)
     .bind(end)
@@ -194,15 +209,84 @@ pub async fn fetch_moods_between(pool: &SqlitePool, start: i64, end: i64) -> Res
 
     Ok(rows
         .iter()
-        .map(|row| MoodRow {
-            id: row.get("id"),
-            mood: row.get("mood"),
-            body: row.get("body"),
-            time: row.get("time"),
-            embedding: row.get("embedding"),
-            score: row.get("score"),
-            duration: row.get("duration"),
-            todo_id: row.get("todo_id"),
+        .map(mood_row)
+        .collect())
+}
+
+/// Moods whose recorded civil time falls in `range`, oldest first.
+pub async fn fetch_moods_civil(pool: &SqlitePool, range: CivilRange) -> Result<Vec<MoodRow>> {
+    let rows = sqlx::query(
+        "SELECT id, mood, body, time, tz_offset, location, embedding, score, duration, todo_id FROM mood \
+         WHERE time + tz_offset BETWEEN ? AND ? ORDER BY time ASC",
+    )
+    .bind(range.start)
+    .bind(range.end)
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch mood entries by civil time")?;
+
+    Ok(rows
+        .iter()
+        .map(mood_row)
+        .collect())
+}
+
+/// All tracker entries whose recorded civil time falls in `range` (today view).
+pub async fn fetch_tracker_entries_today_civil(
+    pool: &SqlitePool,
+    range: CivilRange,
+) -> Result<Vec<TrackerEntryRow>> {
+    let rows = sqlx::query(
+        "SELECT id, type, CAST(score AS TEXT) AS score, time, tz_offset, location, mood FROM tracker \
+         WHERE time + tz_offset BETWEEN ? AND ? ORDER BY time ASC",
+    )
+    .bind(range.start)
+    .bind(range.end)
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch today's tracker entries by civil time")?;
+    Ok(rows
+        .iter()
+        .map(tracker_entry_row)
+        .collect())
+}
+
+/// The previous entry of the same type for every tracker row whose civil
+/// time falls in `range`, keyed by the current row id — the today-view
+/// preview's `prev:` field. "Previous" is by time, with the row id as
+/// tiebreaker (same-second entries: the one inserted first wins); the
+/// predecessor may lie outside `range`. Its own stamp and location are
+/// returned, not the current row's.
+pub async fn fetch_tracker_prev_origins(
+    pool: &SqlitePool,
+    range: CivilRange,
+) -> Result<std::collections::HashMap<Id, Option<crate::date::LogOrigin>>> {
+    let rows = sqlx::query(
+        "SELECT t1.id AS id, t2.time AS prev_time, \
+         t2.tz_offset AS prev_tz_offset, t2.location AS prev_location \
+         FROM tracker t1 \
+         LEFT JOIN tracker t2 ON t2.id = (\
+             SELECT t3.id FROM tracker t3 \
+             WHERE t3.type = t1.type \
+               AND (t3.time < t1.time OR (t3.time = t1.time AND t3.id < t1.id)) \
+             ORDER BY t3.time DESC, t3.id DESC LIMIT 1) \
+         WHERE t1.time + t1.tz_offset BETWEEN ? AND ?",
+    )
+    .bind(range.start)
+    .bind(range.end)
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch tracker prev origins by civil time")?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let prev = r.get::<Option<i64>, _>("prev_time").map(|epoch| {
+                crate::date::LogOrigin {
+                    time: crate::date::LogTime::new(epoch, log_offset(r, "prev_tz_offset")),
+                    location: r.get("prev_location"),
+                }
+            });
+            (r.get::<Id, _>("id"), prev)
         })
         .collect())
 }
@@ -215,7 +299,7 @@ pub async fn fetch_tracker_entries(
     end: i64,
 ) -> Result<Vec<TrackerEntryRow>> {
     let rows = sqlx::query(
-        "SELECT id, type, CAST(score AS TEXT) AS score, time, mood FROM tracker WHERE type = ? AND time >= ? AND time <= ? ORDER BY time ASC",
+        "SELECT id, type, CAST(score AS TEXT) AS score, time, tz_offset, location, mood FROM tracker WHERE type = ? AND time >= ? AND time <= ? ORDER BY time ASC",
     )
     .bind(tracker_type)
     .bind(start)
@@ -226,68 +310,7 @@ pub async fn fetch_tracker_entries(
 
     Ok(rows
         .iter()
-        .map(|row| TrackerEntryRow {
-            id: row.get("id"),
-            tracker_type: row.get("type"),
-            score: row.get("score"),
-            time: row.get("time"),
-            mood: row.get("mood"),
-        })
-        .collect())
-}
-
-/// For each tracker entry in `[start, end]`, the time of the previous
-/// entry of the same type, keyed by entry id — the today-view preview's
-/// `prev:` field. "Previous" is by time, with the row id as tiebreaker
-/// (same-second entries: the one inserted first wins). Entries without an
-/// earlier entry map to `None`.
-pub async fn fetch_tracker_prev_times(
-    pool: &SqlitePool,
-    start: i64,
-    end: i64,
-) -> Result<std::collections::HashMap<Id, Option<i64>>> {
-    let rows = sqlx::query(
-        "SELECT t1.id, \
-         (SELECT MAX(t2.time) FROM tracker t2 \
-          WHERE t2.type = t1.type \
-            AND (t2.time < t1.time OR (t2.time = t1.time AND t2.id < t1.id))) AS prev \
-         FROM tracker t1 WHERE t1.time >= ? AND t1.time <= ?",
-    )
-    .bind(start)
-    .bind(end)
-    .fetch_all(pool)
-    .await
-    .context("Failed to fetch tracker prev times")?;
-    Ok(rows
-        .iter()
-        .map(|r| (r.get::<Id, _>("id"), r.get::<Option<i64>, _>("prev")))
-        .collect())
-}
-
-/// All tracker entries in `[start, end]`, oldest first (today view).
-pub async fn fetch_tracker_entries_today(
-    pool: &SqlitePool,
-    start: i64,
-    end: i64,
-) -> Result<Vec<TrackerEntryRow>> {
-    let rows = sqlx::query(
-        "SELECT id, type, CAST(score AS TEXT) AS score, time, mood FROM tracker WHERE time >= ? AND time <= ? ORDER BY time ASC",
-    )
-    .bind(start)
-    .bind(end)
-    .fetch_all(pool)
-    .await
-    .context("Failed to fetch today's tracker entries")?;
-
-    Ok(rows
-        .iter()
-        .map(|row| TrackerEntryRow {
-            id: row.get("id"),
-            tracker_type: row.get("type"),
-            score: row.get("score"),
-            time: row.get("time"),
-            mood: row.get("mood"),
-        })
+        .map(tracker_entry_row)
         .collect())
 }
 
@@ -331,7 +354,7 @@ pub async fn fetch_completions_between(
     end: i64,
 ) -> Result<Vec<CompletionRow>> {
     let rows = sqlx::query(
-        "SELECT time, count FROM todo_completions \
+        "SELECT time, tz_offset, location, count FROM todo_completions \
          WHERE todo_id = ? AND time >= ? AND time <= ? \
          ORDER BY time ASC",
     )
@@ -345,7 +368,8 @@ pub async fn fetch_completions_between(
     Ok(rows
         .iter()
         .map(|row| CompletionRow {
-            time: row.get("time"),
+            time: log_time(row),
+            location: row.get("location"),
             count: row.get("count"),
         })
         .collect())
@@ -419,7 +443,7 @@ pub async fn link_tracker_to_mood(pool: &SqlitePool, tracker_id: Id, mood_id: Id
 /// `moods:` field).
 pub async fn fetch_linked_moods(pool: &SqlitePool, task_id: Id) -> Result<Vec<MoodRow>> {
     let rows = sqlx::query(
-        "SELECT id, mood, body, time, embedding, score, duration, todo_id FROM mood \
+        "SELECT id, mood, body, time, tz_offset, location, embedding, score, duration, todo_id FROM mood \
          WHERE todo_id = ? ORDER BY time ASC",
     )
     .bind(task_id)
@@ -429,16 +453,7 @@ pub async fn fetch_linked_moods(pool: &SqlitePool, task_id: Id) -> Result<Vec<Mo
 
     Ok(rows
         .iter()
-        .map(|r| MoodRow {
-            id: r.get("id"),
-            mood: r.get("mood"),
-            body: r.get("body"),
-            time: r.get("time"),
-            embedding: r.get("embedding"),
-            score: r.get("score"),
-            duration: r.get("duration"),
-            todo_id: r.get("todo_id"),
-        })
+        .map(mood_row)
         .collect())
 }
 
@@ -454,7 +469,7 @@ pub async fn fetch_moods_by_ids(
         return Ok(map);
     }
     let sql = format!(
-        "SELECT id, mood, body, time, embedding, score, duration, todo_id FROM mood WHERE id IN ({})",
+        "SELECT id, mood, body, time, tz_offset, location, embedding, score, duration, todo_id FROM mood WHERE id IN ({})",
         ids.iter().map(|_| "?").collect::<Vec<_>>().join(",")
     );
     let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
@@ -468,16 +483,7 @@ pub async fn fetch_moods_by_ids(
     for row in rows {
         map.insert(
             row.get::<Id, _>("id"),
-            MoodRow {
-                id: row.get("id"),
-                mood: row.get("mood"),
-                body: row.get("body"),
-                time: row.get("time"),
-                embedding: row.get("embedding"),
-                score: row.get("score"),
-                duration: row.get("duration"),
-                todo_id: row.get("todo_id"),
-            },
+            mood_row(&row),
         );
     }
     Ok(map)
@@ -496,7 +502,7 @@ pub async fn fetch_mood_trackers(
         return Ok(map);
     }
     let sql = format!(
-        "SELECT id, type, CAST(score AS TEXT) AS score, time, mood FROM tracker \
+        "SELECT id, type, CAST(score AS TEXT) AS score, time, tz_offset, location, mood FROM tracker \
          WHERE mood IN ({}) ORDER BY time ASC",
         mood_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",")
     );
@@ -509,13 +515,7 @@ pub async fn fetch_mood_trackers(
         .await
         .context("Failed to fetch tracker rows linked to moods")?;
     for row in rows {
-        let entry = TrackerEntryRow {
-            id: row.get("id"),
-            tracker_type: row.get("type"),
-            score: row.get("score"),
-            time: row.get("time"),
-            mood: row.get("mood"),
-        };
+        let entry = tracker_entry_row(&row);
         map.entry(row.get::<Id, _>("mood"))
             .or_insert_with(Vec::new)
             .push(entry);
@@ -536,7 +536,7 @@ pub async fn fetch_mood_tasks(
         return Ok(map);
     }
     let sql = format!(
-        "SELECT t.*, m.id AS mood_id, NULL AS completions, NULL AS last_time \
+        "SELECT t.*, m.id AS mood_id, NULL AS completions, NULL AS last_time, NULL AS last_tz_offset, '' AS last_location \
          FROM todos t JOIN mood m ON m.todo_id = t.id \
          WHERE m.id IN ({}) ORDER BY t.name ASC",
         mood_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",")
@@ -571,6 +571,7 @@ pub async fn fetch_mood_tasks(
             parent: row.get("parent"),
             completions: None,
             last_time: None,
+            last_location: String::new(),
         });
     }
     let by_id: std::collections::HashMap<Id, TaskRow> =
@@ -616,10 +617,6 @@ pub enum TrackerPruneRule {
         tracker_type: String,
         keep: &'static str,
     },
-    /// Delete every entry with `score != 0` (any storage class). Time-marker
-    /// null trackers — `null` with both min and max set — always write
-    /// score 0, so nonzero rows are stale count-mode leftovers.
-    NonzeroScore { tracker_type: String },
     /// Delete every entry of a type with no `[tracker.<type>]` section in
     /// the config (renamed/removed tracker; the today view errors on such
     /// rows).
@@ -628,7 +625,7 @@ pub enum TrackerPruneRule {
 
 /// Storage-class distribution of tracker entries, grouped by type and
 /// `typeof(score)`, for `:db doctor`. `nonzero` counts `score != 0` rows
-/// within the bucket (COALESCE'd; only meaningful for integer buckets).
+/// within the bucket (COALESCE'd; informational for integer buckets).
 pub async fn fetch_tracker_score_kinds(pool: &SqlitePool) -> Result<Vec<TrackerScoreKindRow>> {
     let rows = sqlx::query(
         "SELECT type, typeof(score) AS storage, COUNT(*) AS count, \
@@ -651,10 +648,10 @@ pub async fn fetch_tracker_score_kinds(pool: &SqlitePool) -> Result<Vec<TrackerS
 }
 
 /// Apply `:db doctor` prune rules in one transaction; returns the total
-/// number of rows deleted. `NonzeroScore` and `All` may overlap a `Storage`
-/// rule's rows, but each rule deletes only rows still present, so the
-/// per-rule `rows_affected` counts are disjoint. Every removed row gets a
-/// delete event.
+/// number of rows deleted. `All` may overlap a `Storage` rule's rows, but
+/// each rule deletes only rows still present, so the per-rule
+/// `rows_affected` counts are disjoint. Every removed row gets a delete
+/// event.
 pub async fn prune_tracker_rules(pool: &SqlitePool, rules: &[TrackerPruneRule]) -> Result<u64> {
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
     let mut deleted = 0u64;
@@ -664,9 +661,6 @@ pub async fn prune_tracker_rules(pool: &SqlitePool, rules: &[TrackerPruneRule]) 
                 tracker_type,
                 keep: _,
             } => ("type = ? AND typeof(score) != ?", Some(tracker_type)),
-            TrackerPruneRule::NonzeroScore { tracker_type } => {
-                ("type = ? AND score != 0", Some(tracker_type))
-            }
             TrackerPruneRule::All { tracker_type } => ("type = ?", Some(tracker_type)),
         };
         let select = format!("SELECT id FROM tracker WHERE {predicate}");
@@ -747,12 +741,13 @@ pub async fn update_tracker_score(pool: &SqlitePool, id: Id, value: &TrackerValu
 
 /// The current timestamp of a tracker entry (for the TUI update action's
 /// cross-slot check).
-pub async fn fetch_tracker_time(pool: &SqlitePool, id: Id) -> Result<Option<i64>> {
-    sqlx::query_scalar("SELECT time FROM tracker WHERE id = ?")
+pub async fn fetch_tracker_time(pool: &SqlitePool, id: Id) -> Result<Option<crate::date::LogTime>> {
+    let row = sqlx::query("SELECT time, tz_offset FROM tracker WHERE id = ?")
         .bind(id)
         .fetch_optional(pool)
         .await
-        .context("Failed to fetch tracker entry time")
+        .context("Failed to fetch tracker entry time")?;
+    Ok(row.map(|row| log_time(&row)))
 }
 
 /// Move a tracker entry to `time` by replacing it.
@@ -760,8 +755,15 @@ pub async fn fetch_tracker_time(pool: &SqlitePool, id: Id) -> Result<Option<i64>
 /// `time` decides which slot a row occupies, so it is fixed when the row is
 /// created: a move publishes a delete and an ordinary new row rather than
 /// rewriting the field that decided the old slot. The caller checks that the
-/// move stays within the row's current interval slot.
-pub async fn update_tracker_time(pool: &SqlitePool, id: Id, time: i64) -> Result<u64> {
+/// move stays within the row's current interval slot. `score_override`
+/// rewrites a replace-mode null marker's stored seconds-from-start position;
+/// the re-created row carries the current zone's offset and name.
+pub async fn update_tracker_time(
+    pool: &SqlitePool,
+    id: Id,
+    time: crate::date::LogTime,
+    score_override: Option<i64>,
+) -> Result<u64> {
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
     let row = sqlx::query(
         "SELECT type, typeof(score) AS score_kind, CAST(score AS TEXT) AS score_text, mood
@@ -773,7 +775,13 @@ pub async fn update_tracker_time(pool: &SqlitePool, id: Id, time: i64) -> Result
     .context("Failed to read the tracker entry")?;
     let Some(row) = row else { return Ok(0) };
     let tracker_type: String = row.get("type");
-    let score = crate::db::tracker_value(row.get("score_kind"), &row.get::<String, _>("score_text"));
+    let score = match score_override {
+        Some(value) => TrackerValue::Integer(value),
+        None => {
+            crate::db::tracker_value(row.get("score_kind"), &row.get::<String, _>("score_text"))
+        }
+    };
+    let location = crate::date::current_location();
     let mood: Option<Id> = row.get("mood");
 
     sqlx::query("DELETE FROM tracker WHERE id = ?")
@@ -784,17 +792,20 @@ pub async fn update_tracker_time(pool: &SqlitePool, id: Id, time: i64) -> Result
     crate::sync::events::delete(&mut tx, id, "tracker").await?;
 
     let replacement = Id::new();
-    let mut insert =
-        sqlx::query("INSERT INTO tracker (id, type, score, time, mood) VALUES (?, ?, ?, ?, ?)")
-            .bind(replacement)
-            .bind(&tracker_type);
+    let mut insert = sqlx::query(
+        "INSERT INTO tracker (id, type, score, time, tz_offset, location, mood) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(replacement)
+    .bind(&tracker_type);
     insert = match &score {
         TrackerValue::Text(text) => insert.bind(text),
         TrackerValue::Integer(number) => insert.bind(number),
         TrackerValue::Float(number) => insert.bind(number),
     };
     insert
-        .bind(time)
+        .bind(time.epoch)
+        .bind(time.offset)
+        .bind(location)
         .bind(mood)
         .execute(&mut *tx)
         .await
@@ -851,7 +862,8 @@ mod tests {
             &EntryObject {
                 mood: mood.to_string(),
                 body: String::new(),
-                time: 1_700_000_000,
+                time: crate::date::LogTime::local(1_700_000_000),
+                location: String::new(),
                 embedding: None,
                 score: None,
                 trackers: Vec::new(),
@@ -921,7 +933,8 @@ mod tests {
                 &EntryObject {
                     mood: String::new(),
                     body: String::new(),
-                    time: 1_700_000_000,
+                    time: crate::date::LogTime::local(1_700_000_000),
+                    location: String::new(),
                     embedding: None,
                     score: None,
                     trackers: vec![TrackerObject {
@@ -981,5 +994,49 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn create_entry_emits_location_cells() {
+        let pool = crate::db::test_pool().await.unwrap();
+        create_entry(
+            &pool,
+            &EntryObject {
+                mood: "zoned".to_string(),
+                body: String::new(),
+                time: crate::date::LogTime::new(1_700_000_000, -18_000),
+                location: "America/New_York".to_string(),
+                embedding: None,
+                score: None,
+                trackers: vec![TrackerObject {
+                    tracker_type: "water".to_string(),
+                    value: TrackerValue::Integer(1),
+                    replace_slot: None,
+                }],
+                duration: None,
+                todo_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        for kind in ["mood", "tracker"] {
+            let offsets: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM _sync_events WHERE kind = ? AND field = 'tz_offset'",
+            )
+            .bind(kind)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let locations: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM _sync_events WHERE kind = ? AND field = 'location'",
+            )
+            .bind(kind)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(offsets, 1, "{kind} carries its offset");
+            assert_eq!(locations, 1, "{kind} carries its location");
+        }
     }
 }

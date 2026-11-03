@@ -77,6 +77,18 @@ function cell(
  */
 const REQUIRED: Record<string, [string, CellValue][]> = {
   task: [["start_time", { int: 1_700_000_000 }]],
+  mood: [
+    ["tz_offset", { int: 0 }],
+    ["location", { text: "" }],
+  ],
+  tracker: [
+    ["tz_offset", { int: 0 }],
+    ["location", { text: "" }],
+  ],
+  completion: [
+    ["tz_offset", { int: 0 }],
+    ["location", { text: "" }],
+  ],
 };
 
 function create(
@@ -695,10 +707,11 @@ describe("pages", () => {
         break;
       }
     }
-    expect(seen).toHaveLength(5);
-    expect(new Set(seen).size).toBe(5);
+    expect(seen).toHaveLength(7);
+    expect(new Set(seen).size).toBe(7);
     expect(seen).toContain(`${first}/name`);
     expect(seen).toContain(`${second}/mood`);
+    expect(seen).toContain(`${second}/location`);
   });
 });
 

@@ -130,9 +130,7 @@ pub(crate) fn null_zone_contains(tracker: &TrackerSetting, time: i64) -> bool {
     let Some(interval) = tracker.interval else {
         return false;
     };
-    let Some((slot_start, slot_end)) =
-        crate::date::interval_slot_unix_secs(interval.anchor, interval.span, time)
-    else {
+    let Some((slot_start, slot_end)) = interval.slot_for(crate::date::LogTime::local(time)) else {
         return false;
     };
     let len = (slot_end - slot_start) as f64;
@@ -198,7 +196,7 @@ pub async fn write_tracker_grid<W: Write>(
         TrackerPeriod::Week => {
             if gv.week_rolling {
                 // Rolling 7-day window ending today.
-                let start = date::today_start() - 6 * 86400;
+                let start = date::shift_days(date::today_start(), -6);
                 (start, date::today_end())
             } else {
                 // Calendar week so far: from week_start through today.
@@ -316,14 +314,22 @@ async fn display_mood_tracker<W: Write>(
     period: TrackerPeriod,
     out: &mut W,
 ) -> Result<()> {
-    // Fetch mood entries in the period, grouped by day. Journal-only entries
-    // (empty mood → no embedding) are excluded from the grid.
-    let moods: Vec<crate::db::MoodRow> =
-        crate::db::fetch_moods_between(pool, start_epoch, end_epoch)
-            .await?
-            .into_iter()
-            .filter(|f| !f.mood.is_empty())
-            .collect();
+    // Fetch mood entries in the period by recorded civil time, grouped by
+    // civil day. Journal-only entries (empty mood → no embedding) are
+    // excluded from the grid.
+    let start_date = crate::date::zoned_from_unix_secs(start_epoch)
+        .context("mood grid: start is a valid epoch")?
+        .date();
+    let end_date = crate::date::zoned_from_unix_secs(end_epoch)
+        .context("mood grid: end is a valid epoch")?
+        .date();
+    let civil_range = crate::date::CivilRange::from_dates(start_date, end_date)
+        .context("mood grid: civil range")?;
+    let moods: Vec<crate::db::MoodRow> = crate::db::fetch_moods_civil(pool, civil_range)
+        .await?
+        .into_iter()
+        .filter(|f| !f.mood.is_empty())
+        .collect();
 
     if moods.is_empty() {
         writeln!(out, "No mood entries in this period.")?;
@@ -340,17 +346,25 @@ async fn display_mood_tracker<W: Write>(
 
     let embedder = global::embedder();
 
-    let day_secs: i64 = 86400;
-    let num_days = ((end_epoch - start_epoch) / day_secs + 1) as usize;
+    let mut day_dates = Vec::new();
+    let mut day = start_date;
+    while day <= end_date {
+        day_dates.push(day);
+        day = day
+            .checked_add(jiff::Span::new().days(1))
+            .context("mood grid: day overflow")?;
+    }
+    let num_days = day_dates.len();
     let mut day_moods: Vec<Vec<&crate::db::MoodRow>> = vec![Vec::new(); num_days];
     let mut day_has_entry: Vec<bool> = vec![false; num_days];
 
     for f in &moods {
-        let time = f.time;
-        let day_idx = ((time - start_epoch) / day_secs) as usize;
-        if day_idx >= num_days {
+        let Some(civil_date) = f.time.civil().ok().map(|civil| civil.date()) else {
             continue;
-        }
+        };
+        let Ok(day_idx) = day_dates.binary_search(&civil_date) else {
+            continue;
+        };
         day_has_entry[day_idx] = true;
         day_moods[day_idx].push(f);
     }
@@ -564,9 +578,20 @@ async fn display_tracker<W: Write>(
         .get(tracker_type)
         .ok_or_else(|| anyhow::anyhow!("Unknown tracker '{}' not found in config", tracker_type))?;
 
-    // Fetch all entries in the period
+    // Fetch all entries in the period. An interval tracker is widened by the
+    // maximum offset delta so a log whose rebased time falls in the window is
+    // not dropped; non-interval trackers list the raw period exactly.
+    let (fetch_start, fetch_end) =
+        if tracker.interval.is_some() && tracker.kind != TrackerKind::Text {
+            (
+                start_epoch - crate::db::CIVIL_FETCH_MARGIN,
+                end_epoch + crate::db::CIVIL_FETCH_MARGIN,
+            )
+        } else {
+            (start_epoch, end_epoch)
+        };
     let entries =
-        crate::db::fetch_tracker_entries(pool, tracker_type, start_epoch, end_epoch).await?;
+        crate::db::fetch_tracker_entries(pool, tracker_type, fetch_start, fetch_end).await?;
 
     if entries.is_empty() {
         writeln!(
@@ -587,8 +612,11 @@ async fn display_tracker<W: Write>(
                 writeln!(
                     out,
                     "{}",
-                    format!(" [{}]", crate::date::format_datetime_short(entry.time))
-                        .with(CtColor::DarkGrey)
+                    format!(
+                        " [{}]",
+                        crate::date::format_datetime_short(entry.time.epoch)
+                    )
+                    .with(CtColor::DarkGrey)
                 )?;
             } else {
                 writeln!(out)?;
@@ -603,12 +631,14 @@ async fn display_tracker<W: Write>(
     // an interval are unsupported and skipped with an error.
     let colors = tracker.colors();
     if let Some(interval) = tracker.interval {
-        let (Ok(anchor_z), Ok(start_z), Ok(end_z)) = (
-            crate::date::zoned_from_unix_secs(interval.anchor),
+        let Some(anchor_z) = interval.anchor_zoned() else {
+            anyhow::bail!("Tracker '{}' has an invalid interval anchor.", tracker_type);
+        };
+        let (Ok(start_z), Ok(end_z)) = (
             crate::date::zoned_from_unix_secs(start_epoch),
             crate::date::zoned_from_unix_secs(end_epoch),
         ) else {
-            anyhow::bail!("Tracker '{}' has an invalid interval anchor.", tracker_type);
+            anyhow::bail!("Tracker '{}' has an invalid interval window.", tracker_type);
         };
         let start_idx =
             crate::date::interval_index(&anchor_z, &start_z, interval.span).unwrap_or(0);
@@ -617,30 +647,38 @@ async fn display_tracker<W: Write>(
         let num_slots = (end_idx - start_idx + 1).max(0) as usize;
         let mut slot_sums: Vec<f64> = vec![0.0; num_slots];
         let mut slot_has_entry: Vec<bool> = vec![false; num_slots];
-        // Null time-marker entries: remember the entry time per slot so the
-        // color can be computed from the time-of-day position.
+        // Null time-marker entries: remember the slot length per slot so the
+        // circular color zone can be normalized.
         let mut slot_time: Vec<Option<i64>> = vec![None; num_slots];
 
         for entry in &entries {
             let score = score_f64(&entry.score);
             let time = entry.time;
-            let Ok(t_z) = crate::date::zoned_from_unix_secs(time) else {
+            let Some(idx) = interval.index_for(time) else {
                 continue;
             };
-            let Ok(idx) = crate::date::interval_index(&anchor_z, &t_z, interval.span) else {
+            let Some((slot_start, slot_end)) = interval.slot_for(time) else {
                 continue;
             };
+            if idx < start_idx {
+                continue;
+            }
             let idx = (idx - start_idx) as usize;
             if idx < num_slots {
                 if tracker.kind == TrackerKind::Null {
-                    // Null markers carry score 0; the slot's value is its
-                    // entry count (1 in replace mode).
-                    slot_sums[idx] += 1.0;
+                    if interval.cumulative {
+                        // Cumulative null: the value is the slot's log count.
+                        slot_sums[idx] += 1.0;
+                    } else {
+                        // Replace null: the value is the stored seconds from
+                        // the interval start.
+                        slot_sums[idx] = score;
+                    }
                 } else {
                     slot_sums[idx] += score;
                 }
                 slot_has_entry[idx] = true;
-                slot_time[idx] = Some(time);
+                slot_time[idx] = Some(slot_end - slot_start);
             }
         }
 
@@ -761,7 +799,7 @@ async fn display_recurring_tracker<W: Write>(
         let mut interval_sums: Vec<i64> = vec![0; num_intervals];
 
         for completion in &completions {
-            let Ok(t_z) = crate::date::zoned_from_unix_secs(completion.time) else {
+            let Ok(t_z) = crate::date::zoned_from_unix_secs(completion.time.epoch) else {
                 continue;
             };
             let Ok(idx) = crate::date::interval_index(&anchor_z, &t_z, span) else {
@@ -822,7 +860,7 @@ async fn display_recurring_tracker<W: Write>(
 /// interval (anchor + span): `[anchor + span*k, anchor + span*(k+1))`.
 /// Slots tile the timeline in both directions from the anchor.
 pub fn interval_slot(interval: TrackerInterval, time_epoch: i64) -> Option<(i64, i64)> {
-    crate::date::interval_slot_unix_secs(interval.anchor, interval.span, time_epoch)
+    interval.slot_for(crate::date::LogTime::local(time_epoch))
 }
 
 /// The replacement-slot rules of the configured trackers, used when replaying
@@ -853,10 +891,10 @@ impl TrackerSlots {
         Self { intervals }
     }
 
-    /// The slot an entry of `tracker_type` logged at `time_epoch` replaces,
-    /// or `None` when that tracker appends every entry.
-    pub fn slot(&self, tracker_type: &str, time_epoch: i64) -> Option<(i64, i64)> {
-        interval_slot(*self.intervals.get(tracker_type)?, time_epoch)
+    /// The slot an entry of `tracker_type` replaces, or `None` when that
+    /// tracker appends every entry.
+    pub fn slot(&self, tracker_type: &str, stamp: crate::date::LogTime) -> Option<(i64, i64)> {
+        self.intervals.get(tracker_type)?.slot_for(stamp)
     }
 }
 
@@ -987,7 +1025,9 @@ mod tests {
     fn test_null_zone_contains() {
         let tracker = TrackerSetting::new(TrackerKind::Null)
             .with_interval(TrackerInterval {
-                anchor: 1_600_000_000,
+                anchor: crate::date::zoned_from_unix_secs(1_600_000_000)
+                    .unwrap()
+                    .datetime(),
                 span: jiff::Span::new().days(1),
                 cumulative: false,
             })

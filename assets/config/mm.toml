@@ -5,7 +5,7 @@ max = 25
 
 [query]
 prompt_style.fg = "Gray"
-prompt_style.modifier = "ITALIC"
+prompt_style.modifier = "ITALIC | BOLD"
 
 [ui]
 mouse_events = true

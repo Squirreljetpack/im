@@ -142,7 +142,7 @@ fn build_tracker_preview(
     if let Some(iv) = &setting.interval {
         lines.push(field_line(
             "anchor",
-            date::format_human_datetime(iv.anchor, named_months),
+            date::format_civil_datetime(iv.anchor, named_months),
         ));
         lines.push(field_line("span", date::format_span(&iv.span)));
         lines.push(field_line("cumulative", iv.cumulative.to_string()));
@@ -349,6 +349,10 @@ fn handler(action: ImAction, state: &mut MMState<'_, TrackerRow, ()>, ctx: &Trac
     match action {
         ImAction::Update => {
             if let Some(row) = state.current_raw().cloned() {
+                if let Some(message) = strict_null_error(&row.name, &row.setting) {
+                    toast::set(state, Level::Error, message);
+                    return;
+                }
                 entry_prompt(ctx.clone(), row);
             }
         }
@@ -368,12 +372,8 @@ fn entry_prompt(ctx: TrackerCtx, row: TrackerRow) {
                 ));
                 return;
             }
-            if row.setting.strict && !null_zone_contains(&row.setting, date::now()) {
-                ctx.error(format!(
-                    "tracker '{}': cannot log now — {}",
-                    row.name,
-                    null_strict_hint(&row.setting)
-                ));
+            if let Some(message) = strict_null_error(&row.name, &row.setting) {
+                ctx.error(message);
                 return;
             }
             let prompt = null_confirm(row, ctx.clone());
@@ -384,7 +384,7 @@ fn entry_prompt(ctx: TrackerCtx, row: TrackerRow) {
             let slot = row
                 .setting
                 .interval
-                .and_then(|iv| date::interval_slot_unix_secs(iv.anchor, iv.span, now));
+                .and_then(|iv| iv.slot_for(date::LogTime::local(now)));
             let replacing = row.setting.interval.is_some_and(|iv| !iv.cumulative);
             if replacing && slot.is_none() {
                 ctx.error(format!(
@@ -436,6 +436,10 @@ fn null_confirm(row: TrackerRow, ctx: TrackerCtx) -> ConfirmPrompt {
         cursor: 0,
         on_accept: Some(Box::new(move |idx| {
             if idx == 0 {
+                if let Some(message) = strict_null_error(&name, &setting) {
+                    ctx.error(message);
+                    return;
+                }
                 let name = name.clone();
                 let setting = setting.clone();
                 let ctx = ctx.clone();
@@ -499,18 +503,26 @@ fn log_title(name: &str, slot: Option<(i64, i64)>) -> String {
 /// The value currently in `slot` for a replace-mode tracker, formatted the
 /// way that kind displays itself. `None` when the slot is empty.
 async fn replaced_value(row: &TrackerRow, slot: (i64, i64)) -> Option<String> {
+    let interval = row.setting.interval?;
     let (start, end) = slot;
-    let entries =
-        match crate::db::fetch_tracker_entries(&pool(), &row.name, start, end.saturating_sub(1))
-            .await
-        {
-            Ok(entries) => entries,
-            Err(e) => {
-                log::warn!("Failed to fetch the replaced tracker value: {e:#}");
-                return None;
-            }
-        };
-    let entry = entries.last()?;
+    let entries = match crate::db::fetch_tracker_entries(
+        &pool(),
+        &row.name,
+        start - crate::db::CIVIL_FETCH_MARGIN,
+        end + crate::db::CIVIL_FETCH_MARGIN,
+    )
+    .await
+    {
+        Ok(entries) => entries,
+        Err(e) => {
+            log::warn!("Failed to fetch the replaced tracker value: {e:#}");
+            return None;
+        }
+    };
+    let entry = entries
+        .into_iter()
+        .filter(|entry| interval.start_for(entry.time) == Some(start))
+        .last()?;
     Some(format_replaced(row.setting.kind, &entry.score))
 }
 
@@ -559,6 +571,20 @@ fn truncate_hint(value: String) -> String {
     shortened
 }
 
+/// The error for a strict null tracker whose strict when-zone excludes now.
+fn strict_null_error(name: &str, setting: &TrackerSetting) -> Option<String> {
+    (setting.kind == TrackerKind::Null
+        && setting.interval.is_some()
+        && setting.strict
+        && !null_zone_contains(setting, date::now()))
+    .then(|| {
+        format!(
+            "tracker '{name}': cannot log now — {}",
+            null_strict_hint(setting)
+        )
+    })
+}
+
 fn null_strict_hint(setting: &TrackerSetting) -> String {
     let (Some(low), Some(high)) = (setting.low, setting.high) else {
         return "strict".to_string();
@@ -582,8 +608,9 @@ fn null_strict_hint(setting: &TrackerSetting) -> String {
 
 /// Parse, strict-gate, and insert one tracker entry — the same pipeline as
 /// the CLI (`parse_tracker_value` → `enforce_strict` → `db::create_entry`).
-/// Null trackers carry an interval marker with score 0; replace-mode interval
-/// trackers drop the slot's previous entry inside `create_entry`.
+/// Null replace markers store their seconds from the slot start; cumulative
+/// null markers store 0. Replace-mode interval trackers drop the slot's
+/// previous entry inside `create_entry`.
 async fn insert_entry(ctx: &TrackerCtx, name: &str, setting: &TrackerSetting, raw: Option<&str>) {
     let now = date::now();
     let (value, replace_slot) = match setting.kind {
@@ -592,27 +619,23 @@ async fn insert_entry(ctx: &TrackerCtx, name: &str, setting: &TrackerSetting, ra
                 ctx.error(format!("tracker '{name}' requires an interval to log"));
                 return;
             };
-            if setting.strict && !null_zone_contains(setting, now) {
-                ctx.error(format!(
-                    "tracker '{name}': cannot log now — {}",
-                    null_strict_hint(setting)
-                ));
+            if let Some(message) = strict_null_error(name, setting) {
+                ctx.error(message);
                 return;
             }
+            let Some(slot) = interval.slot_for(date::LogTime::local(now)) else {
+                ctx.error(format!(
+                    "tracker '{name}': could not compute the interval slot"
+                ));
+                return;
+            };
+            let position = if interval.cumulative { 0 } else { now - slot.0 };
             let replace_slot = if interval.cumulative {
                 None
             } else {
-                match date::interval_slot_unix_secs(interval.anchor, interval.span, now) {
-                    Some(slot) => Some(slot),
-                    None => {
-                        ctx.error(format!(
-                            "tracker '{name}': could not compute the interval slot"
-                        ));
-                        return;
-                    }
-                }
+                Some(slot)
             };
-            (TrackerValue::Integer(0), replace_slot)
+            (TrackerValue::Integer(position), replace_slot)
         }
         _ => {
             let Some(raw) = raw else { return };
@@ -635,17 +658,15 @@ async fn insert_entry(ctx: &TrackerCtx, name: &str, setting: &TrackerSetting, ra
                 return;
             }
             let replace_slot = match setting.interval {
-                Some(iv) if !iv.cumulative => {
-                    match date::interval_slot_unix_secs(iv.anchor, iv.span, now) {
-                        Some(slot) => Some(slot),
-                        None => {
-                            ctx.error(format!(
-                                "tracker '{name}': could not compute the interval slot"
-                            ));
-                            return;
-                        }
+                Some(iv) if !iv.cumulative => match iv.slot_for(date::LogTime::local(now)) {
+                    Some(slot) => Some(slot),
+                    None => {
+                        ctx.error(format!(
+                            "tracker '{name}': could not compute the interval slot"
+                        ));
+                        return;
                     }
-                }
+                },
                 _ => None,
             };
             (value, replace_slot)
@@ -655,7 +676,8 @@ async fn insert_entry(ctx: &TrackerCtx, name: &str, setting: &TrackerSetting, ra
     let entry = EntryObject {
         mood: String::new(),
         body: String::new(),
-        time: now,
+        time: date::LogTime::local(now),
+        location: date::current_location(),
         embedding: None,
         score: None,
         trackers: vec![TrackerObject {

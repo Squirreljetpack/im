@@ -56,8 +56,8 @@ fn main() -> Result<()> {
 async fn populate(pool: &sqlx::SqlitePool, config: &Config) -> Result<()> {
     let now = date::now();
     let today = date::today_start();
-    let yesterday = date::day_start(today - 86400);
-    let tomorrow = date::day_start(today + 86400);
+    let yesterday = date::shift_days(today, -1);
+    let tomorrow = date::shift_days(today, 1);
 
     // 1. Mood & tracker entries (embedding: None everywhere).
     seed_mood_entries(pool, config, today, yesterday).await?;
@@ -101,7 +101,7 @@ async fn seed_mood_entries(
 ) -> Result<()> {
     let h = |hour: i64| today + hour * 3600;
     let yh = |hour: i64| yesterday + hour * 3600;
-    let two_days_ago = date::day_start(today - 2 * 86400);
+    let two_days_ago = date::shift_days(today, -2);
 
     // --- today: tracker-kind + bin-edge coverage ---------------------------
     seed_entry(pool, config, "happy", "", h(9), &[]).await?; // mood only
@@ -185,7 +185,7 @@ async fn seed_mood_entries(
     .await?; // above max
 
     // --- last week ---------------------------------------------------------
-    let last_week = date::day_start(today - 7 * 86400);
+    let last_week = date::shift_days(today, -7);
     // run_times inverted: larger is worse → first color, in its own week slot
     // so it isn't replaced by today's better sample.
     seed_entry(
@@ -215,7 +215,7 @@ async fn seed_mood_entries(
         if i % 10 == 0 {
             continue; // leave a few ◯ cells
         }
-        let t = date::day_start(today - i * 86400) + 10 * 3600;
+        let t = date::shift_days(today, -i) + 10 * 3600;
         let mood = MONTH_MOODS[(i as usize) % MONTH_MOODS.len()];
         let sleep_val = format!("{:.1}", 6.5 + ((i % 6) as f64) * 0.5);
         seed_entry(pool, config, mood, "", t, &[("sleep", &sleep_val)]).await?;
@@ -241,7 +241,7 @@ async fn seed_mood_entries(
             let steps = YEAR_STEPS[d % YEAR_STEPS.len()];
             seed_entry(pool, config, mood, "", t + 10 * 3600, &[("steps", steps)]).await?;
         }
-        t = date::day_start(t + 86400);
+        t = date::shift_days(t, 1);
         d += 1;
     }
 
@@ -638,7 +638,7 @@ fn replace_slot(config: &Config, name: &str, time: i64) -> Option<(i64, i64)> {
         .get(name)
         .filter(|t| t.interval.is_some_and(|iv| !iv.cumulative))
         .and_then(|t| t.interval)
-        .and_then(|iv| crate::date::interval_slot_unix_secs(iv.anchor, iv.span, time))
+        .and_then(|iv| iv.slot_for(im::date::LogTime::local(time)))
 }
 
 /// Insert one mood/tracker entry with `embedding: None`. The grid and today
@@ -664,7 +664,8 @@ async fn seed_entry(
     let entry = EntryObject {
         mood: mood.to_string(),
         body: body.to_string(),
-        time,
+        time: im::date::LogTime::local(time),
+        location: im::date::current_location(),
         embedding: None,
         score: None,
         trackers,

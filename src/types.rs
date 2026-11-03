@@ -151,10 +151,41 @@ impl TodayHorizon {
     pub fn end_epoch(&self, day_start: i64) -> i64 {
         match self {
             TodayHorizon::Today => date::day_end(day_start),
-            TodayHorizon::Tomorrow => date::day_end(day_start + 86400),
-            TodayHorizon::Week => date::day_end(day_start + 6 * 86400),
+            TodayHorizon::Tomorrow => date::day_end(date::shift_days(day_start, 1)),
+            TodayHorizon::Week => date::day_end(date::shift_days(day_start, 6)),
             TodayHorizon::Month => date::month_horizon_end(day_start),
         }
+    }
+
+    /// The horizon as an inclusive civil-seconds range: the anchored day
+    /// through the horizon's last calendar day, `00:00:00`..=`23:59:59` on
+    /// the recorded wall clock. Distinct from [`Self::end_epoch`], which is
+    /// the absolute range used for task schedules.
+    pub fn civil_range(&self, day_start: i64) -> date::CivilRange {
+        let Ok(anchored) = date::zoned_from_unix_secs(day_start) else {
+            return date::CivilRange {
+                start: day_start,
+                end: self.end_epoch(day_start),
+            };
+        };
+        let start = anchored.date();
+        let end = match self {
+            TodayHorizon::Today => Some(start),
+            TodayHorizon::Tomorrow => date::zoned_from_unix_secs(date::shift_days(day_start, 1))
+                .ok()
+                .map(|z| z.date()),
+            TodayHorizon::Week => date::zoned_from_unix_secs(date::shift_days(day_start, 6))
+                .ok()
+                .map(|z| z.date()),
+            TodayHorizon::Month => date::zoned_from_unix_secs(date::month_horizon_end(day_start))
+                .ok()
+                .map(|z| z.date()),
+        }
+        .unwrap_or(start);
+        date::CivilRange::from_dates(start, end).unwrap_or(date::CivilRange {
+            start: day_start,
+            end: self.end_epoch(day_start),
+        })
     }
 }
 
@@ -236,5 +267,16 @@ mod tests {
         assert_eq!(TodayHorizon::Tomorrow.label(), "+tomorrow");
         assert_eq!(TodayHorizon::Week.label(), "+this week");
         assert_eq!(TodayHorizon::Month.label(), "+this month");
+    }
+
+    #[test]
+    fn civil_range_is_calendar_based() {
+        // A 23-hour local day still has 24 hours of civil seconds.
+        let day = date::parse_datetime("2026-03-08 00:00", date::DATE_DIALECT).unwrap();
+        let today = TodayHorizon::Today.civil_range(day);
+        assert_eq!(today.end - today.start, 86_399);
+        let week = TodayHorizon::Week.civil_range(day);
+        assert_eq!(week.end - week.start, 7 * 86_400 - 1);
+        assert!(week.contains(today.end + 86_400));
     }
 }

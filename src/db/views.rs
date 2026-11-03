@@ -3,7 +3,8 @@ use sqlx::{Row, SqlitePool};
 
 use super::Id;
 use super::entries::fetch_completions_between;
-use super::models::{CompletionRow, RecurringWindow, TaskRow};
+use super::models::{CompletionRow, RecurringWindow, TaskRow, log_time};
+use crate::date::{LogOrigin, LogTime};
 use crate::types::{TasksFilter, ViewMode, ViewVariant};
 
 /// Oneshot tasks per the today view's [`TasksFilter`]. Bounds are on the
@@ -34,7 +35,7 @@ pub async fn fetch_oneshot_tasks(
         // this arm is a defensive short-circuit.
         TasksFilter::None => return Ok(Vec::new()),
         TasksFilter::All | TasksFilter::Pending => sqlx::query_as::<_, TaskRow>(
-            r#"SELECT t.*, NULL AS completions, NULL AS last_time
+            r#"SELECT t.*, NULL AS completions, NULL AS last_time, NULL AS last_tz_offset, '' AS last_location
                FROM todos t
                WHERE t.interval_secs IS NULL
                AND t.available_duration_secs IS NULL
@@ -44,7 +45,7 @@ pub async fn fetch_oneshot_tasks(
         .await
         .context("Failed to fetch oneshot tasks")?,
         TasksFilter::Horizon => sqlx::query_as::<_, TaskRow>(
-            r#"SELECT t.*, NULL AS completions, NULL AS last_time
+            r#"SELECT t.*, NULL AS completions, NULL AS last_time, NULL AS last_tz_offset, '' AS last_location
                FROM todos t
                WHERE t.interval_secs IS NULL
                AND t.available_duration_secs IS NULL
@@ -60,7 +61,7 @@ pub async fn fetch_oneshot_tasks(
         // Strict `end_time` bound: undated tasks are never overdue and have
         // no due-in-horizon moment, so they don't belong to this filter.
         TasksFilter::Due => sqlx::query_as::<_, TaskRow>(
-            r#"SELECT t.*, NULL AS completions, NULL AS last_time
+            r#"SELECT t.*, NULL AS completions, NULL AS last_time, NULL AS last_tz_offset, '' AS last_location
                FROM todos t
                WHERE t.interval_secs IS NULL
                AND t.available_duration_secs IS NULL
@@ -74,7 +75,7 @@ pub async fn fetch_oneshot_tasks(
         .context("Failed to fetch due oneshot tasks")?,
         // Creation-moment bound (`start_time`, stamped when `! name` ran).
         TasksFilter::CreatedInWindow => sqlx::query_as::<_, TaskRow>(
-            r#"SELECT t.*, NULL AS completions, NULL AS last_time
+            r#"SELECT t.*, NULL AS completions, NULL AS last_time, NULL AS last_tz_offset, '' AS last_location
                FROM todos t
                WHERE t.interval_secs IS NULL
                AND t.available_duration_secs IS NULL
@@ -101,16 +102,17 @@ pub async fn fetch_oneshot_tasks(
 
 /// Scheduled tasks whose availability window overlaps `[floor, horizon_end)`:
 /// started before the horizon ends and still open past the floor. Used by the
-/// today view (floor = today start, horizon_end scales with the horizon). All
-/// states are included — ongoing, completed, failed — matching the window
-/// overlap semantics in VIEWS.md.
+/// today view (floor = today start, horizon_end scales with the horizon).
+/// Unmarked, failed, and auto-completed rows use window overlap; explicit
+/// completions are excluded because they surface on their civil completion
+/// day through [`fetch_tasks_completed_on`].
 pub async fn fetch_scheduled_today(
     pool: &SqlitePool,
     horizon_end: i64,
     floor: i64,
 ) -> Result<Vec<TaskRow>> {
     let tasks = sqlx::query_as::<_, TaskRow>(
-        r#"SELECT t.*, NULL AS completions, NULL AS last_time
+        r#"SELECT t.*, NULL AS completions, NULL AS last_time, NULL AS last_tz_offset, '' AS last_location
            FROM todos t
            WHERE t.interval_secs IS NULL
              AND t.available_duration_secs IS NOT NULL
@@ -125,7 +127,10 @@ pub async fn fetch_scheduled_today(
     .context("Failed to fetch scheduled tasks for today")?;
 
     let with_completions = attach_full_completions(pool, tasks, crate::date::now()).await?;
-    Ok(with_completions)
+    Ok(with_completions
+        .into_iter()
+        .filter(|task| !task.completions.is_some_and(|count| count > 0))
+        .collect())
 }
 
 /// Whether a recurring task is currently within its availability window.
@@ -140,8 +145,7 @@ pub fn recurring_available(task: &TaskRow, now: i64) -> bool {
     }
     match (task.interval_span(), task.available_duration_secs) {
         (Some(span), Some(dur)) if dur < crate::date::span_rough_seconds(span) as i64 => {
-            let interval_start =
-                crate::task::current_interval_start(task.start_time, span, now);
+            let interval_start = crate::task::current_interval_start(task.start_time, span, now);
             now - interval_start < dur
         }
         _ => true,
@@ -158,34 +162,33 @@ pub fn recurring_available(task: &TaskRow, now: i64) -> bool {
 pub struct CompletedOnRow {
     pub task: TaskRow,
     pub interval: Option<(i64, i64)>,
-    pub day_last: Option<i64>,
+    pub day_last: Option<LogTime>,
 }
 
-/// Tasks with a completion entry in `[day_start, day_end)` — the
-/// "completed today" fetch for the today view. A recurring task yields one row
-/// per interval that has a completion in the day (tiling backward past
+/// Tasks with a completion entry in a civil range — the completed-on fetch
+/// for the today view. A recurring task yields one row per interval that has
+/// a completion in the range (tiling backward past
 /// `start_time`, so completions logged before a moved-forward start still
 /// count); the recurring sum is scoped to that interval. Other rows yield one
-/// row per task with the day-window sum. `day_last` is the newest in-day
-/// completion for the row's interval, while the task's `last_time` is the
+/// row per task with the range sum. `day_last` is the newest completion in
+/// the range for the row's interval, while the task's `last_time` is the
 /// newest completion in that interval.
 pub async fn fetch_tasks_completed_on(
     pool: &SqlitePool,
-    day_start: i64,
-    day_end: i64,
+    range: crate::date::CivilRange,
 ) -> Result<Vec<CompletedOnRow>> {
     let tasks = sqlx::query_as::<_, TaskRow>(
-        r#"SELECT t.*, NULL AS completions, NULL AS last_time
+        r#"SELECT t.*, NULL AS completions, NULL AS last_time, NULL AS last_tz_offset, '' AS last_location
            FROM todos t
            WHERE EXISTS (
                SELECT 1 FROM todo_completions c
-               WHERE c.todo_id = t.id AND c.time >= ? AND c.time < ?
+               WHERE c.todo_id = t.id AND c.time + c.tz_offset BETWEEN ? AND ?
                  AND c.count > 0
            )
            ORDER BY t.priority DESC, t.start_time ASC"#,
     )
-    .bind(day_start)
-    .bind(day_end)
+    .bind(range.start)
+    .bind(range.end)
     .fetch_all(pool)
     .await
     .context("Failed to fetch tasks completed today")?;
@@ -194,15 +197,15 @@ pub async fn fetch_tasks_completed_on(
         return Ok(Vec::new());
     }
 
-    // All rows, not just the day's: a recurring row's interval can reach
-    // outside the day window (and before `start_time`).
+    // All rows, not just the range's: a recurring row's interval can reach
+    // outside the range (and before `start_time`).
     let by_task = fetch_completions_for_tasks(pool, &tasks).await?;
     let mut completed = Vec::new();
     for task in tasks {
         let rows = by_task.get(&task.id).cloned().unwrap_or_default();
         let day_rows: Vec<CompletionRow> = rows
             .iter()
-            .filter(|c| c.time >= day_start && c.time < day_end)
+            .filter(|c| range.contains_stamp(c.time))
             .cloned()
             .collect();
 
@@ -217,7 +220,7 @@ pub async fn fetch_tasks_completed_on(
                 (Option<(i64, i64)>, Vec<CompletionRow>),
             > = std::collections::BTreeMap::new();
             for c in &day_rows {
-                let interval = interval_containing_at(&task, c.time);
+                let interval = interval_containing_at(&task, c.time.epoch);
                 groups
                     .entry(interval.map(|(start, _)| start))
                     .or_insert_with(|| (interval, Vec::new()))
@@ -229,40 +232,48 @@ pub async fn fetch_tasks_completed_on(
                 if !interval_day_rows.iter().any(|c| c.count > 0) {
                     continue;
                 }
-                let day_last = interval_day_rows.iter().map(|c| c.time).max();
+                let day_last = interval_day_rows.iter().map(|c| c.time).max_by_key(|t| t.epoch);
                 let (scoped, last_time) = match interval {
                     Some((start, end)) => (
                         completion_sum_between(&task, &rows, start, end),
                         rows.iter()
-                            .filter(|c| c.time >= start && c.time < end)
+                            .filter(|c| c.time.epoch >= start && c.time.epoch < end)
                             .map(|c| c.time)
-                            .max(),
+                            .max_by_key(|t| t.epoch),
                     ),
                     // A recurring row without an anchor has no interval; fall
                     // back to the day window.
                     None => (completion_sum(&task, &interval_day_rows), day_last),
                 };
+                let last_location = last_time
+                    .map(|last| location_at(&rows, last))
+                    .unwrap_or_default();
                 completed.push(CompletedOnRow {
                     interval,
                     day_last,
                     task: TaskRow {
                         completions: scoped,
                         last_time,
+                        last_location,
                         ..task.clone()
                     },
                 });
             }
         } else {
-            // Non-recurring rows stay day-windowed: a oneshot's count is
-            // the day's completions, and a scheduled task holds one state
+            // Non-recurring rows stay range-windowed: a oneshot's count is
+            // the range's completions, and a scheduled task holds one state
             // row.
-            let day_last = day_rows.iter().map(|c| c.time).max();
+            let day_last = day_rows.iter().map(|c| c.time).max_by_key(|t| t.epoch);
+            let last_location = day_last
+                .map(|last| location_at(&day_rows, last))
+                .unwrap_or_default();
             completed.push(CompletedOnRow {
                 interval: None,
                 day_last,
                 task: TaskRow {
                     completions: completion_sum(&task, &day_rows),
                     last_time: day_last,
+                    last_location,
                     ..task
                 },
             });
@@ -271,26 +282,27 @@ pub async fn fetch_tasks_completed_on(
     Ok(completed)
 }
 
-/// Fetch completion events in `[start, end]` (inclusive) along with their task row,
-/// where each task row's `completions` reflects the cumulative completion count at that
-/// completion event's time (and `last_time` is the completion event's timestamp).
+/// Fetch completion events whose recorded civil time falls in `range` along
+/// with their task row, where each task row's `completions` reflects the
+/// cumulative count at that event's time (and `last_time` is its stamp).
 pub async fn fetch_completion_events_in_range(
     pool: &SqlitePool,
-    start: i64,
-    end: i64,
+    range: crate::date::CivilRange,
 ) -> Result<Vec<(CompletionRow, TaskRow)>> {
     let rows = sqlx::query(
-        r#"SELECT c.id AS completion_id, c.time AS completion_time, c.count AS completion_count,
+        r#"SELECT c.id AS completion_id, c.time AS completion_time,
+                  c.tz_offset AS completion_tz_offset, c.location AS completion_location,
+                  c.count AS completion_count,
                   t.id, t.short_id, t.name, t.body, t.priority, t.start_time,
                   t.available_duration_secs, t.interval_secs, t.target_count, t.optional,
                   t.end_time, t.parent
            FROM todo_completions c
            JOIN todos t ON t.id = c.todo_id
-           WHERE c.time >= ? AND c.time <= ?
+           WHERE c.time + c.tz_offset BETWEEN ? AND ?
            ORDER BY c.time ASC, c.id ASC"#,
     )
-    .bind(start)
-    .bind(end)
+    .bind(range.start)
+    .bind(range.end)
     .fetch_all(pool)
     .await
     .context("Failed to fetch completion events in range")?;
@@ -318,6 +330,7 @@ pub async fn fetch_completion_events_in_range(
             parent: row.get("parent"),
             completions: None,
             last_time: None,
+            last_location: String::new(),
         });
     }
 
@@ -333,40 +346,39 @@ pub async fn fetch_completion_events_in_range(
         for (time, net, cumulative) in group_completions(base_task, rows) {
             // Rows outside the window still decide the cumulative inside it,
             // so the filter comes after the grouping.
-            if time < start || time > end {
+            if !range.contains_stamp(time) {
                 continue;
             }
+            let location = location_at(rows, time);
             let mut task = base_task.clone();
             task.completions = Some(cumulative);
             task.last_time = Some(time);
-            results.push((CompletionRow { time, count: net }, task));
+            task.last_location = location.clone();
+            results.push((
+                CompletionRow {
+                    time,
+                    location,
+                    count: net,
+                },
+                task,
+            ));
         }
     }
-    results.sort_by_key(|(comp, _)| comp.time);
+    results.sort_by_key(|(comp, _)| comp.time.epoch);
 
     Ok(results)
 }
 
-/// The completion events one task should show, as `(time, net, cumulative)`.
-///
-/// A correction carries the time of the completion it takes back, so rows that
-/// share a time are one event: sum them, and the journal shows the net at that
-/// moment instead of a completion followed by a smaller, later one.
-///
-/// A counter's moment whose net is zero has nothing to show — the completion
-/// was taken back — while a scheduled task's row is a state rather than a pile
-/// of deltas, so its "failed" (0) is shown like its "done" (1).
-///
-/// Recurring tasks group one interval at a time, since each interval's progress
-/// starts at zero and a correction can only take back work from the interval it
-/// belongs to.
-pub(crate) fn group_completions(task: &TaskRow, rows: &[CompletionRow]) -> Vec<(i64, i32, i32)> {
+pub(crate) fn group_completions(
+    task: &TaskRow,
+    rows: &[CompletionRow],
+) -> Vec<(LogTime, i32, i32)> {
     let mut out = Vec::new();
-    let mut groups: Vec<(i64, i32)> = Vec::new();
+    let mut groups: Vec<(LogTime, i32)> = Vec::new();
     let mut scope: Option<Option<i64>> = None;
     for row in rows {
         let this = if task.is_recurring() {
-            crate::task::interval_start(task, row.time)
+            crate::task::interval_start(task, row.time.epoch)
         } else {
             None
         };
@@ -375,7 +387,7 @@ pub(crate) fn group_completions(task: &TaskRow, rows: &[CompletionRow]) -> Vec<(
             scope = Some(this);
         }
         match groups.last_mut() {
-            Some(last) if last.0 == row.time => last.1 += row.count,
+            Some(last) if last.0.epoch == row.time.epoch => last.1 += row.count,
             _ => groups.push((row.time, row.count)),
         }
     }
@@ -383,10 +395,8 @@ pub(crate) fn group_completions(task: &TaskRow, rows: &[CompletionRow]) -> Vec<(
     out
 }
 
-/// Turn one scope's netted moments into journal entries, newest correction
-/// first taken back out of the newest moment still standing.
-fn settle(out: &mut Vec<(i64, i32, i32)>, groups: &mut Vec<(i64, i32)>, state: bool) {
-    let mut standing: Vec<(i64, i32)> = Vec::new();
+fn settle(out: &mut Vec<(LogTime, i32, i32)>, groups: &mut Vec<(LogTime, i32)>, state: bool) {
+    let mut standing: Vec<(LogTime, i32)> = Vec::new();
     for &(time, net) in groups.iter() {
         if net > 0 || (state && net == 0) {
             standing.push((time, net));
@@ -505,7 +515,7 @@ pub async fn fetch_recurring_windows_for_period(
     period_end: i64,
 ) -> Result<Vec<RecurringWindow>> {
     let tasks = sqlx::query_as::<_, TaskRow>(
-        r#"SELECT t.*, NULL AS completions, NULL AS last_time
+        r#"SELECT t.*, NULL AS completions, NULL AS last_time, NULL AS last_tz_offset, '' AS last_location
            FROM todos t
            WHERE t.interval_secs IS NOT NULL
            AND (t.end_time IS NULL OR t.end_time > ?)
@@ -539,22 +549,27 @@ pub async fn fetch_recurring_windows_for_period(
         .unwrap_or(0);
         for (wi, (w_start, w_end)) in wins.iter().enumerate() {
             let mut count = 0i32;
-            let mut last_time: Option<i64> = None;
+            let mut last_time: Option<LogTime> = None;
+            let mut last_location = String::new();
             for c in &completions {
                 let k = crate::date::interval_index(
                     &crate::date::zoned_from_unix_secs(st).expect("st is a valid epoch"),
-                    &crate::date::zoned_from_unix_secs(c.time).expect("completion is valid"),
+                    &crate::date::zoned_from_unix_secs(c.time.epoch).expect("completion is valid"),
                     span,
                 )
                 .unwrap_or(i64::MAX);
                 if k == k_first + wi as i64 {
                     count += c.count;
+                    if last_time.map(|t| t.epoch) != Some(c.time.epoch) {
+                        last_location = c.location.clone();
+                    }
                     last_time = Some(c.time);
                 }
             }
             let mut task = task.clone();
             task.completions = Some(count);
             task.last_time = last_time;
+            task.last_location = last_location;
             windows.push(RecurringWindow {
                 task,
                 window_start: *w_start,
@@ -581,7 +596,7 @@ pub async fn fetch_completions_for_tasks(
     }
     let ids: Vec<Id> = tasks.iter().map(|t| t.id).collect();
     let sql = format!(
-        "SELECT todo_id, time, count FROM todo_completions \
+        "SELECT todo_id, time, tz_offset, location, count FROM todo_completions \
          WHERE todo_id IN ({}) ORDER BY time ASC",
         ids.iter().map(|_| "?").collect::<Vec<_>>().join(",")
     );
@@ -597,7 +612,8 @@ pub async fn fetch_completions_for_tasks(
         map.entry(row.get::<Id, _>("todo_id"))
             .or_insert_with(Vec::new)
             .push(CompletionRow {
-                time: row.get("time"),
+                time: log_time(&row),
+                location: row.get("location"),
                 count: row.get("count"),
             });
     }
@@ -627,7 +643,7 @@ fn completion_sum_between(
 ) -> Option<i32> {
     let scoped: Vec<&CompletionRow> = rows
         .iter()
-        .filter(|c| c.time >= start && c.time < end)
+        .filter(|c| c.time.epoch >= start && c.time.epoch < end)
         .collect();
     if scoped.is_empty() {
         None
@@ -642,7 +658,8 @@ fn completion_sum_between(
 fn scoped_completion_sum(task: &TaskRow, rows: &[CompletionRow], now: i64) -> Option<i32> {
     match crate::task::interval_start(task, now) {
         Some(floor) => {
-            let scoped: Vec<&CompletionRow> = rows.iter().filter(|c| c.time >= floor).collect();
+            let scoped: Vec<&CompletionRow> =
+                rows.iter().filter(|c| c.time.epoch >= floor).collect();
             if scoped.is_empty() {
                 None
             } else {
@@ -663,28 +680,59 @@ fn interval_containing_at(task: &TaskRow, at: i64) -> Option<(i64, i64)> {
     crate::date::interval_slot_unix_secs(task.start_time, span, at)
 }
 
-/// The most recent moment whose progress still stands. A moment whose
-/// completions were all taken back is not one: it has nothing to report.
-pub(crate) fn last_standing(task: &TaskRow, rows: &[CompletionRow]) -> Option<i64> {
-    group_completions(task, rows)
-        .last()
-        .map(|&(time, _, _)| time)
+/// The location recorded on the first completion at `time` (the row a
+/// coalesced completion group keeps).
+fn location_at(rows: &[CompletionRow], time: LogTime) -> String {
+    rows.iter()
+        .find(|row| row.time.epoch == time.epoch)
+        .map(|row| row.location.clone())
+        .unwrap_or_default()
 }
 
-/// The most recent standing completion time overall.
-fn unscoped_last(task: &TaskRow, rows: &[CompletionRow]) -> Option<i64> {
+/// The most recent moment whose progress still stands, with the location
+/// recorded on that moment's row.
+pub(crate) fn last_standing(task: &TaskRow, rows: &[CompletionRow]) -> Option<LogOrigin> {
+    let time = group_completions(task, rows)
+        .last()
+        .map(|&(time, _, _)| time)?;
+    Some(LogOrigin {
+        time,
+        location: location_at(rows, time),
+    })
+}
+
+fn unscoped_last(task: &TaskRow, rows: &[CompletionRow]) -> Option<LogOrigin> {
     last_standing(task, rows)
 }
 
-/// The most recent completion time within the task's current interval
-/// (recurring tasks only; others get the overall last).
-fn scoped_last(task: &TaskRow, rows: &[CompletionRow], now: i64) -> Option<i64> {
+fn scoped_last(task: &TaskRow, rows: &[CompletionRow], now: i64) -> Option<LogOrigin> {
     match crate::task::interval_start(task, now) {
-        Some(floor) => group_completions(task, rows)
-            .into_iter()
-            .rfind(|(time, _, _)| *time >= floor)
-            .map(|(time, _, _)| time),
+        Some(floor) => {
+            let time = group_completions(task, rows)
+                .into_iter()
+                .rfind(|(time, _, _)| time.epoch >= floor)
+                .map(|(time, _, _)| time)?;
+            Some(LogOrigin {
+                time,
+                location: location_at(rows, time),
+            })
+        }
         None => unscoped_last(task, rows),
+    }
+}
+
+/// Write a task's overall last completion — its stamp and the location string
+/// recorded with it — onto `task`.
+pub(crate) fn set_last_completion(task: &mut TaskRow, rows: &[CompletionRow]) {
+    match last_standing(task, rows) {
+        Some(origin) => {
+            task.last_time = Some(origin.time);
+            task.last_location = origin.location;
+        }
+        None => {
+            task.last_time = None;
+            task.last_location.clear();
+        }
     }
 }
 
@@ -702,15 +750,11 @@ pub async fn attach_full_completions(
     let completions = fetch_completions_for_tasks(pool, &tasks).await?;
     Ok(tasks
         .into_iter()
-        .map(|task| {
+        .map(|mut task| {
             let rows = completions.get(&task.id).cloned().unwrap_or_default();
-            let completions = scoped_completion_sum(&task, &rows, now);
-            let last_time = unscoped_last(&task, &rows);
-            TaskRow {
-                completions,
-                last_time,
-                ..task
-            }
+            task.completions = scoped_completion_sum(&task, &rows, now);
+            set_last_completion(&mut task, &rows);
+            task
         })
         .collect())
 }
@@ -734,7 +778,7 @@ pub async fn fetch_tasks_for_view(
         // with a completion entry in the last persist_pending_seconds (D9).
         (ViewMode::PendingTasks, ViewVariant::All) => {
             let tasks = sqlx::query_as::<_, TaskRow>(
-                r#"SELECT t.*, NULL AS completions, NULL AS last_time
+                r#"SELECT t.*, NULL AS completions, NULL AS last_time, NULL AS last_tz_offset, '' AS last_location
                    FROM todos t
                    WHERE (t.interval_secs IS NULL AND t.available_duration_secs IS NULL)
                       OR (t.interval_secs IS NOT NULL AND (t.end_time IS NULL OR t.end_time > ?))
@@ -762,7 +806,7 @@ pub async fn fetch_tasks_for_view(
         // below applies the same rule (`recent` only matches oneshots).
         (ViewMode::PendingTasks, ViewVariant::A) => {
             let tasks = sqlx::query_as::<_, TaskRow>(
-                r#"SELECT t.*, NULL AS completions, NULL AS last_time
+                r#"SELECT t.*, NULL AS completions, NULL AS last_time, NULL AS last_tz_offset, '' AS last_location
                    FROM todos t
                    WHERE t.interval_secs IS NULL AND t.available_duration_secs IS NULL
                    ORDER BY t.priority DESC, t.start_time ASC"#,
@@ -780,7 +824,7 @@ pub async fn fetch_tasks_for_view(
         // completion entry in the last persist_pending_seconds.
         (ViewMode::PendingTasks, ViewVariant::B) => {
             let tasks = sqlx::query_as::<_, TaskRow>(
-                r#"SELECT t.*, NULL AS completions, NULL AS last_time
+                r#"SELECT t.*, NULL AS completions, NULL AS last_time, NULL AS last_tz_offset, '' AS last_location
                    FROM todos t
                    WHERE (t.interval_secs IS NOT NULL AND (t.end_time IS NULL OR t.end_time > ?))
                       OR (t.interval_secs IS NULL AND t.available_duration_secs IS NOT NULL
@@ -804,7 +848,7 @@ pub async fn fetch_tasks_for_view(
         // or failed — D2) ∪ recurring done in the current interval.
         (ViewMode::DoneTasks, ViewVariant::All) => {
             let tasks = sqlx::query_as::<_, TaskRow>(
-                r#"SELECT t.*, NULL AS completions, NULL AS last_time
+                r#"SELECT t.*, NULL AS completions, NULL AS last_time, NULL AS last_tz_offset, '' AS last_location
                    FROM todos t
                    WHERE t.interval_secs IS NULL
                       OR (t.interval_secs IS NOT NULL
@@ -821,7 +865,7 @@ pub async fn fetch_tasks_for_view(
         // `@done` A: done oneshot tasks only (`completions >= target_count`).
         (ViewMode::DoneTasks, ViewVariant::A) => {
             let tasks = sqlx::query_as::<_, TaskRow>(
-                r#"SELECT t.*, NULL AS completions, NULL AS last_time
+                r#"SELECT t.*, NULL AS completions, NULL AS last_time, NULL AS last_tz_offset, '' AS last_location
                    FROM todos t
                    WHERE t.interval_secs IS NULL AND t.available_duration_secs IS NULL"#,
             )
@@ -837,7 +881,7 @@ pub async fn fetch_tasks_for_view(
         // (no interval scoping — the old query had no scoped join).
         (ViewMode::DoneTasks, ViewVariant::B) => {
             let tasks = sqlx::query_as::<_, TaskRow>(
-                r#"SELECT t.*, NULL AS completions, NULL AS last_time
+                r#"SELECT t.*, NULL AS completions, NULL AS last_time, NULL AS last_tz_offset, '' AS last_location
                    FROM todos t
                    WHERE t.interval_secs IS NOT NULL
                       OR (t.interval_secs IS NULL AND t.available_duration_secs IS NOT NULL)"#,
@@ -878,9 +922,8 @@ pub async fn fetch_tasks_for_view(
         } else {
             scoped
         };
-        let last_time = unscoped_last(&task, &rows);
         task.completions = last;
-        task.last_time = last_time;
+        set_last_completion(&mut task, &rows);
 
         let recent = recent_ids.contains(&task.id);
         let keep = match (mode, show) {
@@ -900,9 +943,7 @@ pub async fn fetch_tasks_for_view(
                 let not_done = scoped.is_none() || scoped.unwrap_or(0) < task.target_count;
                 if is_scheduled {
                     (scoped.is_none() || scoped == Some(0))
-                        && task.start_time
-                            + task.available_duration_secs.unwrap_or(0)
-                            >= now
+                        && task.start_time + task.available_duration_secs.unwrap_or(0) >= now
                         || recent
                 } else {
                     not_done || recent
@@ -919,9 +960,7 @@ pub async fn fetch_tasks_for_view(
             (ViewMode::DoneTasks, ViewVariant::B) => {
                 if is_scheduled {
                     scoped.is_some()
-                        || task.start_time
-                            + task.available_duration_secs.unwrap_or(0)
-                            < now
+                        || task.start_time + task.available_duration_secs.unwrap_or(0) < now
                 } else {
                     true
                 }
@@ -955,7 +994,9 @@ pub async fn fetch_tasks_for_view(
             } else {
                 task.start_time
             };
-            scoped.unwrap_or(fallback)
+            scoped
+                .map(|origin| origin.time.epoch)
+                .unwrap_or(fallback)
         };
         let mut keyed: Vec<(i64, TaskRow)> = out
             .into_iter()

@@ -77,6 +77,7 @@ mod tests {
             parent: None,
             completions: None,
             last_time: None,
+            last_location: String::new(),
         };
 
         // Recurring, old origin (60 days ago): the window is anchored to

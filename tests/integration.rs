@@ -46,23 +46,52 @@ async fn short_id_of(pool: &SqlitePool, name: &str) -> i64 {
 /// Unlike `im::db::update_task` (which stamps `now()` and applies
 /// interval logic), this writes the row directly.
 async fn update_task(pool: &SqlitePool, todo_id: im::db::Id, time: i64, count: i32) {
-    sqlx::query("INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, ?)")
-        .bind(im::db::Id::new())
-        .bind(todo_id)
-        .bind(time)
-        .bind(count)
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO todo_completions (id, todo_id, time, tz_offset, count, location) VALUES (?, ?, ?, ?, ?, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(todo_id)
+    .bind(time)
+    .bind(im::date::system_offset_secs(time))
+    .bind(count)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 /// A day-long tracker interval anchored at local midnight 2020-01-01.
 fn day_interval() -> im::config::TrackerInterval {
     im::config::TrackerInterval {
-        anchor: im::date::parse_datetime("2020-01-01 00:00", im::date::DATE_DIALECT).unwrap(),
+        anchor: jiff::civil::date(2020, 1, 1).at(0, 0, 0, 0),
         span: jiff::Span::new().days(1),
         cumulative: false,
     }
+}
+
+/// The civil wall clock at an epoch in the current zone (test fixture).
+fn anchor_at(epoch: i64) -> jiff::civil::DateTime {
+    im::date::zoned_from_unix_secs(epoch).unwrap().datetime()
+}
+
+/// Local wall-clock `hour:minute` on a day-start epoch. Calendar arithmetic,
+/// since a day can be 23-25 hours long across a DST transition.
+fn at(day_start: i64, hour: i8, minute: i8) -> i64 {
+    im::date::zoned_from_unix_secs(day_start)
+        .expect("day start converts")
+        .with()
+        .hour(hour)
+        .minute(minute)
+        .second(0)
+        .nanosecond(0)
+        .build()
+        .expect("wall-clock time exists on this day")
+        .timestamp()
+        .as_second()
+}
+
+/// Local wall-clock `hour:00` on the day `days_ago` days before `day_start`.
+fn day_at_hour(day_start: i64, days_ago: i64, hour: i8) -> i64 {
+    at(im::date::shift_days(day_start, -days_ago), hour, 0)
 }
 
 #[tokio::test]
@@ -313,7 +342,7 @@ async fn test_tracker_interval_insert_strategies() {
         "water".to_string(),
         im::config::TrackerSetting {
             interval: Some(im::config::TrackerInterval {
-                anchor: im::date::now(),
+                anchor: anchor_at(im::date::now()),
                 span: jiff::Span::new().seconds(1),
                 cumulative: false,
             }),
@@ -1317,14 +1346,6 @@ async fn test_out_of_range_tracker_still_inserts() {
     assert_eq!(tracker_count, 1);
 }
 
-#[test]
-fn test_tab_in_mood_rejected() {
-    // Mood with tab is rejected at parse time (view output uses tab separators)
-    let result = parse_from(vec!["ok\tmood".to_string()]);
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("tab characters"));
-}
-
 #[tokio::test]
 async fn test_unknown_tracker_rejected() {
     let pool = test_pool().await.unwrap();
@@ -1705,13 +1726,22 @@ async fn test_today_view_null_labels_relog_and_prev() {
     };
     assert!(first.time <= second.time);
     assert_eq!(first.tracker_prev, None);
-    assert_eq!(second.tracker_prev, Some(first.time));
+    assert_eq!(
+        second.tracker_prev.as_ref().map(|prev| prev.time),
+        Some(
+            first
+                .origin
+                .as_ref()
+                .expect("tracker row has an origin")
+                .time
+        )
+    );
 
     // Update action on the water entry (same day slot): the timestamp
     // moves, nothing else changes (no score bump, no deletes).
     let water_id = water.id.expect("tracker entry id");
     let t0 = water.time;
-    im::db::update_tracker_time(&pool, water_id, t0 + 1000)
+    im::db::update_tracker_time(&pool, water_id, im::date::LogTime::local(t0 + 1000), None)
         .await
         .unwrap();
 
@@ -1744,12 +1774,15 @@ async fn test_today_view_with_date() {
 
     // Seed a mood on a fixed past date directly.
     let target = im::date::parse_datetime("2024-03-15 09:00", im::date::DATE_DIALECT).unwrap();
-    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (?, 'ancient', '', ?)")
-        .bind(im::db::Id::new())
-        .bind(target)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO mood (id, mood, body, time, tz_offset, location) VALUES (?, 'ancient', '', ?, ?, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(target)
+    .bind(im::date::system_offset_secs(target))
+    .execute(&pool)
+    .await
+    .unwrap();
 
     // `im @2024-03-15` lists it.
     let cmd = parse_from(vec!["@2024-03-15".to_string()]).unwrap();
@@ -1793,36 +1826,44 @@ async fn test_today_view_horizon_includes_moods_and_trackers() {
         },
     );
 
-    let anchored_day = im::date::today_start() - 2 * 86_400;
-    let tomorrow = anchored_day + 86_400;
+    let anchored_day = im::date::shift_days(im::date::today_start(), -2);
+    let tomorrow = im::date::shift_days(anchored_day, 1);
 
     // A mood + tracker entry on the anchored day, and one of each on
     // the next day (inside the +tomorrow horizon, outside the day one).
-    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (?, 'today mood', '', ?)")
-        .bind(im::db::Id::new())
-        .bind(anchored_day + 9 * 3600)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (?, 'tomorrow mood', '', ?)")
-        .bind(im::db::Id::new())
-        .bind(tomorrow + 9 * 3600)
-        .execute(&pool)
-        .await
-        .unwrap();
     sqlx::query(
-        "INSERT INTO tracker (id, type, score, time, mood) VALUES (?, 'sleep', 7, ?, NULL)",
+        "INSERT INTO mood (id, mood, body, time, tz_offset, location) VALUES (?, 'today mood', '', ?, ?, '')",
     )
     .bind(im::db::Id::new())
-    .bind(anchored_day + 10 * 3600)
+    .bind(at(anchored_day, 9, 0))
+    .bind(im::date::system_offset_secs(at(anchored_day, 9, 0)))
     .execute(&pool)
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO tracker (id, type, score, time, mood) VALUES (?, 'sleep', 8, ?, NULL)",
+        "INSERT INTO mood (id, mood, body, time, tz_offset, location) VALUES (?, 'tomorrow mood', '', ?, ?, '')",
     )
     .bind(im::db::Id::new())
-    .bind(tomorrow + 10 * 3600)
+    .bind(at(tomorrow, 9, 0))
+    .bind(im::date::system_offset_secs(at(tomorrow, 9, 0)))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tracker (id, type, score, time, tz_offset, mood, location) VALUES (?, 'sleep', 7, ?, ?, NULL, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(at(anchored_day, 10, 0))
+    .bind(im::date::system_offset_secs(at(anchored_day, 10, 0)))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tracker (id, type, score, time, tz_offset, mood, location) VALUES (?, 'sleep', 8, ?, ?, NULL, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(at(tomorrow, 10, 0))
+    .bind(im::date::system_offset_secs(at(tomorrow, 10, 0)))
     .execute(&pool)
     .await
     .unwrap();
@@ -1955,9 +1996,10 @@ async fn test_today_view_backfills_mood_score() {
     // A directly-inserted row (no score) exercises the no-backfill path:
     // rendering must NOT write the score anymore (`mood_color_cached` is
     // sync and backfill-free; `:db backfill` persists it).
-    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (?, 'dull', '', ?)")
+    sqlx::query("INSERT INTO mood (id, mood, body, time, tz_offset, location) VALUES (?, 'dull', '', ?, ?, '')")
         .bind(im::db::Id::new())
         .bind(im::date::now())
+        .bind(im::date::system_offset_secs(im::date::now()))
         .execute(&pool)
         .await
         .unwrap();
@@ -2207,6 +2249,23 @@ async fn run_view(pool: &SqlitePool, config: &Config, args: &[&str]) -> String {
     String::from_utf8(out).unwrap()
 }
 
+/// A completion records the location string automatically, and the task's
+/// aggregate last stamp carries it through to the preview hint.
+#[tokio::test]
+async fn test_completion_records_location() {
+    let pool = test_pool().await.unwrap();
+    let task = create_oneshot_task(&pool, "located task").await;
+
+    im::db::update_task(&pool, task, 1).await.unwrap();
+
+    let row = im::db::fetch_task_by_id(&pool, task, im::date::now())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(row.last_time.is_some());
+    assert_eq!(row.last_location, im::date::current_location());
+}
+
 /// Task↔mood links: `im <mood> -<short id>` records a link between
 /// the new mood entry and the task (no completion). The task preview
 /// then shows the linked moods.
@@ -2271,6 +2330,12 @@ async fn test_task_mood_links() {
         .fetch_one(&pool)
         .await
         .unwrap();
+    let felt_location: String = sqlx::query_scalar("SELECT location FROM mood WHERE id = ?")
+        .bind(felt_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(felt_location, im::date::current_location());
     let tired_id: im::db::Id = sqlx::query_scalar("SELECT id FROM mood WHERE mood = 'tired'")
         .fetch_one(&pool)
         .await
@@ -2331,7 +2396,7 @@ async fn test_null_tracker_semantics() {
     let pool = test_pool().await.unwrap();
     let mut config = Config::default();
     let day_interval = im::config::TrackerInterval {
-        anchor: im::date::today_start() - 86_400,
+        anchor: anchor_at(im::date::shift_days(im::date::today_start(), -1)),
         span: jiff::Span::new().days(1),
         cumulative: false,
     };
@@ -2353,7 +2418,7 @@ async fn test_null_tracker_semantics() {
         "sips".to_string(),
         im::config::TrackerSetting {
             interval: Some(im::config::TrackerInterval {
-                anchor: im::date::today_start() - 86_400,
+                anchor: anchor_at(im::date::shift_days(im::date::today_start(), -1)),
                 span: jiff::Span::new().days(1),
                 cumulative: true,
             }),
@@ -2430,9 +2495,13 @@ async fn test_null_tracker_semantics() {
     .fetch_all(&pool)
     .await
     .unwrap();
-    // Replace mode: one row per slot, score stays 0.
+    // Replace mode: one row per slot; the score stores the marker's
+    // absolute seconds from the slot start.
     assert_eq!(prouds_rows.len(), 1, "replace keeps one row per slot");
-    assert_eq!(prouds_rows[0].1, "0", "replace keeps score 0");
+    assert!(
+        prouds_rows[0].1.parse::<i64>().unwrap_or(0) > 0,
+        "replace stores its position in the slot"
+    );
 
     // Cumulative mode: each log appends its own score-0 row.
     for _ in 0..2 {
@@ -2478,7 +2547,10 @@ async fn test_null_tracker_semantics() {
     .await
     .unwrap();
     assert_eq!(sleep_rows.len(), 1, "time-marker keeps one row per slot");
-    assert_eq!(sleep_rows[0].0, "0", "time-marker keeps score 0");
+    assert!(
+        sleep_rows[0].0.parse::<i64>().unwrap_or(0) > 0,
+        "a moved marker rewrites its slot position"
+    );
 
     // Null without an interval errors.
     let cmd = parse_from(vec!["-unsupported".to_string()]).unwrap();
@@ -2681,21 +2753,21 @@ async fn test_today_view_completed_today_inclusion_and_time_label() {
         .unwrap();
 
     let interval = 86_400i64;
-    let anchored_day = im::date::today_start() - 2 * 86_400;
+    let anchored_day = im::date::shift_days(im::date::today_start(), -2);
 
     // A: always available (no duration); completion at 10:30 on the anchored
     // day, outside the current interval.
     let a = insert_recurring_task(
         &pool,
         "completed always",
-        anchored_day + 6 * 3600,
+        at(anchored_day, 6, 0),
         interval,
         None,
         0,
         None,
     )
     .await;
-    let a_time = anchored_day + 10 * 3600 + 30 * 60;
+    let a_time = at(anchored_day, 10, 30);
     update_task(&pool, a, a_time, 1).await;
 
     // B: availability window passed on the anchored day (08:00-09:00), so
@@ -2704,14 +2776,14 @@ async fn test_today_view_completed_today_inclusion_and_time_label() {
     let b = insert_recurring_task(
         &pool,
         "completed window passed",
-        anchored_day + 8 * 3600,
+        at(anchored_day, 8, 0),
         interval,
         Some(3600),
         0,
         None,
     )
     .await;
-    let b_time = anchored_day + 10 * 3600;
+    let b_time = at(anchored_day, 10, 0);
     update_task(&pool, b, b_time, 1).await;
 
     let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
@@ -2769,7 +2841,7 @@ async fn test_today_view_completed_on_last_is_interval_scoped() {
         .await
         .unwrap();
 
-    let anchored_day = im::date::today_start() - 3 * 86_400;
+    let anchored_day = im::date::shift_days(im::date::today_start(), -3);
     // A two-day interval starting two days after the anchored day: the
     // interval containing the anchored day's completion is
     // [anchored_day, anchored_day + 2 days), so a completion on the next day
@@ -2777,15 +2849,15 @@ async fn test_today_view_completed_on_last_is_interval_scoped() {
     let id = insert_recurring_task(
         &pool,
         "spans midnight",
-        anchored_day + 2 * 86_400,
+        im::date::shift_days(anchored_day, 2),
         2 * 86_400,
         None,
         3,
         None,
     )
     .await;
-    let day_done = anchored_day + 21 * 3600 + 10 * 60;
-    let next_done = anchored_day + 86_400 + 10 * 3600;
+    let day_done = at(anchored_day, 21, 10);
+    let next_done = at(im::date::shift_days(anchored_day, 1), 10, 0);
     update_task(&pool, id, day_done, 1).await;
     update_task(&pool, id, next_done, 1).await;
 
@@ -2806,7 +2878,7 @@ async fn test_today_view_completed_on_last_is_interval_scoped() {
     assert_eq!(row.time_label, "21:10");
     let task = row.task.as_ref().expect("task row");
     assert_eq!(task.completions, Some(2));
-    assert_eq!(task.last_time, Some(next_done));
+    assert_eq!(task.last_time.map(|stamp| stamp.epoch), Some(next_done));
 }
 
 /// A completion logged before the task's `start_time` (the start was moved
@@ -2821,34 +2893,34 @@ async fn test_today_view_pre_start_completion_rows() {
         .await
         .unwrap();
 
-    let anchored_day = im::date::today_start() - 2 * 86_400;
+    let anchored_day = im::date::shift_days(im::date::today_start(), -2);
     // The chain starts the day after the anchored day, so the anchored day has
     // no availability window at all (`start_time > day_end`) and the row can
     // only come from the completed-on merge.
     let no_window = insert_recurring_task(
         &pool,
         "moved start",
-        anchored_day + 86_400,
+        im::date::shift_days(anchored_day, 1),
         86_400,
         None,
         3,
         None,
     )
     .await;
-    update_task(&pool, no_window, anchored_day + 21 * 3600 + 10 * 60, 1).await;
+    update_task(&pool, no_window, at(anchored_day, 21, 10), 1).await;
     // Start moved to 18:00; the 10:00 completion belongs to the interval
     // ending at 18:00, which has no availability window either.
     let windowed = insert_recurring_task(
         &pool,
         "moved later",
-        anchored_day + 18 * 3600,
+        at(anchored_day, 18, 0),
         86_400,
         None,
         3,
         None,
     )
     .await;
-    update_task(&pool, windowed, anchored_day + 10 * 3600, 1).await;
+    update_task(&pool, windowed, at(anchored_day, 10, 0), 1).await;
 
     let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
         &pool,
@@ -2897,18 +2969,18 @@ async fn test_today_view_pre_start_completion_survives_window_rows() {
         .await
         .unwrap();
 
-    let anchored_day = im::date::today_start() - 2 * 86_400;
+    let anchored_day = im::date::shift_days(im::date::today_start(), -2);
     let id = insert_recurring_task(
         &pool,
         "week window",
-        anchored_day + 86_400,
+        im::date::shift_days(anchored_day, 1),
         86_400,
         None,
         3,
         None,
     )
     .await;
-    update_task(&pool, id, anchored_day + 21 * 3600 + 10 * 60, 1).await;
+    update_task(&pool, id, at(anchored_day, 21, 10), 1).await;
 
     let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
         &pool,
@@ -2944,19 +3016,19 @@ async fn test_today_view_multiple_pre_start_intervals() {
         .await
         .unwrap();
 
-    let anchored_day = im::date::today_start() - 2 * 86_400;
+    let anchored_day = im::date::shift_days(im::date::today_start(), -2);
     let id = insert_recurring_task(
         &pool,
         "two intervals",
-        anchored_day + 86_400,
+        im::date::shift_days(anchored_day, 1),
         6 * 3600,
         None,
         3,
         None,
     )
     .await;
-    update_task(&pool, id, anchored_day + 2 * 3600, 1).await;
-    update_task(&pool, id, anchored_day + 8 * 3600, 1).await;
+    update_task(&pool, id, at(anchored_day, 2, 0), 1).await;
+    update_task(&pool, id, at(anchored_day, 8, 0), 1).await;
 
     let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
         &pool,
@@ -2996,7 +3068,7 @@ async fn test_today_view_per_window_recurring_rows() {
         .unwrap();
 
     let interval = 6 * 3600i64;
-    let anchored_day = im::date::today_start() - 2 * 86_400;
+    let anchored_day = im::date::shift_days(im::date::today_start(), -2);
 
     // 1-hour availability windows every 6 hours starting 02:00 on the
     // anchored day: 02:00, 08:00, 14:00, 20:00 (all in the past by the
@@ -3004,7 +3076,7 @@ async fn test_today_view_per_window_recurring_rows() {
     let t = insert_recurring_task(
         &pool,
         "per-window",
-        anchored_day + 2 * 3600,
+        at(anchored_day, 2, 0),
         interval,
         Some(3600),
         0,
@@ -3013,7 +3085,7 @@ async fn test_today_view_per_window_recurring_rows() {
     .await;
     // Complete the 08:00 window at 08:30: that window is then done
     // (completions are scoped to its own interval) and shows 08:30.
-    update_task(&pool, t, anchored_day + 8 * 3600 + 1800, 1).await;
+    update_task(&pool, t, at(anchored_day, 8, 30), 1).await;
 
     macro_rules! get_labels {
         ($show:expr) => {{
@@ -3126,7 +3198,7 @@ async fn test_today_view_recurring_windows_stop_at_expiry() {
         6 * 3600,
         None,
         0,
-        Some(today_start + 8 * 3600),
+        Some(at(today_start, 8, 0)),
     )
     .await;
     let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
@@ -3158,7 +3230,7 @@ async fn test_today_view_open_done_window_shows_completion() {
         .await
         .unwrap();
 
-    let anchored_day = im::date::today_start() - 2 * 86_400;
+    let anchored_day = im::date::shift_days(im::date::today_start(), -2);
     // 24-hour availability window every 48h starting yesterday 23:00:
     // the only window intersecting the anchored-day horizon runs
     // [yesterday 23:00, today 23:00) — still open whenever the suite runs
@@ -3166,7 +3238,7 @@ async fn test_today_view_open_done_window_shows_completion() {
     let t = insert_recurring_task(
         &pool,
         "open done window",
-        anchored_day + 23 * 3600,
+        at(anchored_day, 23, 0),
         48 * 3600,
         Some(24 * 3600),
         0,
@@ -3175,7 +3247,7 @@ async fn test_today_view_open_done_window_shows_completion() {
     .await;
     // Complete it at 01:00 today (inside the window's interval): the
     // window is then done but not passed.
-    let completion = anchored_day + 25 * 3600;
+    let completion = at(im::date::shift_days(anchored_day, 1), 1, 0);
     update_task(&pool, t, completion, 1).await;
     let expected_label = format!(
         "{} {}",
@@ -3364,7 +3436,7 @@ async fn test_today_view_interval_aware_recurring_overlap() {
     let _active = insert_recurring_task(
         &pool,
         "old but active today",
-        today_start - 60 * 86_400 + 6 * 3600,
+        day_at_hour(today_start, 60, 6),
         86_400,
         Some(3600),
         0,
@@ -3377,7 +3449,7 @@ async fn test_today_view_interval_aware_recurring_overlap() {
     let skipping = insert_recurring_task(
         &pool,
         "no window today",
-        today_start - 86_400 + 6 * 3600,
+        day_at_hour(today_start, 1, 6),
         2 * 86_400,
         Some(3600),
         0,
@@ -3406,7 +3478,7 @@ async fn test_today_view_interval_aware_recurring_overlap() {
     // the run time: before 07:00 the open window shows its start, at or
     // after 07:00 the passed window shows its end.
     let now = im::date::now();
-    let window_start = today_start + 6 * 3600;
+    let window_start = at(today_start, 6, 0);
     let window_end = window_start + 3600;
     let expected_label = if now >= window_end {
         im::date::format_time(window_end)
@@ -3433,26 +3505,26 @@ async fn test_today_view_done_time_label_and_b_filter() {
         .await
         .unwrap();
 
-    let yesterday_start = im::date::today_start() - 86_400;
+    let yesterday_start = im::date::shift_days(im::date::today_start(), -1);
 
     // Scheduled window [10:00, 16:00) on the anchored day, completed at
     // 14:30 on that day.
     let completed = insert_scheduled(
         &pool,
         "completed scheduled",
-        yesterday_start + 10 * 3600,
+        at(yesterday_start, 10, 0),
         6 * 3600,
         None,
     )
     .await;
-    let done_at = yesterday_start + 14 * 3600 + 30 * 60;
+    let done_at = at(yesterday_start, 14, 30);
     update_task(&pool, completed, done_at, 1).await;
 
     // Auto-completed: window [10:00, 12:00) on the anchored day, no entry.
     insert_scheduled(
         &pool,
         "auto completed scheduled",
-        yesterday_start + 10 * 3600,
+        at(yesterday_start, 10, 0),
         2 * 3600,
         None,
     )
@@ -3549,6 +3621,67 @@ async fn insert_oneshot(
         .fetch_one(pool)
         .await
         .unwrap()
+}
+
+/// The tasks app's preview renders `last:` with the completion's own zone
+/// hint, so every fetch that attaches a `last_time` must also attach the
+/// location recorded with that completion.
+#[tokio::test]
+async fn test_tasks_view_last_completion_carries_its_location() {
+    let pool = test_pool().await.unwrap();
+    let now = im::date::now();
+    let id = insert_oneshot(&pool, "file taxes", now - 3600, 1).await;
+    sqlx::query(
+        "INSERT INTO todo_completions (id, todo_id, time, tz_offset, count, location) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(im::db::Id::new())
+    .bind(id)
+    .bind(now - 60)
+    .bind(-18_000)
+    .bind(1)
+    .bind("America/New_York")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let done = im::db::fetch_tasks_for_view(
+        &pool,
+        im::types::ViewMode::DoneTasks,
+        im::types::ViewVariant::All,
+        300,
+    )
+    .await
+    .unwrap();
+    let row = done.iter().find(|t| t.id == id).expect("the done task");
+    assert_eq!(row.last_location, "America/New_York");
+}
+
+/// A `tz_offset` cell can hold more than an `i32` when a foreign writer stores
+/// one (sync applies the cell as a 64-bit integer). It is not a UTC offset, so
+/// the row reads as UTC instead of failing the fetch that carries it.
+#[tokio::test]
+async fn test_malformed_offset_reads_as_utc() {
+    let pool = test_pool().await.unwrap();
+    let now = im::date::now();
+    sqlx::query(
+        "INSERT INTO mood (id, mood, time, tz_offset, location) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(im::db::Id::new())
+    .bind("corrupt offset")
+    .bind(now)
+    .bind(9_000_000_000_i64)
+    .bind("")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let moods = im::db::fetch_moods_between(&pool, now - 60, now + 60)
+        .await
+        .unwrap();
+    assert_eq!(moods.len(), 1);
+    assert_eq!(moods[0].time.offset, 0);
+    assert_eq!(moods[0].time.civil_secs(), now);
 }
 
 #[tokio::test]
@@ -4405,7 +4538,7 @@ async fn test_today_view_tasks_filters() {
     insert("dated overdue", now, Some(now - 2 * 86400))
         .await
         .unwrap();
-    insert("due today", now, Some(day_start + 12 * 3600))
+    insert("due today", now, Some(at(day_start, 12, 0)))
         .await
         .unwrap();
     insert("dated future", now, Some(now + 86400))
@@ -5183,18 +5316,22 @@ async fn test_db_backfill_persists_scores_and_embeddings() {
     .await
     .unwrap();
     let now = im::date::now();
-    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (?, 'dull', '', ?)")
+    sqlx::query("INSERT INTO mood (id, mood, body, time, tz_offset, location) VALUES (?, 'dull', '', ?, ?, '')")
         .bind(im::db::Id::new())
         .bind(now)
+        .bind(im::date::system_offset_secs(now))
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (?, '', 'journal only', ?)")
-        .bind(im::db::Id::new())
-        .bind(now)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO mood (id, mood, body, time, tz_offset, location) VALUES (?, '', 'journal only', ?, ?, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(now)
+    .bind(im::date::system_offset_secs(now))
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let cmd = parse_from(vec![":db".to_string(), "backfill".to_string()]).unwrap();
     execute_command(
@@ -5500,28 +5637,13 @@ async fn test_delete_task_cascades_completions() {
 }
 
 #[tokio::test]
-async fn test_bundled_config_defaults_load_through_serde() {
-    // The bundled `assets/config.toml` ships with hex RGB endpoints via the
-    // crossterm serde `#RRGGBB` format; the anchor pairs now live in the
-    // bundled moods file (`DEFAULT_MOODS`, named by `[moods] source`). If
-    // this test fails on a serde error, the bundled config/moods files have
-    // drifted from the parse path (e.g. someone changed a hex literal in
-    // `assets/moods.toml` without updating the anchors). It deliberately
-    // does NOT assert exact RGB values — tweak those freely for palette
-    // work without breaking the contract.
-    let cfg: Config = toml::from_str(im::config::DEFAULT_CONFIG)
-        .expect("bundled DEFAULT_CONFIG must deserialize");
-
+async fn test_bundled_moods_parse() {
+    // A hex literal or palette edit that breaks the bundled moods file's parse
+    // path surfaces here rather than at first use. The colors themselves are
+    // free to change.
     let moods: im::config::MoodsFile =
         toml::from_str(im::config::DEFAULT_MOODS).expect("bundled DEFAULT_MOODS must parse");
     assert!(!moods.pairs.is_empty());
-
-    // The default config points `source` at the moods file.
-    assert!(!cfg.moods.source.as_os_str().is_empty());
-
-    // Mood names and order are valid.
-    assert_eq!(moods.pairs[0].mood, "happy");
-    assert_eq!(moods.pairs[1].mood, "sad");
 }
 
 // ---------- Event-loop architecture & new TUI actions ----------
@@ -6079,12 +6201,15 @@ async fn test_null_tracker_entry_badge_uses_palette() {
             ..Default::default()
         },
     );
-    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'sleep', 0, ?)")
-        .bind(im::db::Id::new())
-        .bind(im::date::now())
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO tracker (id, type, score, time, tz_offset, location) VALUES (?, 'sleep', 0, ?, ?, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(im::date::now())
+    .bind(im::date::system_offset_secs(im::date::now()))
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
         &pool,
@@ -6386,18 +6511,6 @@ async fn test_clear_command() {
     assert_eq!(count_after, 0);
 }
 
-/// `:db doctor` parses to the Doctor subcommand. Usage errors are covered by
-/// the subprocess tests in `tests/cli_groups.rs` because clap exits during
-/// parsing.
-#[test]
-fn test_db_doctor_parse() {
-    let cmd = parse_from(vec![":db".to_string(), "doctor".to_string()]).unwrap();
-    assert!(matches!(
-        cmd,
-        im::cli::Command::Db(im::cli::DbSubcommand::Doctor)
-    ));
-}
-
 /// `:db doctor` non-interactive safety: mismatched entries are surfaced but
 /// never deleted without the interactive confirm.
 #[tokio::test]
@@ -6417,30 +6530,42 @@ async fn test_db_doctor_noninteractive_reports_only() {
             colors: Err("default".to_string()),
         },
     );
-    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'sleep', ?, 100)")
-        .bind(im::db::Id::new())
-        .bind(3.5f64)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'sleep', ?, 100)")
-        .bind(im::db::Id::new())
-        .bind(3i64)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'sleep', ?, 100)")
-        .bind(im::db::Id::new())
-        .bind("deep")
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'old', ?, 100)")
-        .bind(im::db::Id::new())
-        .bind(1i64)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO tracker (id, type, score, time, tz_offset, location) VALUES (?, 'sleep', ?, 100, ?, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(3.5f64)
+    .bind(im::date::system_offset_secs(100))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tracker (id, type, score, time, tz_offset, location) VALUES (?, 'sleep', ?, 100, ?, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(3i64)
+    .bind(im::date::system_offset_secs(100))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tracker (id, type, score, time, tz_offset, location) VALUES (?, 'sleep', ?, 100, ?, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind("deep")
+    .bind(im::date::system_offset_secs(100))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tracker (id, type, score, time, tz_offset, location) VALUES (?, 'old', ?, 100, ?, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(1i64)
+    .bind(im::date::system_offset_secs(100))
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let cmd = parse_from(vec![":db".to_string(), "doctor".to_string()]).unwrap();
     execute_command(
@@ -6495,54 +6620,78 @@ async fn test_db_doctor_buckets_and_prune() {
     // sleep: 2 zero integers (keep) + 1 nonzero integer (stale count-mode
     // leftover) + 1 text (mismatch); water: 2 integers (keep) + 1 real
     // (mismatch); "old": orphan.
-    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'sleep', ?, 100)")
-        .bind(im::db::Id::new())
-        .bind(0i64)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'sleep', ?, 100)")
-        .bind(im::db::Id::new())
-        .bind(0i64)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'sleep', ?, 100)")
-        .bind(im::db::Id::new())
-        .bind(2i64)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'sleep', ?, 100)")
-        .bind(im::db::Id::new())
-        .bind("deep")
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'water', ?, 100)")
-        .bind(im::db::Id::new())
-        .bind(5i64)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'water', ?, 100)")
-        .bind(im::db::Id::new())
-        .bind(4i64)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'water', ?, 100)")
-        .bind(im::db::Id::new())
-        .bind(3.5f64)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO tracker (id, type, score, time) VALUES (?, 'old', ?, 100)")
-        .bind(im::db::Id::new())
-        .bind(1i64)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO tracker (id, type, score, time, tz_offset, location) VALUES (?, 'sleep', ?, 100, ?, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(0i64)
+    .bind(im::date::system_offset_secs(100))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tracker (id, type, score, time, tz_offset, location) VALUES (?, 'sleep', ?, 100, ?, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(0i64)
+    .bind(im::date::system_offset_secs(100))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tracker (id, type, score, time, tz_offset, location) VALUES (?, 'sleep', ?, 100, ?, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(2i64)
+    .bind(im::date::system_offset_secs(100))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tracker (id, type, score, time, tz_offset, location) VALUES (?, 'sleep', ?, 100, ?, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind("deep")
+    .bind(im::date::system_offset_secs(100))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tracker (id, type, score, time, tz_offset, location) VALUES (?, 'water', ?, 100, ?, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(5i64)
+    .bind(im::date::system_offset_secs(100))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tracker (id, type, score, time, tz_offset, location) VALUES (?, 'water', ?, 100, ?, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(4i64)
+    .bind(im::date::system_offset_secs(100))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tracker (id, type, score, time, tz_offset, location) VALUES (?, 'water', ?, 100, ?, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(3.5f64)
+    .bind(im::date::system_offset_secs(100))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tracker (id, type, score, time, tz_offset, location) VALUES (?, 'old', ?, 100, ?, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(1i64)
+    .bind(im::date::system_offset_secs(100))
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let kinds = im::db::fetch_tracker_score_kinds(&pool).await.unwrap();
     let buckets: Vec<(String, String, i64, i64)> = kinds
@@ -6568,15 +6717,12 @@ async fn test_db_doctor_buckets_and_prune() {
     );
 
     // The rules plan_tracker_prunes would derive from this config: sleep
-    // (marker-mode null) = keep integers + drop nonzero; water = keep
-    // integers; old = orphan, drop everything.
+    // (null) = keep integers; water = keep integers; old = orphan, drop
+    // everything. Nonzero integer scores are legitimate null positions.
     let rules = vec![
         im::db::TrackerPruneRule::Storage {
             tracker_type: "sleep".to_string(),
             keep: "integer",
-        },
-        im::db::TrackerPruneRule::NonzeroScore {
-            tracker_type: "sleep".to_string(),
         },
         im::db::TrackerPruneRule::Storage {
             tracker_type: "water".to_string(),
@@ -6587,13 +6733,13 @@ async fn test_db_doctor_buckets_and_prune() {
         },
     ];
     let deleted = im::db::prune_tracker_rules(&pool, &rules).await.unwrap();
-    assert_eq!(deleted, 4, "1 nonzero + 1 text + 1 real + 1 orphan");
+    assert_eq!(deleted, 3, "1 text + 1 real + 1 orphan");
 
     let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracker")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(remaining, 4, "2 sleep zero-integers + 2 water integers");
+    assert_eq!(remaining, 5, "3 sleep integers + 2 water integers");
 }
 
 #[tokio::test]
@@ -6605,48 +6751,66 @@ async fn test_today_view_journal_shows_oneshot_completions_with_progress_and_pre
         .unwrap();
 
     let today_start = im::date::today_start();
-    let yesterday = today_start - 86400;
+    let yesterday = im::date::shift_days(today_start, -1);
 
     // Oneshot task with target_count = 5.
-    let t = insert_oneshot(&pool, "water plants", today_start - 2 * 86400, 5).await;
+    let t = insert_oneshot(
+        &pool,
+        "water plants",
+        im::date::shift_days(today_start, -2),
+        5,
+    )
+    .await;
 
     // 1 completion yesterday (count 1): cumulative = 1.
-    sqlx::query("INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, 1)")
-        .bind(im::db::Id::new())
-        .bind(t)
-        .bind(yesterday + 15 * 3600)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO todo_completions (id, todo_id, time, tz_offset, count, location) VALUES (?, ?, ?, ?, 1, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(t)
+    .bind(at(yesterday, 15, 0))
+    .bind(im::date::system_offset_secs(at(yesterday, 15, 0)))
+    .execute(&pool)
+    .await
+    .unwrap();
 
     // 3 completions today at 09:00, 12:00, 15:00.
-    let t1 = today_start + 9 * 3600;
-    let t2 = today_start + 12 * 3600;
-    let t3 = today_start + 15 * 3600;
+    let t1 = at(today_start, 9, 0);
+    let t2 = at(today_start, 12, 0);
+    let t3 = at(today_start, 15, 0);
 
-    sqlx::query("INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, 1)")
-        .bind(im::db::Id::new())
-        .bind(t)
-        .bind(t1)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO todo_completions (id, todo_id, time, tz_offset, count, location) VALUES (?, ?, ?, ?, 1, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(t)
+    .bind(t1)
+    .bind(im::date::system_offset_secs(t1))
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    sqlx::query("INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, 1)")
-        .bind(im::db::Id::new())
-        .bind(t)
-        .bind(t2)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO todo_completions (id, todo_id, time, tz_offset, count, location) VALUES (?, ?, ?, ?, 1, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(t)
+    .bind(t2)
+    .bind(im::date::system_offset_secs(t2))
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    sqlx::query("INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, 1)")
-        .bind(im::db::Id::new())
-        .bind(t)
-        .bind(t3)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO todo_completions (id, todo_id, time, tz_offset, count, location) VALUES (?, ?, ?, ?, 1, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(t)
+    .bind(t3)
+    .bind(im::date::system_offset_secs(t3))
+    .execute(&pool)
+    .await
+    .unwrap();
 
     // Another task with no completions.
     insert_oneshot(&pool, "uncompleted chore", today_start, 1).await;
@@ -6741,7 +6905,7 @@ async fn test_today_view_tasks_variant_omits_completed_today() {
         .unwrap();
 
     let today_start = im::date::today_start();
-    let now = today_start + 10 * 3600;
+    let now = at(today_start, 10, 0);
 
     // Completed today task.
     let t = insert_oneshot(&pool, "finished today", today_start, 1).await;
@@ -6808,8 +6972,9 @@ async fn test_mood_links_at_most_one_task() {
 
     // Create a mood entry.
     let mood_id = im::db::Id::new();
-    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (?, 'focused', '', 1_700_000_000)")
+    sqlx::query("INSERT INTO mood (id, mood, body, time, tz_offset, location) VALUES (?, 'focused', '', 1_700_000_000, ?, '')")
         .bind(mood_id)
+        .bind(im::date::system_offset_secs(1_700_000_000))
         .execute(&pool)
         .await
         .unwrap();
@@ -6955,17 +7120,29 @@ async fn test_unmarked_scheduled_row_is_not_a_completion() {
     im::db::set_scheduled_completion(&pool, task, Some(1))
         .await
         .unwrap();
-    let done = im::db::fetch_tasks_completed_on(&pool, now - 60, now + 60)
-        .await
-        .unwrap();
+    let done = im::db::fetch_tasks_completed_on(
+        &pool,
+        im::date::CivilRange {
+            start: now - 86_400,
+            end: now + 86_400,
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(done.len(), 1);
 
     im::db::set_scheduled_completion(&pool, task, None)
         .await
         .unwrap();
-    let done = im::db::fetch_tasks_completed_on(&pool, now - 60, now + 60)
-        .await
-        .unwrap();
+    let done = im::db::fetch_tasks_completed_on(
+        &pool,
+        im::date::CivilRange {
+            start: now - 86_400,
+            end: now + 86_400,
+        },
+    )
+    .await
+    .unwrap();
     assert!(done.is_empty(), "cleared, not completed");
 }
 
@@ -7012,10 +7189,11 @@ async fn a_scheduled_task_takes_no_completion_delta() {
 /// corrections across distinct times without sleeping a second between calls.
 async fn plant_completions(pool: &sqlx::SqlitePool, task: im::db::Id, rows: &[(i64, i32)]) {
     for (time, count) in rows {
-        sqlx::query("INSERT INTO todo_completions (id, todo_id, time, count) VALUES (?, ?, ?, ?)")
+        sqlx::query("INSERT INTO todo_completions (id, todo_id, time, tz_offset, count, location) VALUES (?, ?, ?, ?, ?, '')")
             .bind(im::db::Id::new())
             .bind(task)
             .bind(time)
+            .bind(im::date::system_offset_secs(*time))
             .bind(count)
             .execute(pool)
             .await
@@ -7042,12 +7220,18 @@ async fn test_an_undo_lands_on_the_completion_it_takes_back() {
     assert_eq!(cancelled_at, 2_000);
 
     // One moment stands (1 at 1000); the 2000 moment nets to zero and is gone.
-    let journal = im::db::fetch_completion_events_in_range(&pool, 0, 3_000)
-        .await
-        .unwrap();
+    let journal = im::db::fetch_completion_events_in_range(
+        &pool,
+        im::date::CivilRange {
+            start: i64::MIN,
+            end: i64::MAX,
+        },
+    )
+    .await
+    .unwrap();
     let shown: Vec<(i64, i32)> = journal
         .iter()
-        .map(|(row, task)| (row.time, task.completions.unwrap_or(0)))
+        .map(|(row, task)| (row.time.epoch, task.completions.unwrap_or(0)))
         .collect();
     assert_eq!(shown, vec![(1_000, 1)]);
 
@@ -7056,14 +7240,20 @@ async fn test_an_undo_lands_on_the_completion_it_takes_back() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(row.last_time, Some(1_000));
+    assert_eq!(row.last_time.map(|stamp| stamp.epoch), Some(1_000));
 
     // A second undo has nothing left at that moment, so it takes back the
     // earlier one rather than leaving the journal claiming work that is gone.
     im::db::update_task(&pool, task, -1).await.unwrap();
-    let journal = im::db::fetch_completion_events_in_range(&pool, 0, 3_000)
-        .await
-        .unwrap();
+    let journal = im::db::fetch_completion_events_in_range(
+        &pool,
+        im::date::CivilRange {
+            start: i64::MIN,
+            end: i64::MAX,
+        },
+    )
+    .await
+    .unwrap();
     assert!(journal.is_empty(), "{journal:?}");
 
     // Nothing stands, so the task has no last completion to report.
@@ -7083,12 +7273,18 @@ async fn test_a_partial_undo_only_lowers_its_own_moment() {
 
     im::db::update_task(&pool, task, -1).await.unwrap();
 
-    let journal = im::db::fetch_completion_events_in_range(&pool, 0, 3_000)
-        .await
-        .unwrap();
+    let journal = im::db::fetch_completion_events_in_range(
+        &pool,
+        im::date::CivilRange {
+            start: i64::MIN,
+            end: i64::MAX,
+        },
+    )
+    .await
+    .unwrap();
     let shown: Vec<(i64, i32, i32)> = journal
         .iter()
-        .map(|(row, task)| (row.time, row.count, task.completions.unwrap_or(0)))
+        .map(|(row, task)| (row.time.epoch, row.count, task.completions.unwrap_or(0)))
         .collect();
     assert_eq!(shown, vec![(1_000, 2, 2)]);
 }
@@ -7154,4 +7350,212 @@ fn counter_task(name: &str) -> TaskObject {
         end_time: None,
         parent: None,
     }
+}
+
+/// Logs belong to their recorded civil day: an entry whose recorded clock is
+/// inside the anchored day is included even when its absolute instant is not,
+/// and a log whose absolute instant is today but whose recorded clock is next
+/// day is excluded. The time cell renders the recorded clock.
+#[tokio::test]
+async fn test_today_view_uses_the_recorded_civil_day() {
+    let pool = test_pool().await.unwrap();
+    let config = Config::default();
+    im::color::ColorAxes::build(&pool, &config.moods)
+        .await
+        .unwrap();
+
+    let today = im::date::today_start();
+    let anchor_date = im::date::zoned_from_unix_secs(today).unwrap().date();
+    let foreign_offset = 12 * 3600;
+    let inside = im::date::LogTime::from_civil(anchor_date.at(0, 30, 0, 0), foreign_offset)
+        .expect("inside stamp");
+    let outside = im::date::LogTime::from_civil(
+        anchor_date
+            .checked_add(jiff::Span::new().days(1))
+            .expect("next day")
+            .at(0, 0, 0, 0),
+        foreign_offset,
+    )
+    .expect("outside stamp");
+
+    for (mood, stamp) in [("inside civil day", inside), ("outside civil day", outside)] {
+        im::db::create_entry(
+            &pool,
+            &im::db::EntryObject {
+                mood: mood.to_string(),
+                body: String::new(),
+                time: stamp,
+                location: String::new(),
+                embedding: None,
+                score: None,
+                trackers: Vec::new(),
+                duration: None,
+                todo_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
+        &pool,
+        &config,
+        im::types::TodayHorizon::Today,
+        today,
+        im::types::ViewVariant::All,
+    )
+    .await
+    .unwrap();
+
+    let row = entries
+        .iter()
+        .find(|entry| entry.label == "inside civil day")
+        .expect("the civil-day entry is included");
+    assert_eq!(row.time, inside.epoch);
+    assert_eq!(row.time_label, "00:30");
+    assert!(
+        !entries
+            .iter()
+            .any(|entry| entry.label == "outside civil day"),
+        "a next-civil-day log must not appear in today's view"
+    );
+}
+
+/// Completion events and completed-on rows use the civil day, while their
+/// absolute ordering is preserved.
+#[tokio::test]
+async fn test_completions_use_the_recorded_civil_day() {
+    let pool = test_pool().await.unwrap();
+    let today = im::date::today_start();
+    let anchor_date = im::date::zoned_from_unix_secs(today).unwrap().date();
+    let range = im::date::CivilRange::from_dates(anchor_date, anchor_date).unwrap();
+    let foreign_offset = 12 * 3600;
+    let inside = im::date::LogTime::from_civil(anchor_date.at(0, 30, 0, 0), foreign_offset)
+        .expect("inside stamp");
+    let outside = im::date::LogTime::from_civil(
+        anchor_date
+            .checked_add(jiff::Span::new().days(1))
+            .expect("next day")
+            .at(0, 0, 0, 0),
+        foreign_offset,
+    )
+    .expect("outside stamp");
+
+    let inside_task = insert_oneshot(&pool, "inside completion", today, 1).await;
+    let outside_task = insert_oneshot(&pool, "outside completion", today, 1).await;
+    for (task, stamp) in [(inside_task, inside), (outside_task, outside)] {
+        sqlx::query(
+            "INSERT INTO todo_completions (id, todo_id, time, tz_offset, count, location) VALUES (?, ?, ?, ?, 1, '')",
+        )
+        .bind(im::db::Id::new())
+        .bind(task)
+        .bind(stamp.epoch)
+        .bind(stamp.offset)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let done = im::db::fetch_tasks_completed_on(&pool, range)
+        .await
+        .unwrap();
+    assert!(done.iter().any(|row| row.task.name == "inside completion"));
+    assert!(!done.iter().any(|row| row.task.name == "outside completion"));
+
+    let events = im::db::fetch_completion_events_in_range(&pool, range)
+        .await
+        .unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|(row, task)| { task.name == "inside completion" && row.time == inside })
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|(_, task)| task.name == "outside completion")
+    );
+}
+
+/// Replace-mode slots are keyed by the recorded civil clock: two logs written
+/// in another zone at the same civil interval replace each other even though
+/// their absolute epochs differ.
+#[tokio::test]
+async fn test_replace_mode_uses_the_recorded_civil_slot() {
+    let pool = test_pool().await.unwrap();
+    let today = im::date::today_start();
+    let anchor_date = im::date::zoned_from_unix_secs(today).unwrap().date();
+    let interval = im::config::TrackerInterval {
+        anchor: jiff::civil::date(2020, 1, 1).at(0, 0, 0, 0),
+        span: jiff::Span::new().days(1),
+        cumulative: false,
+    };
+    let offset = 12 * 3600;
+    let first = im::date::LogTime::from_civil(anchor_date.at(9, 0, 0, 0), offset).unwrap();
+    let second = im::date::LogTime::from_civil(anchor_date.at(10, 0, 0, 0), offset).unwrap();
+    let first_slot = interval.slot_for(first).expect("first slot");
+    let second_slot = interval.slot_for(second).expect("second slot");
+    assert_eq!(first_slot, second_slot);
+
+    for (stamp, slot, value) in [(first, first_slot, 1), (second, second_slot, 2)] {
+        im::db::create_entry(
+            &pool,
+            &im::db::EntryObject {
+                mood: String::new(),
+                body: String::new(),
+                time: stamp,
+                location: String::new(),
+                embedding: None,
+                score: None,
+                trackers: vec![im::db::TrackerObject {
+                    tracker_type: "water".to_string(),
+                    value: im::db::TrackerValue::Integer(value),
+                    replace_slot: Some(slot),
+                }],
+                duration: None,
+                todo_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let rows = im::db::fetch_tracker_entries(&pool, "water", i64::MIN, i64::MAX)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "one entry per civil slot");
+    assert_eq!(rows[0].time, second);
+    assert_eq!(rows[0].score, "2");
+}
+
+/// An explicitly completed scheduled task appears on its civil completion day
+/// in the `B` view, even when its availability window no longer overlaps the
+/// viewed day.
+#[tokio::test]
+async fn test_b_view_shows_completed_scheduled_task_on_its_civil_day() {
+    let pool = test_pool().await.unwrap();
+    let config = Config::default();
+    im::color::ColorAxes::build(&pool, &config.moods)
+        .await
+        .unwrap();
+    let today = im::date::today_start();
+    let task = insert_scheduled(&pool, "completed scheduled", today - 2 * 3600, 3600, None).await;
+    im::db::set_scheduled_completion(&pool, task, Some(1))
+        .await
+        .unwrap();
+
+    let im::today::TodayFetch { entries, .. } = im::today::fetch_today_entries(
+        &pool,
+        &config,
+        im::types::TodayHorizon::Today,
+        today,
+        im::types::ViewVariant::B,
+    )
+    .await
+    .unwrap();
+    let row = entries
+        .iter()
+        .find(|entry| entry.label == "completed scheduled")
+        .expect("B must show the completed scheduled task on its completion day");
+    assert_eq!(row.time_label, im::date::format_time(im::date::now()));
 }

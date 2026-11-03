@@ -161,7 +161,14 @@ async fn sync(pool: &SqlitePool) -> session::SyncReport {
 async fn try_sync(pool: &SqlitePool) -> anyhow::Result<session::SyncReport> {
     let server = server().await;
     let mut pull = session::Pull::resume(pool).await?;
-    sync_once(pool, &server.base, SYNC_TIMEOUT, &TrackerSlots::default(), &mut pull).await
+    sync_once(
+        pool,
+        &server.base,
+        SYNC_TIMEOUT,
+        &TrackerSlots::default(),
+        &mut pull,
+    )
+    .await
 }
 
 async fn sync_with(pool: &SqlitePool, slots: &TrackerSlots) -> session::SyncReport {
@@ -267,7 +274,8 @@ async fn log_tracker(pool: &SqlitePool, tracker_type: &str, value: i64, time: i6
     let entry = EntryObject {
         mood: String::new(),
         body: String::new(),
-        time,
+        time: im::date::LogTime::local(time),
+        location: im::date::current_location(),
         embedding: None,
         score: None,
         trackers: vec![TrackerObject {
@@ -334,7 +342,9 @@ async fn a_new_task_replicates_to_the_other_device() {
 async fn a_field_takes_the_newest_write() {
     let (device_a, token) = device("converge").await;
     let device_b = second_device(&token).await;
-    create_task(&device_a, &task_object("shared", "one")).await.unwrap();
+    create_task(&device_a, &task_object("shared", "one"))
+        .await
+        .unwrap();
     settle(&[&device_a, &device_b]).await;
 
     // Two devices edit the same field while disconnected; B's stamp is later.
@@ -344,8 +354,14 @@ async fn a_field_takes_the_newest_write() {
 
     settle(&[&device_a, &device_b]).await;
 
-    assert_eq!(body_of(&device_a, "shared").await.as_deref(), Some("from b"));
-    assert_eq!(body_of(&device_b, "shared").await.as_deref(), Some("from b"));
+    assert_eq!(
+        body_of(&device_a, "shared").await.as_deref(),
+        Some("from b")
+    );
+    assert_eq!(
+        body_of(&device_b, "shared").await.as_deref(),
+        Some("from b")
+    );
 }
 
 #[tokio::test]
@@ -413,9 +429,17 @@ async fn a_deletion_is_terminal_and_offers_a_copy() {
         .unwrap();
     settle(&[&device_a, &device_b]).await;
 
-    im::db::delete_task(&device_a, task_row(&device_a, "doomed").await.unwrap().0.parse().unwrap())
-        .await
-        .unwrap();
+    im::db::delete_task(
+        &device_a,
+        task_row(&device_a, "doomed")
+            .await
+            .unwrap()
+            .0
+            .parse()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     sleep_between_mutations().await;
     // B has not heard about it yet, and edits the row.
     set_body(&device_b, "doomed", "still here").await;
@@ -447,7 +471,10 @@ async fn a_delete_strands_the_links_it_leaves() {
         .fetch_one(&device_b)
         .await
         .unwrap();
-    assert_eq!(link, None, "the child is promoted to a root on every device");
+    assert_eq!(
+        link, None,
+        "the child is promoted to a root on every device"
+    );
 }
 
 #[tokio::test]
@@ -460,13 +487,19 @@ async fn a_fresh_database_rebuilds_itself_from_the_server() {
 
     let rebuilt = second_device(&token).await;
     sync(&rebuilt).await;
-    assert_eq!(task_row(&rebuilt, "kept").await.unwrap().0, task.to_string());
+    assert_eq!(
+        task_row(&rebuilt, "kept").await.unwrap().0,
+        task.to_string()
+    );
     assert_eq!(body_of(&rebuilt, "kept").await.as_deref(), Some("text"));
 
     // A device that wipes its copy and pulls from cursor 0 gets the same rows.
     session::reset_local_state(&rebuilt).await.unwrap();
     sync(&rebuilt).await;
-    assert_eq!(task_row(&rebuilt, "kept").await.unwrap().0, task.to_string());
+    assert_eq!(
+        task_row(&rebuilt, "kept").await.unwrap().0,
+        task.to_string()
+    );
 }
 
 #[tokio::test]
@@ -527,7 +560,7 @@ async fn a_replace_mode_slot_keeps_one_entry_across_devices() {
         r#"
 [tracker.water]
 kind = "integer"
-interval = { anchor = "2026-01-01T00:00:00+00:00", span = "1 day" }
+interval = { anchor = "2026-01-01T00:00:00", span = "1 day" }
 "#,
     )
     .expect("the tracker config parses");
@@ -577,7 +610,10 @@ async fn a_device_is_told_when_a_peer_replaces_its_cell() {
         .unwrap_or_else(|| panic!("no notice in {:?}", report.notices));
     assert!(notice.contains("\"mine\""), "{notice}");
     assert!(notice.contains("\"theirs\""), "{notice}");
-    assert_eq!(body_of(&device_a, "shared").await.as_deref(), Some("theirs"));
+    assert_eq!(
+        body_of(&device_a, "shared").await.as_deref(),
+        Some("theirs")
+    );
 
     // The notice is not repeated once the device has read past it.
     let report = sync(&device_a).await;

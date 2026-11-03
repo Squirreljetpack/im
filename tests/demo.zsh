@@ -124,9 +124,9 @@ for (( off = 365; off >= 1; off-- )); do
       dur=$(( (25 + RANDOM % 3 * 15) * 60 ))   # 25m / 40m / 55m
       body=""
       (( RANDOM % 4 == 0 )) && body="felt ${mood} during the block"
-      print -r -- "INSERT INTO mood (id, mood, body, time, embedding, score, duration) VALUES (lower(hex(randomblob(16))), '$(esc_sql "$mood")', '$(esc_sql "$body")', $ts, NULL, NULL, $dur);" >>"$SQL"
+      print -r -- "INSERT INTO mood (id, mood, body, time, tz_offset, embedding, score, duration, location) VALUES (lower(hex(randomblob(16))), '$(esc_sql "$mood")', '$(esc_sql "$body")', $ts, CAST(strftime('%s', $ts, 'unixepoch', 'localtime') AS INTEGER) - $ts, NULL, NULL, $dur, '');" >>"$SQL"
     else
-      print -r -- "INSERT INTO mood (id, mood, body, time, embedding, score, duration) VALUES (lower(hex(randomblob(16))), '$(esc_sql "$mood")', '', $ts, NULL, NULL, NULL);" >>"$SQL"
+      print -r -- "INSERT INTO mood (id, mood, body, time, tz_offset, embedding, score, duration, location) VALUES (lower(hex(randomblob(16))), '$(esc_sql "$mood")', '', $ts, CAST(strftime('%s', $ts, 'unixepoch', 'localtime') AS INTEGER) - $ts, NULL, NULL, NULL, '');" >>"$SQL"
     fi
     (( inserted++ ))
   done
@@ -141,6 +141,8 @@ for db in "$DB_REL" "$DB_DEV"; do
       mood TEXT NOT NULL,
       body TEXT NOT NULL DEFAULT '"''"',
       time INTEGER NOT NULL DEFAULT (unixepoch()),
+      tz_offset INTEGER NOT NULL,
+      location TEXT NOT NULL,
       embedding BLOB,
       score REAL,
       duration INTEGER

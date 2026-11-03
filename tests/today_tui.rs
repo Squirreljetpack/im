@@ -77,26 +77,32 @@ async fn empty_pool() -> SqlitePool {
 
 /// Seed a mood row "today" (within `TodayHorizon::Today`).
 async fn seed_mood(pool: &SqlitePool, mood: &str, body: &str) {
-    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (?, ?, ?, ?)")
-        .bind(im::db::Id::new())
-        .bind(mood)
-        .bind(body)
-        .bind(im::date::today_start() + 3600)
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO mood (id, mood, body, time, tz_offset, location) VALUES (?, ?, ?, ?, ?, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(mood)
+    .bind(body)
+    .bind(im::date::today_start() + 3600)
+    .bind(im::date::system_offset_secs(im::date::today_start() + 3600))
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 /// Seed a mood row at an explicit timestamp (row-order assertions).
 async fn seed_mood_at(pool: &SqlitePool, mood: &str, time: i64) {
-    sqlx::query("INSERT INTO mood (id, mood, body, time) VALUES (?, ?, ?, ?)")
-        .bind(im::db::Id::new())
-        .bind(mood)
-        .bind("")
-        .bind(time)
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO mood (id, mood, body, time, tz_offset, location) VALUES (?, ?, ?, ?, ?, '')",
+    )
+    .bind(im::db::Id::new())
+    .bind(mood)
+    .bind("")
+    .bind(time)
+    .bind(im::date::system_offset_secs(time))
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 /// Build the headless run config: capture backend, input-less loop, and a

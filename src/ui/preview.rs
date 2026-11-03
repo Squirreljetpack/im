@@ -19,6 +19,33 @@ fn field_line(label: &str, value: String) -> Line<'static> {
     ])
 }
 
+/// The differences between a log's recorded location and the current zone:
+/// its location string when it differs, and its wall-clock shift when it
+/// differs at the recorded instant. Ordinary DST does not trigger the shift
+/// because the comparison uses the system offset at the stamp, not at `now`.
+fn location_summary(stamp: date::LogTime, location: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    if !location.is_empty() && !date::location_is_current(location) {
+        parts.push(location.to_string());
+    }
+    if stamp.is_foreign() {
+        parts.push(stamp.zone_shift_hint());
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// A right-aligned dark-gray line under the entry's timestamp: e.g.
+/// `America/New_York, +3h`. Omitted when neither the location nor the shift
+/// differs from the current zone.
+fn push_zone_hint(lines: &mut Vec<Line<'static>>, stamp: date::LogTime, location: &str) {
+    if let Some(hint) = location_summary(stamp, location) {
+        lines.push(
+            Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray)))
+                .alignment(Alignment::Right),
+        );
+    }
+}
+
 /// The entry's timestamp, right-aligned and dark gray.
 fn date_line(ts: i64) -> Line<'static> {
     Line::from(Span::styled(
@@ -143,10 +170,12 @@ pub fn build_preview(
     if !task.is_done() || config.preview.show_last_when_done {
         let last = task.last_time;
         if let Some(last) = last {
-            lines.push(field_line(
-                "last",
-                date::format_human_datetime(last, config.preview.named_months),
-            ));
+            let mut value = date::format_human_datetime(last.epoch, config.preview.named_months);
+            // Same inline form as `prev:`.
+            if let Some(hint) = location_summary(last, &task.last_location) {
+                value.push_str(&format!(" ({hint})"));
+            }
+            lines.push(field_line("last", value));
         }
     }
 
@@ -395,6 +424,9 @@ pub(crate) fn build_today_preview(
         // Journal-only: skip the mood segment — the date, then the body
         // directly (always a blank line after the date).
         lines.push(date_line(entry.time));
+        if let Some(origin) = &entry.origin {
+            push_zone_hint(&mut lines, origin.time, &origin.location);
+        }
         if let Some(dur) = entry.duration {
             lines.push(field_line("duration", date::format_duration(dur)));
         }
@@ -418,6 +450,9 @@ pub(crate) fn build_today_preview(
     // Date after the name, right-aligned and dark gray, with a blank
     // line always following it.
     lines.push(date_line(entry.time));
+    if let Some(origin) = &entry.origin {
+        push_zone_hint(&mut lines, origin.time, &origin.location);
+    }
 
     if let Some(dur) = entry.duration {
         lines.push(field_line("duration", date::format_duration(dur)));
@@ -438,17 +473,19 @@ pub(crate) fn build_today_preview(
             crate::date::interval_end_unix_secs(anchor, span, now).unwrap_or(anchor)
         };
         lines.push(field_line(
-            "next",
+            "next interval",
             date::format_human_datetime(next, config.preview.named_months),
         ));
     }
 
-    // `prev:` shows the previous entry of this kind whenever one exists.
-    if let Some(prev) = entry.tracker_prev {
-        lines.push(field_line(
-            "prev",
-            date::format_human_datetime(prev, config.preview.named_months),
-        ));
+    // `prev:` shows the previous entry of this kind whenever one exists;
+    // its own location differences are appended inline.
+    if let Some(prev) = &entry.tracker_prev {
+        let mut value = date::format_human_datetime(prev.time.epoch, config.preview.named_months);
+        if let Some(hint) = location_summary(prev.time, &prev.location) {
+            value.push_str(&format!(" ({hint})"));
+        }
+        lines.push(field_line("prev", value));
     }
 
     // Cumulative trackers show the interval's total sum/count.
@@ -552,7 +589,8 @@ mod tests {
             end_time: Some(1_700_500_000),
             parent: None,
             completions: Some(0),
-            last_time: Some(1_700_400_000),
+            last_time: Some(crate::date::LogTime::local(1_700_400_000)),
+            last_location: String::new(),
         }
     }
 
@@ -578,7 +616,15 @@ mod tests {
     #[test]
     fn test_build_preview_recurring_last_and_ends() {
         let task = recurring_row();
-        let fields = fields(&build_preview(&task, None, &config(), &[], None, None, None));
+        let fields = fields(&build_preview(
+            &task,
+            None,
+            &config(),
+            &[],
+            None,
+            None,
+            None,
+        ));
         assert!(
             fields.iter().any(
                 |f| f == &format!("last: {}", date::format_human_datetime(1_700_400_000, true))
@@ -655,7 +701,15 @@ mod tests {
     fn test_build_preview_done_shows_last() {
         let mut task = recurring_row();
         task.completions = Some(1); // target 0 -> done
-        let fields = fields(&build_preview(&task, None, &config(), &[], None, None, None));
+        let fields = fields(&build_preview(
+            &task,
+            None,
+            &config(),
+            &[],
+            None,
+            None,
+            None,
+        ));
         assert!(
             fields.iter().any(
                 |f| f == &format!("last: {}", date::format_human_datetime(1_700_400_000, true))
@@ -664,13 +718,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_build_preview_last_shows_a_foreign_offset() {
+        let mut task = recurring_row();
+        task.completions = Some(1);
+        let stamp = crate::date::LogTime::new(
+            1_700_400_000,
+            crate::date::system_offset_secs(1_700_400_000) + 3600,
+        );
+        task.last_time = Some(stamp);
+        task.last_location = "Mars/Olympus".to_string();
+        let fields = fields(&build_preview(
+            &task,
+            None,
+            &config(),
+            &[],
+            None,
+            None,
+            None,
+        ));
+        let expected = format!(
+            "last: {} (Mars/Olympus, {})",
+            date::format_human_datetime(stamp.epoch, true),
+            stamp.zone_shift_hint()
+        );
+        assert!(fields.iter().any(|f| f == &expected), "got {fields:?}");
+    }
+
     /// A tracker entry preview shows `prev:` (the previous entry of this
     /// kind, human-formatted) when one exists, and no `prev:`/`last:` field
     /// at all otherwise.
     #[test]
     fn test_build_today_preview_prev() {
-        let mk = |tracker_prev: Option<i64>| TodayEntry {
+        let mk = |tracker_prev: Option<date::LogOrigin>| TodayEntry {
             id: Some(test_id(1)),
+            origin: None,
             time: 1_700_000_000,
             time_label: "18:00".to_string(),
             kind: EntryKind::Tracker(crate::config::TrackerKind::Float),
@@ -683,16 +765,23 @@ mod tests {
             linked_mood: None,
             recurring_window: None,
             tracker_interval: None,
+            tracker_slot_len: None,
             tracker_prev,
             tracker_total: None,
             linked_trackers: Vec::new(),
             linked_tasks: Vec::new(),
             duration: None,
         };
-        let rendered: Vec<String> = build_today_preview(&mk(Some(1_699_000_000)), &config())
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
-            .collect();
+        let rendered: Vec<String> = build_today_preview(
+            &mk(Some(date::LogOrigin {
+                time: date::LogTime::local(1_699_000_000),
+                location: String::new(),
+            })),
+            &config(),
+        )
+        .iter()
+        .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+        .collect();
         assert!(
             rendered.iter().any(|l| l
                 == &format!(
@@ -721,6 +810,7 @@ mod tests {
     fn test_build_today_preview_total() {
         let mk = |tracker_total: Option<f64>| TodayEntry {
             id: Some(test_id(1)),
+            origin: None,
             time: 1_700_000_000,
             time_label: "18:00".to_string(),
             kind: EntryKind::Tracker(crate::config::TrackerKind::Integer),
@@ -733,6 +823,7 @@ mod tests {
             linked_mood: None,
             recurring_window: None,
             tracker_interval: None,
+            tracker_slot_len: None,
             tracker_prev: None,
             tracker_total,
             linked_trackers: Vec::new(),
@@ -769,6 +860,7 @@ mod tests {
         use crate::today::{LinkedTask, LinkedTracker};
         let entry = TodayEntry {
             id: Some(test_id(1)),
+            origin: None,
             time: 1_700_000_000,
             time_label: "18:00".to_string(),
             kind: EntryKind::Mood,
@@ -781,6 +873,7 @@ mod tests {
             linked_mood: None,
             recurring_window: None,
             tracker_interval: None,
+            tracker_slot_len: None,
             tracker_prev: None,
             tracker_total: None,
             linked_trackers: vec![
@@ -818,11 +911,15 @@ mod tests {
             "expected a '  - sleep: 7.5' line, got {rendered:?}"
         );
         assert!(
-            rendered.iter().any(|l| l.trim_start() == "- sitting: 3-15 14:30"),
+            rendered
+                .iter()
+                .any(|l| l.trim_start() == "- sitting: 3-15 14:30"),
             "expected a '  - sitting: 3-15 14:30' line, got {rendered:?}"
         );
         assert!(
-            rendered.iter().any(|l| l.trim_start() == "- ✓ water plants"),
+            rendered
+                .iter()
+                .any(|l| l.trim_start() == "- ✓ water plants"),
             "expected a '  - ✓ water plants' line, got {rendered:?}"
         );
     }
@@ -837,6 +934,7 @@ mod tests {
     fn test_build_today_preview_linked_mood() {
         let mk = |linked_mood: Option<String>| TodayEntry {
             id: Some(test_id(1)),
+            origin: None,
             time: 1_700_000_000,
             time_label: "18:00".to_string(),
             kind: EntryKind::Tracker(crate::config::TrackerKind::Float),
@@ -849,6 +947,7 @@ mod tests {
             linked_mood,
             recurring_window: None,
             tracker_interval: None,
+            tracker_slot_len: None,
             tracker_prev: None,
             tracker_total: None,
             linked_trackers: Vec::new(),
@@ -889,6 +988,7 @@ mod tests {
     fn test_build_today_preview_blank_line_after_date() {
         let mk = |kind: EntryKind| TodayEntry {
             id: Some(test_id(1)),
+            origin: None,
             time: 1_700_000_000,
             time_label: "18:00".to_string(),
             kind,
@@ -905,6 +1005,7 @@ mod tests {
             linked_mood: None,
             recurring_window: None,
             tracker_interval: None,
+            tracker_slot_len: None,
             tracker_prev: None,
             tracker_total: None,
             linked_trackers: Vec::new(),
@@ -984,6 +1085,7 @@ mod tests {
             parent: Some(test_id(1)),
             completions: None,
             last_time: None,
+            last_location: String::new(),
         };
         let tree = TaskTree {
             root: TaskTreeNode {
@@ -1076,6 +1178,7 @@ mod tests {
             parent: None,
             completions: None,
             last_time: None,
+            last_location: String::new(),
         };
 
         let lines = build_preview(&task, None, &config(), &[], None, Some(&parent), None);
@@ -1128,7 +1231,8 @@ mod tests {
             id: test_id(1),
             mood: "good".to_string(),
             body: String::new(),
-            time: 1_700_000_000,
+            time: crate::date::LogTime::local(1_700_000_000),
+            location: String::new(),
             embedding: None,
             score: None,
             duration: None,
@@ -1148,6 +1252,123 @@ mod tests {
         assert!(
             rendered.iter().any(|l| l.trim_start() == "- ● good"),
             "expected a '  - ● good' line, got {rendered:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod location_hint_tests {
+    use super::*;
+    use crate::date::LogTime;
+
+    fn entry(stamp: LogTime, location: &str) -> TodayEntry {
+        TodayEntry {
+            id: None,
+            time: stamp.epoch,
+            origin: Some(date::LogOrigin {
+                time: stamp,
+                location: location.to_string(),
+            }),
+            time_label: "18:00".to_string(),
+            kind: EntryKind::Mood,
+            label: "mood".to_string(),
+            body: String::new(),
+            task_id: None,
+            priority: 0,
+            task: None,
+            score: None,
+            linked_mood: None,
+            recurring_window: None,
+            tracker_interval: None,
+            tracker_slot_len: None,
+            tracker_prev: None,
+            tracker_total: None,
+            linked_trackers: Vec::new(),
+            linked_tasks: Vec::new(),
+            duration: None,
+        }
+    }
+
+    fn rendered(entry: &TodayEntry) -> Vec<String> {
+        build_today_preview(entry, &crate::config::Config::default())
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn differing_offset_is_shown_and_matching_offset_is_not() {
+        let now = crate::date::now();
+        let offset = crate::date::system_offset_secs(now);
+        let foreign = LogTime::new(now, offset + 3600);
+        let lines = rendered(&entry(foreign, ""));
+        assert!(
+            lines.iter().any(|line| line == &foreign.zone_shift_hint()),
+            "{lines:?}"
+        );
+        assert!(
+            !rendered(&entry(LogTime::new(now, offset), ""))
+                .iter()
+                .any(|line| line == &foreign.zone_shift_hint()),
+            "a local stamp should not show a zone line"
+        );
+    }
+
+    #[test]
+    fn a_differing_name_is_shown_without_an_offset_when_the_offset_matches() {
+        let now = crate::date::now();
+        let stamp = LogTime::new(now, crate::date::system_offset_secs(now));
+        let lines = rendered(&entry(stamp, "Mars/Olympus"));
+        assert!(lines.iter().any(|line| line == "Mars/Olympus"), "{lines:?}");
+        assert!(
+            !lines.iter().any(|line| line == &stamp.zone_shift_hint()),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_matching_name_does_not_hide_a_differing_offset() {
+        let now = crate::date::now();
+        let local = crate::date::current_location();
+        let stamp = LogTime::new(now, crate::date::system_offset_secs(now) + 3600);
+        let lines = rendered(&entry(stamp, &local));
+        assert!(
+            lines.iter().any(|line| line == &stamp.zone_shift_hint()),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn both_differences_share_one_line() {
+        let now = crate::date::now();
+        let stamp = LogTime::new(now, crate::date::system_offset_secs(now) + 3600);
+        let lines = rendered(&entry(stamp, "Mars/Olympus"));
+        let expected = format!("Mars/Olympus, {}", stamp.zone_shift_hint());
+        assert!(lines.iter().any(|line| line == &expected), "{lines:?}");
+    }
+
+    #[test]
+    fn tracker_interval_preview_uses_the_next_interval_label() {
+        let now = crate::date::now();
+        let mut tracker = entry(LogTime::local(now), "");
+        tracker.kind = EntryKind::Tracker(crate::config::TrackerKind::Float);
+        tracker.label = "sleep: 7.5".to_string();
+        tracker.tracker_interval = Some((now, jiff::Span::new().days(1)));
+        let lines = rendered(&tracker);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("  next interval: ")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.starts_with("  next: ")),
+            "{lines:?}"
         );
     }
 }

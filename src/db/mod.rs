@@ -121,13 +121,21 @@ fn quarantine_database(db_path: &Path) -> Result<PathBuf> {
             continue;
         }
         let target = with_suffix(&backup, suffix);
-        std::fs::copy(&source, &target).with_context(|| {
-            format!(
-                "Failed to copy the damaged database {} to {}",
-                source.display(),
-                target.display()
-            )
-        })?;
+        // SQLite can drop a stale `-wal`/`-shm` between the existence check
+        // and the copy. There is nothing left to preserve in that case.
+        match std::fs::copy(&source, &target) {
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "Failed to copy the damaged database {} to {}",
+                        source.display(),
+                        target.display()
+                    )
+                });
+            }
+        }
     }
     delete_database(db_path)?;
     Ok(backup)
@@ -194,6 +202,8 @@ pub async fn create_schema(pool: &SqlitePool) -> anyhow::Result<()> {
             mood      TEXT NOT NULL,
             body      TEXT NOT NULL DEFAULT '',
             time      INTEGER NOT NULL DEFAULT (unixepoch()),
+            tz_offset INTEGER NOT NULL,
+            location  TEXT NOT NULL,
             -- Local cache only: the ONNX embedding is never synced.
             embedding BLOB,
             -- Cached emotional-saliency score for the mood text (nullable;
@@ -217,6 +227,8 @@ pub async fn create_schema(pool: &SqlitePool) -> anyhow::Result<()> {
             -- exactly (integer/text/real) so sqlx can decode by value type.
             score BLOB NOT NULL CHECK (typeof(score) IN ('integer', 'text', 'real')),
             time  INTEGER NOT NULL DEFAULT (unixepoch()),
+            tz_offset INTEGER NOT NULL,
+            location TEXT NOT NULL,
             mood  TEXT REFERENCES mood(id) ON DELETE SET NULL
         )
         "#,
@@ -263,6 +275,8 @@ pub async fn create_schema(pool: &SqlitePool) -> anyhow::Result<()> {
             id      TEXT PRIMARY KEY,
             todo_id TEXT NOT NULL REFERENCES todos(id) ON DELETE CASCADE,
             time    INTEGER NOT NULL DEFAULT (unixepoch()),
+            tz_offset INTEGER NOT NULL,
+            location TEXT NOT NULL,
             -- A scheduled task's state: 1 done, 0 failed, -1 not marked.
             -- Un-marking writes -1 instead of deleting the row, whose id is
             -- derived from the task.
@@ -342,11 +356,26 @@ pub async fn create_schema(pool: &SqlitePool) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
 
+    // Log rows are selected by their recorded civil time (`time + tz_offset`)
+    // in the today view and the grids; the plain `time` index cannot serve
+    // that predicate.
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_mood_civil ON mood(time + tz_offset)")
+        .execute(pool)
+        .await?;
+
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_mood_todo_id ON mood(todo_id)")
         .execute(pool)
         .await?;
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tracker_time ON tracker(time)")
+        .execute(pool)
+        .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tracker_type_time ON tracker(type, time)")
+        .execute(pool)
+        .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tracker_civil ON tracker(time + tz_offset)")
         .execute(pool)
         .await?;
 

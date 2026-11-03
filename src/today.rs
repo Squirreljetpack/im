@@ -5,7 +5,7 @@ use std::io::Write;
 
 use crate::cli::CliOpts;
 use crate::config::{Config, TrackerKind};
-use crate::date::{self, Epoch};
+use crate::date::{self, Epoch, LogOrigin};
 use crate::db::{Id, TaskRow};
 use crate::task::pending_sort_time;
 use crate::types::{TaskKind, TasksFilter, TodayHorizon, ViewVariant};
@@ -67,10 +67,13 @@ pub struct LinkedTask {
 
 /// Data for a single today-view entry.
 #[derive(Debug, Clone)]
-
 pub struct TodayEntry {
     pub id: Option<Id>,
     pub time: i64,
+    /// Recorded origin — the civil clock and the location string — of a
+    /// mood/tracker row. `None` for task-derived rows, whose `time` is a
+    /// schedule boundary rendered in the current zone.
+    pub origin: Option<LogOrigin>,
     /// Rendered time-cell text: "HH:MM", "Tu HH:MM" (two-letter weekday
     /// prefix for entries outside the anchored day), or empty for entries
     /// with no displayable time (all-day recurring tasks, undated oneshots)
@@ -85,9 +88,9 @@ pub struct TodayEntry {
     /// at render time (window-scoped for recurring windows). `None` for
     /// every other entry kind.
     pub task: Option<TaskRow>,
-    /// Tracker entries only: the decoded score (`None` for text
-    /// trackers, which have no score). Drives the render-time badge
-    /// color binning.
+    /// Tracker entries only: the decoded score (`None` for text trackers).
+    /// Null replace markers carry their stored seconds from the slot start;
+    /// null cumulative markers carry the slot count. Drives badge coloring.
     pub score: Option<f64>,
     /// Tracker entries only: the mood text this tracker entry is
     /// attached to (`tracker.mood`), for the preview's `mood:` field.
@@ -104,10 +107,13 @@ pub struct TodayEntry {
     /// Tracker entries with a configured interval: the (anchor, span) pair,
     /// so the preview can show the next interval start like recurring tasks.
     pub tracker_interval: Option<(Epoch, jiff::Span)>,
-    /// Tracker entries: the time of the previous entry of this kind
-    /// (strictly earlier; the preview's `prev:` field). `None` when no
-    /// earlier entry exists.
-    pub tracker_prev: Option<Epoch>,
+    /// Replace-mode interval tracker entries: the containing slot's length,
+    /// used to normalize the stored seconds-from-start color position.
+    pub tracker_slot_len: Option<i64>,
+    /// Tracker entries: the previous entry of this kind, with its own
+    /// recorded origin (the preview's `prev:` field). `None` when no earlier
+    /// entry exists.
+    pub tracker_prev: Option<LogOrigin>,
     /// Cumulative tracker entries with an interval: the total sum (or count
     /// for null trackers) across the entire interval slot. `None` for
     /// non-cumulative trackers or other entry kinds.
@@ -158,7 +164,7 @@ impl TodayEntry {
                 };
                 (
                     Some(glyph),
-                    tracker_entry_color(tracker, self.time, self.score),
+                    tracker_entry_color(tracker, self.tracker_slot_len, self.score),
                 )
             }
             EntryKind::Task(_) => {
@@ -197,7 +203,7 @@ pub(crate) fn tracker_entry_type(label: &str) -> &str {
 /// distinguishable in the +tomorrow/+week horizons — and the compact
 /// day-time form ("DD HH:MM") outside that week entirely.
 fn today_time_label(time: i64, day_start_epoch: i64) -> String {
-    if time < day_start_epoch || time > day_start_epoch + 7 * 86_400 {
+    if time < day_start_epoch || time > crate::date::shift_days(day_start_epoch, 7) {
         crate::date::format_day_time(time)
     } else if crate::date::day_start(time) == day_start_epoch {
         crate::date::format_time(time)
@@ -210,6 +216,34 @@ fn today_time_label(time: i64, day_start_epoch: i64) -> String {
     }
 }
 
+/// Civil-time variant of [`today_time_label`] for log entries: the recorded
+/// wall clock, with the same same-day / weekday / day-time thresholds as the
+/// absolute form but compared on civil dates.
+fn today_time_label_stamp(stamp: crate::date::LogTime, day_start_epoch: i64) -> String {
+    let Ok(anchor_z) = crate::date::zoned_from_unix_secs(day_start_epoch) else {
+        return crate::date::format_day_time(stamp.epoch);
+    };
+    let Ok(civil) = stamp.civil() else {
+        return crate::date::format_day_time(stamp.epoch);
+    };
+    let anchor_date = anchor_z.date();
+    let anchor = anchor_date.at(0, 0, 0, 0);
+    let week_end = anchor
+        .checked_add(jiff::Span::new().days(7))
+        .unwrap_or(anchor);
+    if civil < anchor || civil > week_end {
+        crate::date::format_civil_day_time(civil)
+    } else if civil.date() == anchor_date {
+        crate::date::format_civil_time(civil)
+    } else {
+        format!(
+            "{} {}",
+            crate::date::format_civil_weekday(civil),
+            crate::date::format_civil_time(civil)
+        )
+    }
+}
+
 /// The today-view time cell for a task row: "HH:MM" (weekday prefix when
 /// outside the anchored day) for timed rows — completion time when done,
 /// otherwise the task's deadline/availability end — and empty for the
@@ -217,6 +251,9 @@ fn today_time_label(time: i64, day_start_epoch: i64) -> String {
 /// column.
 pub(crate) fn task_time_label(task: &TaskRow, time: i64, day_start_epoch: i64) -> String {
     if task.is_done() {
+        if let Some(stamp) = task.last_time {
+            return today_time_label_stamp(stamp, day_start_epoch);
+        }
         return today_time_label(time, day_start_epoch);
     }
     if !task.is_scheduled() && !task.is_recurring() && task.end_time.is_none() {
@@ -232,7 +269,10 @@ pub(crate) fn task_time_label(task: &TaskRow, time: i64, day_start_epoch: i64) -
 /// window end; an open or future window shows the window start.
 fn recurring_window_time(w: &crate::db::RecurringWindow, now: i64) -> i64 {
     if w.task.is_done() || now >= w.window_end {
-        w.task.last_time.unwrap_or(w.window_end)
+        w.task
+            .last_time
+            .map(|stamp| stamp.epoch)
+            .unwrap_or(w.window_end)
     } else {
         w.window_start
     }
@@ -287,7 +327,7 @@ pub(crate) fn today_sort(a: &TodayEntry, b: &TodayEntry) -> std::cmp::Ordering {
 /// and the linked-tracker lines in mood previews.
 fn tracker_entry_color(
     tracker: &crate::config::TrackerSetting,
-    time: i64,
+    slot_len: Option<i64>,
     score: Option<f64>,
 ) -> RatColor {
     let colors = tracker.colors();
@@ -295,7 +335,7 @@ fn tracker_entry_color(
         TrackerKind::Null => RatColor::from_crossterm(crate::badge::null_tracker_color(
             colors,
             tracker,
-            time,
+            slot_len.unwrap_or(0),
             score.unwrap_or(0.0),
         )),
         // Text entries have no score; the first palette color colors their
@@ -357,8 +397,8 @@ pub async fn fetch_today_entries(
 ) -> Result<TodayFetch> {
     // `im @<date>` anchors the day; bare `im` is today.
     let day_start_epoch = day_epoch;
-    let day_end_epoch = date::day_end(day_start_epoch);
     let horizon_end = horizon.end_epoch(day_start_epoch);
+    let civil_range = horizon.civil_range(day_start_epoch);
     let now_ts = date::now();
 
     let mut entries: Vec<TodayEntry> = Vec::new();
@@ -370,7 +410,7 @@ pub async fn fetch_today_entries(
     if show != ViewVariant::B {
         // 1. Moods within the horizon (day start through horizon end,
         // matching the task fetches below).
-        let moods = crate::db::fetch_moods_between(pool, day_start_epoch, horizon_end).await?;
+        let moods = crate::db::fetch_moods_civil(pool, civil_range).await?;
 
         // Tracker entries and tasks attached to these moods (the mood
         // preview's `linked:` section).
@@ -386,6 +426,7 @@ pub async fn fetch_today_entries(
             // embedding/score and needs no body.
             let body = std::mem::take(&mut f.body);
             let time = f.time;
+            let location = f.location.clone();
             // The row itself rides the color handoff (see `TodayFetch`).
             mood_rows.push(f);
             // Trackers attached to this mood: name in the tracker's own
@@ -409,14 +450,22 @@ pub async fn fetch_today_entries(
                             let score = crate::tracker::score_f64(&row.score);
                             (crate::date::format_tracker_duration(score), Some(score))
                         }
-                        // Null rows carry no payload (the count lives in
-                        // the grid, the moment in the entry's own time).
-                        TrackerKind::Null => (String::new(), None),
+                        // Null rows carry no display payload; the stored
+                        // score is their color position (or count).
+                        TrackerKind::Null => {
+                            (String::new(), Some(crate::tracker::score_f64(&row.score)))
+                        }
                     };
                     l_trackers.push(LinkedTracker {
                         name: row.tracker_type.clone(),
                         payload,
-                        color: tracker_entry_color(tracker, row.time, score),
+                        color: tracker_entry_color(
+                            tracker,
+                            tracker
+                                .interval
+                                .and_then(|iv| iv.slot_for(row.time).map(|(s, e)| e - s)),
+                            score,
+                        ),
                     });
                 }
             }
@@ -435,8 +484,9 @@ pub async fn fetch_today_entries(
             }
             entries.push(TodayEntry {
                 id: Some(id),
-                time,
-                time_label: today_time_label(time, day_start_epoch),
+                origin: Some(LogOrigin { time, location }),
+                time: time.epoch,
+                time_label: today_time_label_stamp(time, day_start_epoch),
                 kind: if mood.is_empty() {
                     EntryKind::Journal
                 } else {
@@ -451,6 +501,7 @@ pub async fn fetch_today_entries(
                 linked_mood: None,
                 recurring_window: None,
                 tracker_interval: None,
+                tracker_slot_len: None,
                 tracker_prev: None,
                 tracker_total: None,
                 linked_trackers: l_trackers,
@@ -460,11 +511,9 @@ pub async fn fetch_today_entries(
         }
 
         // 2. Tracker entries within the horizon.
-        let trackers =
-            crate::db::fetch_tracker_entries_today(pool, day_start_epoch, horizon_end).await?;
+        let trackers = crate::db::fetch_tracker_entries_today_civil(pool, civil_range).await?;
         // Previous entry time per tracker entry (the preview `prev:` field).
-        let tracker_prevs =
-            crate::db::fetch_tracker_prev_times(pool, day_start_epoch, horizon_end).await?;
+        let tracker_prevs = crate::db::fetch_tracker_prev_origins(pool, civil_range).await?;
 
         // The mood each tracker entry is attached to (`tracker.mood`),
         // batch-fetched for the preview's `mood:` field.
@@ -498,16 +547,20 @@ pub async fn fetch_today_entries(
                 let min_slot_start = trackers
                     .iter()
                     .filter(|t| &t.tracker_type == ttype)
-                    .filter_map(|t| {
-                        crate::date::interval_start_unix_secs(iv.anchor, iv.span, t.time)
-                    })
+                    .filter_map(|t| iv.start_for(t.time))
                     .min()
                     .unwrap_or(day_start_epoch);
 
                 if min_slot_start < day_start_epoch {
-                    *rows =
-                        crate::db::fetch_tracker_entries(pool, ttype, min_slot_start, horizon_end)
-                            .await?;
+                    // Slots are read on the recorded clock, so the raw window
+                    // is widened by the maximum offset delta on both sides.
+                    *rows = crate::db::fetch_tracker_entries(
+                        pool,
+                        ttype,
+                        min_slot_start - crate::db::CIVIL_FETCH_MARGIN,
+                        horizon_end + crate::db::CIVIL_FETCH_MARGIN,
+                    )
+                    .await?;
                 } else {
                     *rows = trackers
                         .iter()
@@ -521,6 +574,7 @@ pub async fn fetch_today_entries(
         for row in trackers {
             let tracker_id = row.id;
             let tracker_type = row.tracker_type;
+            let location = row.location.clone();
             let time = row.time;
             let tracker = config.tracker.get(&tracker_type).ok_or_else(|| {
                 anyhow::anyhow!("Unknown tracker '{}' not found in config", tracker_type)
@@ -528,20 +582,19 @@ pub async fn fetch_today_entries(
             let is_cumulative = tracker.interval.is_some_and(|iv| iv.cumulative);
             let (cumulative_score, tracker_total) = if is_cumulative {
                 let iv = tracker.interval.unwrap();
-                let (slot_start, slot_end) =
-                    crate::date::interval_slot_unix_secs(iv.anchor, iv.span, time)
-                        .unwrap_or((time, time));
+                let (slot_start, _slot_end) = iv.slot_for(time).unwrap_or((time.epoch, time.epoch));
                 let all_rows = cumulative_rows_by_type
                     .get(&tracker_type)
                     .map(|v| v.as_slice())
                     .unwrap_or(&[]);
+                let current_key = (time.rebased(), time.epoch, tracker_id);
                 let slot_entries_up_to_cur = all_rows.iter().filter(|e| {
-                    e.time >= slot_start
-                        && (e.time < time || (e.time == time && e.id <= tracker_id))
+                    iv.start_for(e.time) == Some(slot_start)
+                        && (e.time.rebased(), e.time.epoch, e.id) <= current_key
                 });
                 let all_slot_entries = all_rows
                     .iter()
-                    .filter(|e| e.time >= slot_start && e.time < slot_end);
+                    .filter(|e| iv.start_for(e.time) == Some(slot_start));
                 match tracker.kind {
                     TrackerKind::Null => (
                         Some(slot_entries_up_to_cur.count() as f64),
@@ -600,15 +653,16 @@ pub async fn fetch_today_entries(
                     let score = if is_cumulative {
                         cumulative_score
                     } else {
-                        None
+                        Some(crate::tracker::score_f64(&row.score))
                     };
                     (tracker_type.clone(), score)
                 }
             };
             entries.push(TodayEntry {
                 id: Some(tracker_id),
-                time,
-                time_label: today_time_label(time, day_start_epoch),
+                origin: Some(LogOrigin { time, location }),
+                time: time.epoch,
+                time_label: today_time_label_stamp(time, day_start_epoch),
                 kind: EntryKind::Tracker(tracker.kind),
                 label,
                 body: String::new(),
@@ -620,8 +674,13 @@ pub async fn fetch_today_entries(
                     .mood
                     .and_then(|mid| linked_moods_by_id.get(&mid).map(|m| m.mood.clone())),
                 recurring_window: None,
-                tracker_interval: tracker.interval.map(|iv| (iv.anchor, iv.span)),
-                tracker_prev: tracker_prevs.get(&tracker_id).copied().flatten(),
+                tracker_interval: tracker
+                    .interval
+                    .and_then(|iv| iv.anchor_epoch().map(|anchor| (anchor, iv.span))),
+                tracker_slot_len: tracker
+                    .interval
+                    .and_then(|iv| iv.slot_for(time).map(|(start, end)| end - start)),
+                tracker_prev: tracker_prevs.get(&tracker_id).cloned().flatten(),
                 tracker_total,
                 linked_trackers: Vec::new(),
                 linked_tasks: Vec::new(),
@@ -634,13 +693,13 @@ pub async fn fetch_today_entries(
         // Journal view: displays completions instead of tasks.
         // Each completion within the horizon appears as an entry at its completion time,
         // with the cumulative completion progress at that point in time.
-        let completions =
-            crate::db::fetch_completion_events_in_range(pool, day_start_epoch, horizon_end).await?;
+        let completions = crate::db::fetch_completion_events_in_range(pool, civil_range).await?;
         for (comp, task) in completions {
-            let time = comp.time;
-            let time_label = today_time_label(time, day_start_epoch);
+            let time = comp.time.epoch;
+            let time_label = today_time_label_stamp(comp.time, day_start_epoch);
             entries.push(TodayEntry {
                 id: None,
+                origin: None,
                 time,
                 time_label,
                 kind: EntryKind::Task(task.kind()),
@@ -653,6 +712,7 @@ pub async fn fetch_today_entries(
                 linked_mood: None,
                 recurring_window: None,
                 tracker_interval: None,
+                tracker_slot_len: None,
                 tracker_prev: None,
                 tracker_total: None,
                 linked_trackers: Vec::new(),
@@ -699,6 +759,7 @@ pub async fn fetch_today_entries(
                 };
                 entries.push(TodayEntry {
                     id: None,
+                    origin: None,
                     time,
                     time_label,
                     kind: EntryKind::Task(task.kind()),
@@ -711,6 +772,7 @@ pub async fn fetch_today_entries(
                     linked_mood: None,
                     recurring_window: None,
                     tracker_interval: None,
+                    tracker_slot_len: None,
                     tracker_prev: None,
                     tracker_total: None,
                     linked_trackers: Vec::new(),
@@ -719,10 +781,10 @@ pub async fn fetch_today_entries(
                 });
             }
 
-            // 3b. Scheduled tasks overlapping the horizon (window overlap: started
-            // before horizon_end, still open past today_start). All states show —
-            // ongoing, completed / auto-completed, failed — with the same badge
-            // semantics as the tasks app.
+            // 3b. Scheduled tasks overlapping the horizon (window overlap:
+            // started before horizon_end, still open past today_start),
+            // excluding explicit completions: those surface on their civil
+            // completion day through the completed-on pass below.
             let scheduled_tasks =
                 crate::db::fetch_scheduled_today(pool, horizon_end, day_start_epoch).await?;
 
@@ -731,6 +793,7 @@ pub async fn fetch_today_entries(
                 let time_label = task_time_label(task, time, day_start_epoch);
                 entries.push(TodayEntry {
                     id: None,
+                    origin: None,
                     time,
                     time_label,
                     kind: EntryKind::Task(task.kind()),
@@ -743,6 +806,7 @@ pub async fn fetch_today_entries(
                     linked_mood: None,
                     recurring_window: None,
                     tracker_interval: None,
+                    tracker_slot_len: None,
                     tracker_prev: None,
                     tracker_total: None,
                     linked_trackers: Vec::new(),
@@ -779,6 +843,7 @@ pub async fn fetch_today_entries(
                 let time_label = task_time_label(&w.task, time, day_start_epoch);
                 entries.push(TodayEntry {
                     id: None,
+                    origin: None,
                     time,
                     time_label,
                     kind: EntryKind::Task(w.task.kind()),
@@ -791,6 +856,7 @@ pub async fn fetch_today_entries(
                     linked_mood: None,
                     recurring_window: Some(w.clone()),
                     tracker_interval: None,
+                    tracker_slot_len: None,
                     tracker_prev: None,
                     tracker_total: None,
                     linked_trackers: Vec::new(),
@@ -807,16 +873,18 @@ pub async fn fetch_today_entries(
             // replace the task's regular row (time = the day's last
             // completion; the task's `last_time` is the newest completion in
             // the interval the preview is scoped to).
-            if show == ViewVariant::All {
+            if matches!(show, ViewVariant::All | ViewVariant::B) {
                 let window_intervals: std::collections::HashSet<(Id, i64)> = entries
                     .iter()
                     .filter_map(|e| Some((e.task_id?, e.recurring_window.as_ref()?.window_start)))
                     .collect();
                 let completed_today =
-                    crate::db::fetch_tasks_completed_on(pool, day_start_epoch, day_end_epoch)
-                        .await?;
+                    crate::db::fetch_tasks_completed_on(pool, civil_range).await?;
                 for row in &completed_today {
                     let task = &row.task;
+                    if show == ViewVariant::B && !task.is_scheduled() {
+                        continue;
+                    }
                     if task.is_recurring() {
                         let covered = match row.interval {
                             Some((start, _)) => window_intervals.contains(&(task.id, start)),
@@ -830,11 +898,17 @@ pub async fn fetch_today_entries(
                             continue;
                         }
                     }
-                    let row_time = row.day_last.unwrap_or(now_ts);
+                    let (row_time, row_label) = match row.day_last {
+                        Some(stamp) => {
+                            (stamp.epoch, today_time_label_stamp(stamp, day_start_epoch))
+                        }
+                        None => (now_ts, today_time_label(now_ts, day_start_epoch)),
+                    };
                     let entry = TodayEntry {
                         id: None,
+                        origin: None,
                         time: row_time,
-                        time_label: today_time_label(row_time, day_start_epoch),
+                        time_label: row_label,
                         kind: EntryKind::Task(task.kind()),
                         label: task.name.clone(),
                         body: task.body.clone(),
@@ -845,6 +919,7 @@ pub async fn fetch_today_entries(
                         linked_mood: None,
                         recurring_window: None,
                         tracker_interval: None,
+                        tracker_slot_len: None,
                         tracker_prev: None,
                         tracker_total: None,
                         linked_trackers: Vec::new(),
@@ -1011,7 +1086,8 @@ mod tests {
             end_time,
             parent: None,
             completions,
-            last_time,
+            last_time: last_time.map(crate::date::LogTime::local),
+            last_location: String::new(),
         }
     }
 
@@ -1137,14 +1213,7 @@ mod tests {
         );
         // Oneshot, not done, with a due time.
         check(
-            &task_row(
-                anchor,
-                None,
-                None,
-                Some(at("2024-03-16 12:00")),
-                None,
-                None,
-            ),
+            &task_row(anchor, None, None, Some(at("2024-03-16 12:00")), None, None),
             at("2024-03-16 12:00"),
             "12:00",
         );
@@ -1257,6 +1326,7 @@ mod tests {
     fn test_today_sort() {
         let entry = |time: i64, time_label: &str, priority: i32| TodayEntry {
             id: None,
+            origin: None,
             time,
             time_label: time_label.to_string(),
             kind: EntryKind::Task(TaskKind::Oneshot),
@@ -1269,6 +1339,7 @@ mod tests {
             linked_mood: None,
             recurring_window: None,
             tracker_interval: None,
+            tracker_slot_len: None,
             tracker_prev: None,
             tracker_total: None,
             linked_trackers: Vec::new(),
@@ -1313,7 +1384,9 @@ mod tests {
         let pushups_tracker = TrackerSetting {
             kind: TrackerKind::Integer,
             interval: Some(TrackerInterval {
-                anchor: day_start,
+                anchor: crate::date::zoned_from_unix_secs(day_start)
+                    .unwrap()
+                    .datetime(),
                 span: jiff::Span::new().days(1),
                 cumulative: true,
             }),
@@ -1326,7 +1399,9 @@ mod tests {
         let water_tracker = TrackerSetting {
             kind: TrackerKind::Null,
             interval: Some(TrackerInterval {
-                anchor: day_start,
+                anchor: crate::date::zoned_from_unix_secs(day_start)
+                    .unwrap()
+                    .datetime(),
                 span: jiff::Span::new().days(1),
                 cumulative: true,
             }),
@@ -1340,7 +1415,8 @@ mod tests {
             &EntryObject {
                 mood: String::new(),
                 body: String::new(),
-                time: day_start + 1000,
+                time: crate::date::LogTime::local(day_start + 1000),
+                location: String::new(),
                 duration: None,
                 score: None,
                 todo_id: None,
@@ -1367,7 +1443,8 @@ mod tests {
             &EntryObject {
                 mood: String::new(),
                 body: String::new(),
-                time: day_start + 2000,
+                time: crate::date::LogTime::local(day_start + 2000),
+                location: String::new(),
                 duration: None,
                 score: None,
                 todo_id: None,

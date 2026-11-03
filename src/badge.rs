@@ -129,7 +129,8 @@ pub(crate) fn tracker_color(
 ///   So a sleep tracker with `low = 23:00`, `high = 02:00` on a
 ///   midnight-anchored day bins 23:00→02:00 from the first color toward the
 ///   last (1am is mid-palette), 22:45 first (closer to 23:00), and 03:00
-///   last (closer to 02:00).
+///   last (closer to 02:00). `score` is the stored seconds-from-start
+///   position and `slot_len` is the containing interval's length.
 ///
 /// - Cumulative mode (or replace without both bounds / interval geometry):
 ///   the entry count is binned like a numeric tracker against the
@@ -137,7 +138,7 @@ pub(crate) fn tracker_color(
 pub(crate) fn null_tracker_color(
     colors: &[CtColor],
     tracker: &TrackerSetting,
-    time: i64,
+    slot_len: i64,
     score: f64,
 ) -> CtColor {
     let (Some(low), Some(high)) = (tracker.low, tracker.high) else {
@@ -151,19 +152,14 @@ pub(crate) fn null_tracker_color(
         // threshold bounds.
         return tracker_color(colors, score, tracker.low, tracker.high);
     }
-    let Some((interval_start, interval_end)) =
-        crate::date::interval_slot_unix_secs(interval.anchor, interval.span, time)
-    else {
-        return tracker_color(colors, score, tracker.low, tracker.high);
-    };
-    let len = (interval_end - interval_start) as f64;
+    let len = slot_len as f64;
     if len <= 0.0 {
         return tracker_color(colors, score, tracker.low, tracker.high);
     }
     // Both bounds are seconds from the interval start; the range is
     // traversed forward from low, wrapping when high < low. Earlier times
     // always bin to the palette start, later to the end — never reversed.
-    let pos = (time - interval_start) as f64;
+    let pos = score;
     let zone_len = (high - low).rem_euclid(len);
     let in_zone = ((pos - low).rem_euclid(len)) < zone_len;
     if in_zone {
@@ -404,6 +400,7 @@ mod tests {
             parent: None,
             completions,
             last_time: None,
+            last_location: String::new(),
         }
     }
 
@@ -506,12 +503,13 @@ mod tests {
                 parent: None,
                 completions,
                 last_time: None,
+                last_location: String::new(),
             };
 
-        // Old chain origin (60 calendar days back, at a wall-clock time 30
-        // minutes before now), so the current interval's window opened 30min
-        // ago: zero entries → Reset (not binned as "missed" — the absolute
-        // formula marked it passed forever).
+        // Old chain origin (60 days ago), window open in the current
+        // interval (30min into a 1h window), zero entries → Reset (not
+        // binned as "missed" — the absolute formula marked it passed
+        // forever).
         let old = crate::date::zoned_from_unix_secs(now)
             .expect("now is a valid epoch")
             .checked_sub(jiff::Span::new().days(60))
@@ -618,7 +616,7 @@ mod tests {
     fn day_interval_tracker() -> crate::config::TrackerSetting {
         crate::config::TrackerSetting {
             interval: Some(crate::config::TrackerInterval {
-                anchor: 0,
+                anchor: jiff::civil::date(2020, 1, 1).at(0, 0, 0, 0),
                 span: jiff::Span::new().days(1),
                 cumulative: false,
             }),
@@ -641,7 +639,7 @@ mod tests {
         let colors = vec![CtColor::DarkRed, CtColor::DarkYellow, CtColor::DarkGreen];
         let tracker = day_interval_tracker();
         // Midnight-anchored interval: t is seconds from the interval start.
-        let color_at = |secs: i64| null_tracker_color(&colors, &tracker, secs, 0.0);
+        let color_at = |secs: i64| null_tracker_color(&colors, &tracker, 86_400, secs as f64);
         // Inside the range, binned: 23:30 is 0.125 in → first color; 01:00
         // is 2/3 in → middle; 02:00 (range end) → last color.
         assert_eq!(color_at(23 * 3600 + 30 * 60), CtColor::DarkRed);
@@ -702,7 +700,7 @@ mod tests {
         let mut tracker = day_interval_tracker();
         tracker.low = Some(4.0 * 3600.0);
         tracker.high = Some(12.0 * 3600.0);
-        let color_at = |secs: i64| null_tracker_color(&colors, &tracker, secs, 0.0);
+        let color_at = |secs: i64| null_tracker_color(&colors, &tracker, 86_400, secs as f64);
         // 04:00 (low) → first color; 12:00 (high) → last color.
         assert_eq!(color_at(4 * 3600), CtColor::DarkRed);
         assert_eq!(color_at(12 * 3600), CtColor::DarkGreen);

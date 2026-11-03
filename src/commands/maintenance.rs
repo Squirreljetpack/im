@@ -192,11 +192,9 @@ fn kind_label(kind: TrackerKind) -> &'static str {
 /// → TEXT, `number` → INTEGER, `float` → REAL, `null` → INTEGER — see
 /// `create_entry` and `update_tracker_score`), so an entry whose
 /// `typeof(score)` differs no longer matches the tracker's current kind,
-/// e.g. after the tracker's `kind` changed in the config. A `null` tracker
-/// always writes score 0 (replace markers and cumulative count rows alike),
-/// so any nonzero null row is a stale leftover and is pruned too. Types
-/// with no `[tracker.<type>]` section (renamed/removed trackers) are
-/// orphans: everything is pruned (the today view hard-errors on such rows).
+/// e.g. after the tracker's `kind` changed in the config. Types with no
+/// `[tracker.<type>]` section (renamed/removed trackers) are orphans:
+/// everything is pruned (the today view hard-errors on such rows).
 fn plan_tracker_prunes(
     rows: &[TrackerScoreKindRow],
     trackers: &HashMap<String, TrackerSetting>,
@@ -233,23 +231,12 @@ fn plan_tracker_prunes(
             TrackerKind::Duration => "real",
             TrackerKind::Null => "integer",
         };
-        // Null rows store score 0 by construction (replace inserts write 0,
-        // the TUI timestamp update never touches score, cumulative inserts
-        // 0), so any nonzero row is a stale leftover (incl. pre-rework
-        // count rows) — prune it regardless of the interval mode.
-        let marker_mode = setting.kind == TrackerKind::Null;
-
         let mut per_storage = Vec::new();
         let mut total = 0i64;
-        let mut nonzero = false;
         for row in group {
             if row.storage != keep {
                 per_storage.push((row.storage.clone(), row.count));
                 total += row.count;
-            } else if marker_mode && row.nonzero > 0 {
-                per_storage.push(("integer ≠ 0".to_string(), row.nonzero));
-                total += row.nonzero;
-                nonzero = true;
             }
         }
         if total == 0 {
@@ -260,17 +247,8 @@ fn plan_tracker_prunes(
             tracker_type: tracker_type.to_string(),
             keep,
         });
-        if nonzero {
-            rules.push(TrackerPruneRule::NonzeroScore {
-                tracker_type: tracker_type.to_string(),
-            });
-        }
 
-        let reason = if marker_mode {
-            "kind null (null rows store score 0)".to_string()
-        } else {
-            format!("kind {}", kind_label(setting.kind))
-        };
+        let reason = format!("kind {}", kind_label(setting.kind));
         lines.push(TrackerPruneLine {
             tracker_type: tracker_type.to_string(),
             reason,
@@ -517,9 +495,8 @@ mod tests {
 
     #[test]
     fn plan_null_tracker_modes() {
-        // No bounds: null rows carry score 0 in every mode, so nonzero
-        // integers (pre-rework count rows) are stale leftovers; text
-        // entries are pruned.
+        // Null rows store a position or count in their integer score, so
+        // only storage-class mismatches are pruned.
         let rows = vec![row("pills", "integer", 3, 3), row("pills", "text", 1, 0)];
         let trackers = make_trackers(&[("pills", TrackerSetting::new(TrackerKind::Null))]);
         let plan = plan_tracker_prunes(&rows, &trackers);
@@ -527,26 +504,20 @@ mod tests {
             plan.lines,
             vec![TrackerPruneLine {
                 tracker_type: "pills".to_string(),
-                reason: "kind null (null rows store score 0)".to_string(),
-                per_storage: vec![("integer ≠ 0".to_string(), 3), ("text".to_string(), 1),],
-                total: 4,
+                reason: "kind null".to_string(),
+                per_storage: vec![("text".to_string(), 1)],
+                total: 1,
             }]
         );
         assert_eq!(
             plan.rules,
-            vec![
-                TrackerPruneRule::Storage {
-                    tracker_type: "pills".to_string(),
-                    keep: "integer",
-                },
-                TrackerPruneRule::NonzeroScore {
-                    tracker_type: "pills".to_string(),
-                },
-            ]
+            vec![TrackerPruneRule::Storage {
+                tracker_type: "pills".to_string(),
+                keep: "integer",
+            }]
         );
 
-        // Same rule with both bounds: the interval mode does not matter.
-        // leftovers and are pruned too.
+        // The interval mode does not matter.
         let rows = vec![
             row("sleep", "integer", 5, 3),
             row("sleep", "real", 1, 0),
@@ -563,26 +534,17 @@ mod tests {
             plan.lines,
             vec![TrackerPruneLine {
                 tracker_type: "sleep".to_string(),
-                reason: "kind null (null rows store score 0)".to_string(),
-                per_storage: vec![
-                    ("integer ≠ 0".to_string(), 3),
-                    ("real".to_string(), 1),
-                    ("text".to_string(), 1),
-                ],
-                total: 5,
+                reason: "kind null".to_string(),
+                per_storage: vec![("real".to_string(), 1), ("text".to_string(), 1)],
+                total: 2,
             }]
         );
         assert_eq!(
             plan.rules,
-            vec![
-                TrackerPruneRule::Storage {
-                    tracker_type: "sleep".to_string(),
-                    keep: "integer",
-                },
-                TrackerPruneRule::NonzeroScore {
-                    tracker_type: "sleep".to_string(),
-                },
-            ]
+            vec![TrackerPruneRule::Storage {
+                tracker_type: "sleep".to_string(),
+                keep: "integer",
+            }]
         );
 
         // Marker mode with a clean integer bucket: no NonzeroScore rule.

@@ -1,7 +1,8 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser::SerializeMap};
 
+use crate::date::LogTime;
+
 use super::types::{ColorBins, TrackerKind};
-use crate::date::Epoch;
 use cba::wbog;
 
 /// The `colors` field as written in the config: a TOML color list
@@ -23,13 +24,13 @@ impl Default for RawColors {
     }
 }
 
-/// `interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }`.
+/// `interval = { anchor = "2026-01-01T00:00:00", span = "1 day" }`.
 #[derive(Debug, Clone, Copy)]
 pub struct TrackerInterval {
-    /// Anchor time fixing the interval phase; the slot grid runs `anchor + span*k`.
-    ///
-    /// Timestamps must be specified in ISO 8601 / RFC 3339 format and must explicitly include a UTC offset (e.g., ending with Z or +00:00).
-    pub anchor: Epoch,
+    /// Unzoned civil anchor fixing the interval phase; the slot grid runs
+    /// `anchor + span*k` on the current system clock. A trailing `Z` or
+    /// numeric offset is rejected.
+    pub anchor: jiff::civil::DateTime,
     /// The interval length (calendar-aware).
     pub span: jiff::Span,
     /// When `true`, every log within the same interval period adds a new
@@ -38,6 +39,45 @@ pub struct TrackerInterval {
     /// replace), logging again within the same period replaces the previous
     /// entry.
     pub cumulative: bool,
+}
+
+impl TrackerInterval {
+    /// Resolve the civil anchor in the current system zone. The anchor is a
+    /// boundary, so a DST gap moves it forward (jiff's compatible rule).
+    /// `None` when the anchor has no instant in the zone (a civil datetime
+    /// outside the representable range).
+    pub fn anchor_zoned(&self) -> Option<jiff::Zoned> {
+        jiff::tz::TimeZone::system()
+            .to_ambiguous_zoned(self.anchor)
+            .compatible()
+            .ok()
+    }
+
+    /// The anchor as an absolute epoch second in the current system zone.
+    pub fn anchor_epoch(&self) -> Option<i64> {
+        Some(self.anchor_zoned()?.timestamp().as_second())
+    }
+
+    /// The `[start, end)` slot containing a log's recorded wall clock, read on
+    /// the current zone.
+    pub fn slot_for(&self, stamp: LogTime) -> Option<(i64, i64)> {
+        crate::date::interval_slot_unix_secs(self.anchor_epoch()?, self.span, stamp.rebased())
+    }
+
+    /// The start of [`Self::slot_for`].
+    pub fn start_for(&self, stamp: LogTime) -> Option<i64> {
+        self.slot_for(stamp).map(|(start, _)| start)
+    }
+
+    /// The interval index containing a log's recorded wall clock.
+    pub fn index_for(&self, stamp: LogTime) -> Option<i64> {
+        crate::date::interval_index(
+            &self.anchor_zoned()?,
+            &crate::date::zoned_from_unix_secs(stamp.rebased()).ok()?,
+            self.span,
+        )
+        .ok()
+    }
 }
 
 impl PartialEq for TrackerInterval {
@@ -68,14 +108,28 @@ impl<'de> Deserialize<'de> for TrackerInterval {
         D: Deserializer<'de>,
     {
         let raw = IntervalRaw::deserialize(deserializer)?;
-        // Strict RFC 3339: an explicit UTC offset (Z or +00:00) is required.
-        let ts: jiff::Timestamp = raw.anchor.parse().map_err(de::Error::custom)?;
+        // Civil (unzoned) datetime: an offset suffix is a config error.
+        // jiff's civil parser tolerates `Z`, so reject a zone explicitly.
+        let time_part = raw
+            .anchor
+            .split_once(['T', ' '])
+            .map(|(_, time)| time)
+            .unwrap_or("");
+        if time_part
+            .chars()
+            .any(|c| matches!(c, 'Z' | 'z' | '+' | '-'))
+        {
+            return Err(de::Error::custom(
+                "interval anchor must be an unzoned civil datetime (no Z or numeric offset)",
+            ));
+        }
+        let anchor: jiff::civil::DateTime = raw.anchor.parse().map_err(de::Error::custom)?;
         let span = crate::date::parse_span(&raw.span).map_err(de::Error::custom)?;
         if crate::date::span_to_db(&span) == 0 {
             return Err(de::Error::custom("interval span must be non-zero"));
         }
         Ok(TrackerInterval {
-            anchor: ts.as_second(),
+            anchor,
             span,
             cumulative: raw.cumulative,
         })
@@ -88,12 +142,7 @@ impl Serialize for TrackerInterval {
         S: Serializer,
     {
         let mut map = serializer.serialize_map(Some(3))?;
-        // Serialize back in RFC 3339 so the output re-parses with the
-        // strict timestamp deserializer.
-        let anchor = jiff::Timestamp::from_second(self.anchor)
-            .map(|ts| ts.to_string())
-            .unwrap_or_else(|_| self.anchor.to_string());
-        map.serialize_entry("anchor", &anchor)?;
+        map.serialize_entry("anchor", &self.anchor.to_string())?;
         map.serialize_entry("span", &crate::date::format_span(&self.span))?;
         map.serialize_entry("cumulative", &self.cumulative)?;
         map.end()
@@ -115,7 +164,7 @@ impl Serialize for TrackerInterval {
 #[derive(Debug, Clone, Serialize)]
 pub struct TrackerSetting {
     /// How often the tracker is expected to be logged, e.g.
-    /// `{ anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }`. With an
+    /// `{ anchor = "2026-01-01T00:00:00", span = "1 day" }`. With an
     /// interval, logging again within the same period replaces the previous
     /// entry (or adds a new one when `cumulative = true`); without one,
     /// every log adds a new entry. Required for `null` trackers.
@@ -391,5 +440,46 @@ impl TrackerSetting {
             Ok(bins) => bins,
             Err(_) => &DEFAULT_TRACKER_BINS,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn daily() -> TrackerInterval {
+        TrackerInterval {
+            anchor: jiff::civil::date(2020, 1, 1).at(0, 0, 0, 0),
+            span: jiff::Span::new().days(1),
+            cumulative: false,
+        }
+    }
+
+    #[test]
+    fn tracker_slots_use_the_recorded_civil_clock() {
+        let interval = daily();
+        let civil = jiff::civil::date(2026, 1, 1).at(9, 0, 0, 0);
+        let tokyo = LogTime::from_civil(civil, 9 * 3600).unwrap();
+        let toronto = LogTime::from_civil(civil, -4 * 3600).unwrap();
+        assert_eq!(interval.start_for(tokyo), interval.start_for(toronto));
+        assert_eq!(interval.slot_for(tokyo), interval.slot_for(toronto));
+        assert_ne!(tokyo.epoch, toronto.epoch);
+    }
+
+    #[test]
+    fn tracker_slots_tile_before_the_anchor() {
+        // A log older than the configured anchor still has a slot; slot
+        // membership and its start must agree on both sides of the anchor.
+        let interval = daily();
+        let before = LogTime::from_civil(jiff::civil::date(2019, 12, 31).at(9, 0, 0, 0), 0)
+            .expect("a civil stamp");
+        let after = LogTime::from_civil(jiff::civil::date(2020, 1, 1).at(9, 0, 0, 0), 0)
+            .expect("a civil stamp");
+        assert_eq!(
+            interval.start_for(before),
+            interval.slot_for(before).map(|(start, _)| start)
+        );
+        assert!(interval.index_for(before).is_some_and(|idx| idx < 0));
+        assert_eq!(interval.index_for(after), Some(0));
     }
 }

@@ -62,6 +62,8 @@ pub mod mood_field {
     pub const MOOD: &str = "mood";
     pub const BODY: &str = "body";
     pub const TIME: &str = "time";
+    pub const TZ_OFFSET: &str = "tz_offset";
+    pub const LOCATION: &str = "location";
     pub const DURATION: &str = "duration";
     pub const TODO_ID: &str = "todo_id";
 }
@@ -71,6 +73,8 @@ pub mod tracker_field {
     pub const TRACKER_TYPE: &str = "type";
     pub const SCORE: &str = "score";
     pub const TIME: &str = "time";
+    pub const TZ_OFFSET: &str = "tz_offset";
+    pub const LOCATION: &str = "location";
     pub const MOOD_ID: &str = "mood_id";
 }
 
@@ -78,6 +82,8 @@ pub mod tracker_field {
 pub mod completion_field {
     pub const TODO_ID: &str = "todo_id";
     pub const TIME: &str = "time";
+    pub const TZ_OFFSET: &str = "tz_offset";
+    pub const LOCATION: &str = "location";
     pub const COUNT: &str = "count";
 }
 
@@ -276,9 +282,10 @@ impl TaskUpdate {
             Self::Body(body) => (task_field::BODY, Some(CellValue::text(body))),
             Self::Priority(priority) => (task_field::PRIORITY, Some(CellValue::int(*priority))),
             Self::StartTime(time) => (task_field::START_TIME, Some(CellValue::Int(*time))),
-            Self::AvailableDurationSecs(secs) => {
-                (task_field::AVAILABLE_DURATION_SECS, secs.map(CellValue::Int))
-            }
+            Self::AvailableDurationSecs(secs) => (
+                task_field::AVAILABLE_DURATION_SECS,
+                secs.map(CellValue::Int),
+            ),
             Self::IntervalSecs(secs) => (task_field::INTERVAL_SECS, secs.map(CellValue::Int)),
             Self::TargetCount(count) => (task_field::TARGET_COUNT, Some(CellValue::int(*count))),
             Self::Optional(optional) => (

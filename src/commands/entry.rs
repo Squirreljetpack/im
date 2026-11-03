@@ -2,7 +2,7 @@ use anyhow::Result;
 use sqlx::SqlitePool;
 
 use crate::cli::CliOpts;
-use crate::config::{Config, TrackerInterval, TrackerKind};
+use crate::config::{Config, TrackerKind};
 use crate::date;
 use crate::db::{EntryObject, TrackerObject, TrackerValue};
 use crate::editor::open_editor_for_body;
@@ -222,22 +222,29 @@ pub(super) async fn record_entry(
                         );
                     }
                 }
+                let slot = crate::tracker::interval_slot(interval, time_epoch).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Could not compute the interval slot for tracker '{}'",
+                        tracker_type
+                    )
+                })?;
                 // Replace: the slot's previous markers are dropped and a
-                // fresh marker inserted (score 0). Cumulative: every log
-                // appends its own row (score 0).
+                // fresh marker stores its absolute seconds from the slot
+                // start. Cumulative: every log appends its own row with
+                // score 0; the count is the value.
+                let position = if interval.cumulative {
+                    0
+                } else {
+                    time_epoch - slot.0
+                };
                 let replace_slot = if interval.cumulative {
                     None
                 } else {
-                    Some(interval_slot(time_epoch, interval).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Could not compute the interval slot for tracker '{}'",
-                            tracker_type
-                        )
-                    })?)
+                    Some(slot)
                 };
                 tracker_objects.push(TrackerObject {
                     tracker_type: tracker_type.clone(),
-                    value: TrackerValue::Integer(0),
+                    value: TrackerValue::Integer(position),
                     replace_slot,
                 });
             }
@@ -262,7 +269,7 @@ pub(super) async fn record_entry(
                 let replace_slot = if tracker.interval.is_some_and(|iv| !iv.cumulative) {
                     tracker
                         .interval
-                        .and_then(|iv| interval_slot(time_epoch, iv))
+                        .and_then(|iv| crate::tracker::interval_slot(iv, time_epoch))
                 } else {
                     None
                 };
@@ -296,7 +303,8 @@ pub(super) async fn record_entry(
     let entry_obj = EntryObject {
         mood,
         body,
-        time: time_epoch,
+        time: date::LogTime::local(time_epoch),
+        location: date::current_location(),
         embedding: embedding_blob,
         score,
         trackers: tracker_objects,
@@ -356,23 +364,18 @@ pub(super) async fn record_entry(
     Ok(wrote)
 }
 
-/// The `[start, end)` replacement slot containing `time_epoch` for a
-/// calendar interval (anchor + span): `[anchor + span*k, anchor + span*(k+1))`.
-/// Slots tile the timeline in both directions from the anchor.
-fn interval_slot(time_epoch: i64, interval: TrackerInterval) -> Option<(i64, i64)> {
-    crate::date::interval_slot_unix_secs(interval.anchor, interval.span, time_epoch)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::interval_slot;
     use crate::config::TrackerInterval;
     use crate::date;
+    use crate::tracker::interval_slot;
     use jiff::Span;
 
     fn day_interval() -> TrackerInterval {
         TrackerInterval {
-            anchor: date::day_start(date::now()) - 30 * 86_400,
+            anchor: date::zoned_from_unix_secs(date::day_start(date::now()) - 30 * 86_400)
+                .unwrap()
+                .datetime(),
             span: Span::new().days(1),
             cumulative: false,
         }
@@ -385,15 +388,17 @@ mod tests {
         for interval in [
             day_interval(),
             TrackerInterval {
-                anchor: date::today_start() - 86_400,
+                anchor: date::zoned_from_unix_secs(date::today_start() - 86_400)
+                    .unwrap()
+                    .datetime(),
                 span: Span::new().minutes(30),
                 cumulative: false,
             },
         ] {
-            let (start, end) = interval_slot(t, interval).unwrap();
+            let (start, end) = interval_slot(interval, t).unwrap();
             assert!(t >= start && t < end, "{t} not in [{start}, {end})");
             // Adjacent slot: [end, end + span).
-            let (s2, e2) = interval_slot(end, interval).unwrap();
+            let (s2, e2) = interval_slot(interval, end).unwrap();
             assert_eq!(s2, end, "slots must be adjacent");
             assert!(e2 > end);
         }
@@ -403,15 +408,17 @@ mod tests {
     /// crossing a boundary doesn't.
     #[test]
     fn interval_slot_sub_day() {
-        let anchor = date::today_start() - 86_400;
+        let anchor = date::zoned_from_unix_secs(date::today_start() - 86_400)
+            .unwrap()
+            .datetime();
         let interval = TrackerInterval {
             anchor,
             span: Span::new().minutes(30),
             cumulative: false,
         };
         let t = date::today_start() + 10 * 3600; // 10:00 local
-        let bucket = interval_slot(t, interval).unwrap();
-        assert_eq!(interval_slot(t + 600, interval).unwrap(), bucket); // 10:10
-        assert_ne!(interval_slot(t + 1801, interval).unwrap(), bucket); // 10:30:01
+        let bucket = interval_slot(interval, t).unwrap();
+        assert_eq!(interval_slot(interval, t + 600).unwrap(), bucket); // 10:10
+        assert_ne!(interval_slot(interval, t + 1801).unwrap(), bucket); // 10:30:01
     }
 }

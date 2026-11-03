@@ -267,7 +267,10 @@ async fn insert_entity(
         let populated = cells
             .iter()
             .any(|row| row.cell.field == *name && row.cell.value.is_some());
-        anyhow::ensure!(!field.required || populated, "missing required field {name}");
+        anyhow::ensure!(
+            !field.required || populated,
+            "missing required field {name}"
+        );
     }
 
     // A link is written with the row only when its referent is already here;
@@ -351,15 +354,17 @@ async fn apply_cell(
     };
     let outcome = if row.cell.field == EXISTENCE {
         if is_dead(&row.cell) {
-            sqlx::query(sqlx::AssertSqlSafe(format!("DELETE FROM \"{table}\" WHERE id = ?")))
-                .bind(entity)
-                .execute(&mut *conn)
-                .await
-                .map(|result| {
-                    if result.rows_affected() > 0 {
-                        applied.deleted += 1;
-                    }
-                })
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM \"{table}\" WHERE id = ?"
+            )))
+            .bind(entity)
+            .execute(&mut *conn)
+            .await
+            .map(|result| {
+                if result.rows_affected() > 0 {
+                    applied.deleted += 1;
+                }
+            })
         } else {
             Ok(())
         }
@@ -380,13 +385,25 @@ async fn apply_cell(
         let value = stored_value(kind, &row.cell.field, &row.cell.value);
         let result = match &value {
             Some(CellValue::Text(text)) => {
-                sqlx::query(sqlx::AssertSqlSafe(sql.clone())).bind(text).bind(entity).execute(&mut *conn).await
+                sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
+                    .bind(text)
+                    .bind(entity)
+                    .execute(&mut *conn)
+                    .await
             }
             Some(CellValue::Int(number)) => {
-                sqlx::query(sqlx::AssertSqlSafe(sql.clone())).bind(number).bind(entity).execute(&mut *conn).await
+                sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
+                    .bind(number)
+                    .bind(entity)
+                    .execute(&mut *conn)
+                    .await
             }
             Some(CellValue::Real(number)) => {
-                sqlx::query(sqlx::AssertSqlSafe(sql.clone())).bind(number).bind(entity).execute(&mut *conn).await
+                sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
+                    .bind(number)
+                    .bind(entity)
+                    .execute(&mut *conn)
+                    .await
             }
             None => {
                 sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
@@ -418,17 +435,17 @@ async fn apply_cell(
     Ok(())
 }
 
-/// The `(type, time)` a tracker row currently holds, for slot bookkeeping.
+/// The `(type, stamp)` a tracker row currently holds, for slot bookkeeping.
 pub async fn tracker_slot_key(
     conn: &mut SqliteConnection,
     id: Id,
-) -> Result<Option<(String, i64)>> {
-    let row = sqlx::query("SELECT type, time FROM tracker WHERE id = ?")
+) -> Result<Option<(String, crate::date::LogTime)>> {
+    let row = sqlx::query("SELECT type, time, tz_offset FROM tracker WHERE id = ?")
         .bind(id)
         .fetch_optional(&mut *conn)
         .await
         .context("Failed to read a tracker's slot")?;
-    Ok(row.map(|row| (row.get("type"), row.get("time"))))
+    Ok(row.map(|row| (row.get("type"), crate::db::log_time(&row))))
 }
 
 /// Collapse replace-mode tracker rows that landed in one slot.
@@ -445,17 +462,25 @@ pub async fn dedup_tracker_slots(
 ) -> Result<usize> {
     let mut removed = 0;
     for (tracker_type, (low, high)) in touched {
-        let rows: Vec<(Id, i64)> = sqlx::query_as(
-            "SELECT id, time FROM tracker
+        let candidates = sqlx::query(
+            "SELECT id, time, tz_offset FROM tracker
               WHERE type = ? AND time >= ? AND time < ?
               ORDER BY time DESC, id DESC",
         )
         .bind(tracker_type)
-        .bind(low)
-        .bind(high)
+        .bind(low - crate::db::CIVIL_FETCH_MARGIN)
+        .bind(high + crate::db::CIVIL_FETCH_MARGIN)
         .fetch_all(&mut *conn)
         .await
         .context("Failed to read a tracker slot")?;
+        let rows: Vec<(Id, i64)> = candidates
+            .iter()
+            .filter(|row| {
+                let rebased = crate::db::log_time(row).rebased();
+                rebased >= *low && rebased < *high
+            })
+            .map(|row| (row.get("id"), row.get("time")))
+            .collect();
         for (id, _) in rows.into_iter().skip(1) {
             let deleted = sqlx::query("DELETE FROM tracker WHERE id = ?")
                 .bind(id)
@@ -476,10 +501,10 @@ async fn exists(conn: &mut SqliteConnection, table: &str, id: Id) -> Result<bool
     let found: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT 1 FROM \"{table}\" WHERE id = ?"
     )))
-        .bind(id)
-        .fetch_optional(&mut *conn)
-        .await
-        .with_context(|| format!("Failed to look up a row in {table}"))?;
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await
+    .with_context(|| format!("Failed to look up a row in {table}"))?;
     Ok(found.is_some())
 }
 
@@ -494,11 +519,13 @@ pub async fn forget(conn: &mut SqliteConnection, kind: &str, entity: Id) -> Resu
     let Some(table) = schema::table(kind) else {
         return Ok(());
     };
-    sqlx::query(sqlx::AssertSqlSafe(format!("DELETE FROM \"{table}\" WHERE id = ?")))
-        .bind(entity)
-        .execute(&mut *conn)
-        .await
-        .with_context(|| format!("Failed to drop a refused {kind}"))?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DELETE FROM \"{table}\" WHERE id = ?"
+    )))
+    .bind(entity)
+    .execute(&mut *conn)
+    .await
+    .with_context(|| format!("Failed to drop a refused {kind}"))?;
     Ok(())
 }
 

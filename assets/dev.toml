@@ -61,7 +61,7 @@ persist_pending_seconds = 300
 
 [tracker]
 # populatable as: [tracker.<name>]
-# interval = { anchor = "2020-01-01T00:00:00-04:00", span = "1 day" }  # anchor datetime + calendar span
+# interval = { anchor = "2020-01-01T00:00:00", span = "1 day" }  # unzoned anchor datetime + calendar span
 #   cumulative = true  # keep every log per period (default false = replace)
 # kind = "float"      # text | integer | float | duration | null
 # low = 0
@@ -69,14 +69,14 @@ persist_pending_seconds = 300
 # strict = true       # gate logging outside [low, high] (see config.toml docs)
 
 [tracker.sleep]
-interval = { anchor = "2020-01-01T00:00:00-04:00", span = "1 day" }
+interval = { anchor = "2020-01-01T00:00:00", span = "1 day" }
 kind = "float"
 low = 0
 high = 10
 colors = "sleep"
 
 [tracker.run_times]
-interval = { anchor = "2020-01-01T00:00:00-04:00", span = "1 week" }
+interval = { anchor = "2020-01-01T00:00:00", span = "1 week" }
 kind = "float"
 low = 100
 high = 0
@@ -84,13 +84,13 @@ colors = "rating"
 
 # Interval trackers without low/high — binning falls back to the middle color
 [tracker.water]
-interval = { anchor = "2020-01-01T00:00:00-04:00", span = "1 day" }
+interval = { anchor = "2020-01-01T00:00:00", span = "1 day" }
 kind = "float"
 colors = "awake"
 
 # Interval text tracker — entries stored as strings, no numeric binning
 [tracker.notes]
-interval = { anchor = "2020-01-01T00:00:00-04:00", span = "1 week" }
+interval = { anchor = "2020-01-01T00:00:00", span = "1 week" }
 kind = "text"
 colors = "grateful"
 
@@ -107,7 +107,7 @@ colors = "grateful"
 # Tracker with values spanning below low, in range, and above high
 # to exercise the full color binning palette.
 [tracker.temperature]
-interval = { anchor = "2020-01-01T00:00:00-04:00", span = "1 day" }
+interval = { anchor = "2020-01-01T00:00:00", span = "1 day" }
 kind = "integer"
 low = 10
 high = 30
