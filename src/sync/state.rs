@@ -1,18 +1,21 @@
-//! Device identity and the two clock-ish numbers the client keeps.
+//! Device identity, session credentials, and the two clock-ish numbers the
+//! client keeps.
 //!
-//! `_sync_state` is a key/value table holding exactly: the device id, the pull
-//! cursor, and the last stamp this device emitted. Nothing per-entity lives
-//! here: the merge is decided by the server, so the client keeps no watermarks.
+//! `_sync_state` is a key/value table holding the device id, the pull cursor,
+//! and the last stamp this device emitted. `_sync_account` holds the active
+//! session token and user id.
 
 use anyhow::{Context, Result};
-use sqlx::SqliteConnection;
+use sqlx::{SqliteConnection, SqlitePool};
 
+use super::client::Account;
 use super::types::Cursor;
 use crate::db::Id;
 
 pub const KEY_DEVICE_ID: &str = "device_id";
 pub const KEY_CURSOR: &str = "cursor";
 pub const KEY_LAST_STAMP: &str = "last_own_stamp";
+
 /// Unix epoch milliseconds.
 pub fn now_ms() -> i64 {
     jiff::Timestamp::now().as_millisecond()
@@ -103,9 +106,10 @@ async fn get_i64(conn: &mut SqliteConnection, key: &str) -> Result<i64> {
 /// for echo suppression and error attribution, so a reset rotates it.
 pub async fn device_id(conn: &mut SqliteConnection) -> Result<Id> {
     if let Some(existing) = get(&mut *conn, KEY_DEVICE_ID).await?
-        && let Ok(id) = existing.parse::<Id>() {
-            return Ok(id);
-        }
+        && let Ok(id) = existing.parse::<Id>()
+    {
+        return Ok(id);
+    }
     let id = Id::new();
     set(&mut *conn, KEY_DEVICE_ID, &id.to_string()).await?;
     Ok(id)
@@ -127,6 +131,12 @@ pub async fn set_cursor(conn: &mut SqliteConnection, cursor: Option<&Cursor>) ->
     }
 }
 
+/// Read the pull cursor from a pool connection.
+pub async fn pool_cursor(pool: &SqlitePool) -> Result<Option<Cursor>> {
+    let mut conn = pool.acquire().await?;
+    cursor(&mut conn).await
+}
+
 /// The stamp for the next event this device emits.
 ///
 /// Monotone against this device's own history only: wall clock, but never at or
@@ -138,4 +148,38 @@ pub async fn next_stamp(conn: &mut SqliteConnection) -> Result<i64> {
     let stamp = now_ms().max(last.saturating_add(1));
     set(&mut *conn, KEY_LAST_STAMP, &stamp.to_string()).await?;
     Ok(stamp)
+}
+
+/// Reset the last-emitted stamp after the server reports `clock_ahead`.
+pub async fn reset_clock(conn: &mut SqliteConnection, stamp: i64) -> Result<()> {
+    set(conn, KEY_LAST_STAMP, &stamp.to_string()).await
+}
+
+/// Store the authenticated account credentials in `_sync_account`.
+///
+/// An existing pull cursor is intentionally preserved: if the database was
+/// previously synced against another account's log, the next sync will detect
+/// `LogMismatch` and require an explicit `--reset` rather than silently merging
+/// two accounts' histories.
+pub async fn store_account(pool: &SqlitePool, account: &Account) -> Result<()> {
+    let mut conn = pool.acquire().await.context("Failed to acquire a db connection")?;
+    set_account(&mut conn, Some(&account.user_id), &account.token).await
+}
+
+/// Store a raw session token in `_sync_account`.
+pub async fn store_token(pool: &SqlitePool, token: &str) -> Result<()> {
+    let mut conn = pool.acquire().await.context("Failed to acquire a db connection")?;
+    set_account(&mut conn, None, token).await
+}
+
+/// The signed-in account's token, if any.
+pub async fn signed_in(pool: &SqlitePool) -> Result<Option<String>> {
+    let mut conn = pool.acquire().await.context("Failed to acquire a db connection")?;
+    token(&mut conn).await
+}
+
+/// Clear the stored session credentials.
+pub async fn logout(pool: &SqlitePool) -> Result<()> {
+    let mut conn = pool.acquire().await.context("Failed to acquire a db connection")?;
+    clear_account(&mut conn).await
 }
