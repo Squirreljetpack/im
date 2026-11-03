@@ -654,6 +654,11 @@ describe("deletes and links", () => {
       cell(task, "task", "parent_id", { text: loser }, ago(600)),
     ]);
     expect(linked.verdicts[0]?.outcome).toBe("accepted");
+
+    const unlinked = await sync(account.token, "device-a", 0, [
+      cell(task, "task", "parent_id", null, ago(500)),
+    ]);
+    expect(unlinked.verdicts[0]?.outcome).toBe("accepted");
   });
 });
 
@@ -881,5 +886,94 @@ describe("compatibility", () => {
       cursor: 0 as unknown as SyncRequest["cursor"],
     });
     expect(numeric.status).toBe(400);
+  });
+
+  it("folds existence monotonically regardless of clock skew", async () => {
+    const account = await register("monotone@example.com");
+    const task = "0193f000-0000-7000-8000-000000000090";
+
+    // Device A creates the task at t = ago(1000).
+    await sync(account.token, "device-a", 0, create(task, "task", [["name", { text: "v1" }]], ago(1000)));
+
+    // A second "live" existence cell (e.g. deterministic ID collision) with a newer
+    // timestamp must not advance the birth cell's winner_version past "name".
+    await sync(account.token, "device-b", 0, [
+      cell(task, "task", "", { text: "live" }, ago(500), "device-b"),
+    ]);
+    const pulledLive = await sync(account.token, "device-c", 0);
+    expect(pulledLive.events[0]?.field).toBe("");
+
+    // Device B deletes the task, but its clock is slightly behind Device A's create stamp.
+    const deleted = await sync(account.token, "device-b", 0, [
+      cell(task, "task", "", { text: "deleted" }, ago(2000), "device-b"),
+    ]);
+    expect(deleted.verdicts[0]?.outcome).toBe("accepted");
+
+    const pulledDead = await sync(account.token, "device-c", 0);
+    expect(pulledDead.events).toHaveLength(1);
+    expect(pulledDead.events[0]).toMatchObject({
+      entity_id: task,
+      field: "",
+      value: { text: "deleted" },
+    });
+  });
+
+  it("rejects a completion created for a deleted task without failing the batch", async () => {
+    const account = await register("dead-link-create@example.com");
+    const task = "0193f000-0000-7000-8000-000000000091";
+    const completion = "0193f000-0000-7000-8000-000000000092";
+
+    await sync(account.token, "device-a", 0, create(task, "task", [["name", { text: "doomed" }]], ago(5000)));
+    await sync(account.token, "device-b", 0, [
+      cell(task, "task", "", { text: "deleted" }, ago(4000), "device-b"),
+    ]);
+
+    const response = await sync(
+      account.token,
+      "device-a",
+      0,
+      create(
+        completion,
+        "completion",
+        [
+          ["todo_id", { text: task }],
+          ["time", { int: 1_700_000_100 }],
+          ["count", { int: 1 }],
+        ],
+        ago(3000),
+      ),
+    );
+    const rejected = response.verdicts.filter((verdict) => verdict.outcome === "rejected");
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toMatchObject({ outcome: "rejected", reason: "deleted" });
+
+    // No half-born completion remains in the register.
+    const pulled = await sync(account.token, "device-c", 0);
+    expect(pulled.events.some((row) => row.entity_id === completion)).toBe(false);
+  });
+
+  it("includes rewritten required fields of a created entity in a bounded pull page", async () => {
+    const account = await register("bounded-create@example.com");
+    const task1 = "0193f000-0000-7000-8000-000000000093";
+    const task2 = "0193f000-0000-7000-8000-000000000094";
+
+    // Batch 1: create task1 (3 cells: "", "name", "start_time").
+    await sync(account.token, "device-a", 0, create(task1, "task", [["name", { text: "first" }]], ago(5000)));
+    // Batch 2: create task2 (3 cells).
+    await sync(account.token, "device-a", 0, create(task2, "task", [["name", { text: "second" }]], ago(4000)));
+    // Batch 3: rewrite task1's required "name" field so its winner_version moves past Batch 1.
+    await sync(account.token, "device-a", 0, [
+      cell(task1, "task", "name", { text: "first-renamed" }, ago(3000)),
+    ]);
+
+    // Pull with page = 2 from device-b: page 1 cuts at the end of Batch 1,
+    // and must still carry task1's current "name" cell so task1 can be inserted.
+    const page1 = await sync(account.token, "device-b", 0, [], 2);
+    expect(page1.has_more).toBe(true);
+    expect(page1.events.filter((row) => row.entity_id === task1).map((row) => row.field).sort()).toEqual([
+      "",
+      "name",
+      "start_time",
+    ]);
   });
 });

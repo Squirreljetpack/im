@@ -277,9 +277,7 @@ export class UserSyncDO implements DurableObject {
       );
       const verdicts: (Verdict | null)[] = body.events.map(() => null);
       const pushed: { index: number; entity_id: string; field: string; event_id: string }[] = [];
-      // Entities created by this push: their field writes are part of the
-      // create, so they may legitimately establish the task kind.
-      const creating = new Set<string>();
+      const creating = this.validateCreates(sql, body.events);
 
       body.events.forEach((raw, index) => {
         const result = this.push(sql, raw, device, now, creating, batch);
@@ -289,28 +287,7 @@ export class UserSyncDO implements DurableObject {
           pushed.push({ index, ...result.cell });
         }
       });
-      // A reader builds a row only from the page that carries its existence
-      // cell, and a row is one `INSERT`: the domain tables cannot be filled one
-      // cell at a time. A create that landed without the fields its kind marks
-      // required would therefore be unbuildable on every other device, silently
-      // and for good, so a push carrying one lands nothing at all.
-      for (const entity of creating) {
-        const existence = this.cell(sql, entity, EXISTENCE);
-        if (existence === undefined || existence.value === DEAD) {
-          continue;
-        }
-        const spec = kindSpec(existence.kind);
-        if (spec === undefined) {
-          continue;
-        }
-        for (const [name, field] of Object.entries(spec.fields)) {
-          if (field.required === true && this.cell(sql, entity, name) === undefined) {
-            throw new Refused(
-              `create of ${entity} (${existence.kind}) is missing required field "${name}": one push must carry a whole create`,
-            );
-          }
-        }
-      }
+      this.cleanupIncompleteCreates(sql, creating, batch);
       // A cell is only accepted or superseded once the whole batch has landed:
       // a later event of the same push can legitimately take the cell away
       // from an earlier one.
@@ -328,6 +305,80 @@ export class UserSyncDO implements DurableObject {
         superseded: this.notices(sql, cursor, device),
       };
     });
+  }
+
+  /**
+   * Entities created in this push. Every create must carry all required fields
+   * of its kind in the same push so no peer ever sees a half-born row.
+   */
+  private validateCreates(sql: Sql, events: unknown[]): Set<string> {
+    const creating = new Set<string>();
+    const populated = new Map<string, Set<string>>();
+    const kinds = new Map<string, string>();
+
+    for (const raw of events) {
+      if (!isCellEvent(raw)) {
+        continue;
+      }
+      if (
+        raw.field === EXISTENCE &&
+        raw.value !== null &&
+        "text" in raw.value &&
+        raw.value.text === "live" &&
+        this.cell(sql, raw.entity_id, EXISTENCE) === undefined
+      ) {
+        creating.add(raw.entity_id);
+        kinds.set(raw.entity_id, raw.kind);
+      } else if (raw.field !== EXISTENCE && raw.value !== null) {
+        let fields = populated.get(raw.entity_id);
+        if (fields === undefined) {
+          fields = new Set<string>();
+          populated.set(raw.entity_id, fields);
+        }
+        fields.add(raw.field);
+      }
+    }
+
+    for (const entity of creating) {
+      const kind = kinds.get(entity) ?? "";
+      const spec = kindSpec(kind);
+      if (spec === undefined) {
+        continue;
+      }
+      const present = populated.get(entity);
+      for (const [name, field] of Object.entries(spec.fields)) {
+        if (field.required === true && !present?.has(name)) {
+          throw new Refused(
+            `create of ${entity} (${kind}) is missing required field "${name}": one push must carry a whole create`,
+          );
+        }
+      }
+    }
+    return creating;
+  }
+
+  /**
+   * Drop any create whose required field cell was rejected during the batch so
+   * no half-born entity remains in the log or register.
+   */
+  private cleanupIncompleteCreates(sql: Sql, creating: Set<string>, batch: number): void {
+    for (const entity of creating) {
+      const existence = this.cell(sql, entity, EXISTENCE);
+      if (existence === undefined) {
+        continue;
+      }
+      const spec = kindSpec(existence.kind);
+      if (spec === undefined) {
+        continue;
+      }
+      const missingRequired = Object.entries(spec.fields).some(
+        ([name, field]) => field.required === true && !this.present(sql, entity, name),
+      );
+      if (missingRequired) {
+        sql.exec("DELETE FROM sync_log WHERE batch = ? AND entity_id = ?", batch, entity);
+        sql.exec("DELETE FROM sync_register WHERE entity_id = ?", entity);
+      }
+    }
   }
 
   /**
@@ -407,11 +458,8 @@ export class UserSyncDO implements DurableObject {
         return reject("deleted");
       }
       const appended = this.append(sql, event, now, batch);
-      if (marker === "live") {
-        creating.add(event.entity_id);
-      }
       if (marker === "deleted" && appended.won) {
-        this.cascade(sql, event.kind, event.entity_id, event.timestamp, now, batch);
+        this.cascade(sql, event.kind, event.entity_id, device, event.timestamp, now, batch);
       }
       return {
         verdict: { event_id: event.event_id, outcome: "accepted" },
@@ -454,8 +502,8 @@ export class UserSyncDO implements DurableObject {
     ) {
       return reject("clock_ahead", false);
     }
-    if (field.link !== undefined) {
-      const referent = event.value !== null && "text" in event.value ? event.value.text : null;
+    if (field.link !== undefined && event.value !== null) {
+      const referent = "text" in event.value ? event.value.text : null;
       if (referent === null) {
         return reject("class", false);
       }
@@ -535,7 +583,13 @@ export class UserSyncDO implements DurableObject {
     // A write that takes a cell away from another device is the only way a
     // device can lose an edit it already pushed: it needs to be told, or it
     // watches its value change with no explanation.
-    if (!quiet && won && before !== undefined && before.device_id !== event.device_id) {
+    if (
+      !quiet &&
+      won &&
+      event.field !== EXISTENCE &&
+      before !== undefined &&
+      before.device_id !== event.device_id
+    ) {
       const winnerRow: LogRow = { ...event, version };
       sql.exec(
         `INSERT OR IGNORE INTO sync_superseded
@@ -560,6 +614,10 @@ export class UserSyncDO implements DurableObject {
    * in the same millisecond still converge on one winner. `version` is
    * deliberately not compared — it is append order, and a past-dated push
    * arrives late carrying an old stamp.
+   *
+   * Existence cells move one way (`absent -> live -> deleted`): a second `live`
+   * never advances the birth version past the entity's fields, and `deleted`
+   * always wins over `live` regardless of clock skew between the two devices.
    */
   private fold(sql: Sql, event: CellEvent, version: number, value: string | null): void {
     sql.exec(
@@ -573,8 +631,12 @@ export class UserSyncDO implements DurableObject {
          device_id      = excluded.device_id,
          event_id       = excluded.event_id,
          winner_version = excluded.winner_version
-       WHERE (excluded.timestamp, excluded.device_id, excluded.event_id)
-           > (sync_register.timestamp, sync_register.device_id, sync_register.event_id)`,
+       WHERE CASE
+         WHEN excluded.field = ? AND excluded.value = ? THEN 0
+         WHEN excluded.field = ? AND sync_register.value != ? THEN 1
+         ELSE (excluded.timestamp, excluded.device_id, excluded.event_id)
+            > (sync_register.timestamp, sync_register.device_id, sync_register.event_id)
+       END`,
       event.entity_id,
       event.field,
       event.kind,
@@ -583,6 +645,10 @@ export class UserSyncDO implements DurableObject {
       event.device_id,
       event.event_id,
       version,
+      EXISTENCE,
+      LIVE,
+      EXISTENCE,
+      DEAD,
     );
   }
 
@@ -596,6 +662,7 @@ export class UserSyncDO implements DurableObject {
     sql: Sql,
     kind: string,
     entityId: string,
+    device: string,
     deletedAt: number,
     now: number,
     batch: number,
@@ -606,6 +673,7 @@ export class UserSyncDO implements DurableObject {
     }
     const link = encode({ text: entityId });
     for (const edge of spec.cascade) {
+      const edgeField = edge.field ?? "todo_id";
       if (edge.action === "delete") {
         const doomed = sql
           .exec(
@@ -616,7 +684,7 @@ export class UserSyncDO implements DurableObject {
                    WHERE field = ? AND value = ?
                 )`,
             edge.kind,
-            "todo_id",
+            edgeField,
             link,
             EXISTENCE,
             DEAD,
@@ -628,7 +696,7 @@ export class UserSyncDO implements DurableObject {
             sql,
             {
               event_id: crypto.randomUUID(),
-              device_id: existence?.device_id ?? this.deviceOf(sql, entityId),
+              device_id: device,
               entity_id: row.entity_id,
               kind: edge.kind,
               field: EXISTENCE,
@@ -645,10 +713,16 @@ export class UserSyncDO implements DurableObject {
       const stale = sql
         .exec(
           `SELECT entity_id, timestamp FROM sync_register
-            WHERE kind = ? AND field = ? AND value = ?`,
+            WHERE kind = ? AND field = ? AND value = ?
+              AND entity_id NOT IN (
+                SELECT entity_id FROM sync_register
+                 WHERE field = ? AND value = ?
+              )`,
           edge.kind,
-          edge.field,
+          edgeField,
           link,
+          EXISTENCE,
+          DEAD,
         )
         .toArray() as unknown as { entity_id: string; timestamp: number }[];
       for (const row of stale) {
@@ -656,10 +730,10 @@ export class UserSyncDO implements DurableObject {
           sql,
           {
             event_id: crypto.randomUUID(),
-            device_id: this.deviceOf(sql, entityId),
+            device_id: device,
             entity_id: row.entity_id,
             kind: edge.kind,
-            field: edge.field ?? "",
+            field: edgeField,
             value: null,
             timestamp: Math.max(deletedAt, Number(row.timestamp)) + 1,
           },
@@ -671,12 +745,6 @@ export class UserSyncDO implements DurableObject {
     }
   }
 
-  /** The device that authored the deleting cell, so the repair is attributable. */
-  private deviceOf(sql: Sql, entityId: string): string {
-    const existence = this.cell(sql, entityId, EXISTENCE);
-    return existence?.device_id ?? "";
-  }
-
   /**
    * A pull is a register diff over `(cursor, head]`.
    *
@@ -684,13 +752,10 @@ export class UserSyncDO implements DurableObject {
    * because a cell's `winner_version` only moves forward: a write that loses
    * leaves it untouched, and one that wins takes the new append's version.
    *
-   * A page may only break *between* pushes. A create writes its existence cell
-   * and its fields as separate rows, so a boundary inside one push would hand a
-   * client a row's existence without the `NOT NULL` fields that make it
-   * insertable — the row would be skipped and then lost, since the cursor moves
-   * past it. Everything a push appends shares one batch, so a full page is
-   * extended to the last version of its last batch, however many rows that
-   * takes.
+   * A page may only break *between* pushes, and every live entity whose birth
+   * cell lands in the page brings all of its current register cells with it, so
+   * a create is always insertable from the page that introduces it even when
+   * one of its required fields was rewritten in a later batch.
    */
   private pull(
     sql: Sql,
@@ -712,7 +777,15 @@ export class UserSyncDO implements DurableObject {
                OR NOT EXISTS (SELECT 1 FROM sync_register e
                                WHERE e.entity_id = r.entity_id
                                  AND e.field = ? AND e.value = ?))
-          ${bounded ? "AND r.winner_version <= ?" : ""}
+          ${
+            bounded
+              ? `AND (r.winner_version <= ?
+                      OR EXISTS (SELECT 1 FROM sync_register c
+                                  WHERE c.entity_id = r.entity_id
+                                    AND c.field = ? AND c.value = ?
+                                    AND c.winner_version > ? AND c.winner_version <= ?))`
+              : ""
+          }
         ORDER BY r.winner_version ASC
         LIMIT ?`;
     const params = (
@@ -725,7 +798,7 @@ export class UserSyncDO implements DurableObject {
       EXISTENCE,
       EXISTENCE,
       DEAD,
-      ...(through === undefined ? [] : [through]),
+      ...(through === undefined ? [] : [through, EXISTENCE, LIVE, cursor, through]),
       limit,
     ];
 
@@ -733,6 +806,7 @@ export class UserSyncDO implements DurableObject {
       .exec(query(false), ...params(limit))
       .toArray() as unknown as CellRow[];
     const pageFull = rows.length === limit;
+    let cutoff: number | undefined;
     if (pageFull) {
       const last = rows[rows.length - 1];
       // Extend to the last version of the batch that delivered the cut, so the
@@ -747,9 +821,10 @@ export class UserSyncDO implements DurableObject {
           Number(last?.winner_version),
         )
         .one() as { through: number };
+      cutoff = Number(through.through);
       // A negative limit means none: the bound above is the whole cut.
       rows = sql
-        .exec(query(true), ...params(-1, Number(through.through)))
+        .exec(query(true), ...params(-1, cutoff))
         .toArray() as unknown as CellRow[];
     }
     // SAFETY: the query selects one column, aliased `version`.
@@ -760,7 +835,12 @@ export class UserSyncDO implements DurableObject {
       )
       .one() as { version: number };
     const last = rows[rows.length - 1];
-    const delivered = last === undefined ? cursor : Number(last.winner_version);
+    const delivered =
+      cutoff !== undefined
+        ? cutoff
+        : last === undefined
+          ? cursor
+          : Number(last.winner_version);
     // SAFETY: the query selects one column, aliased `more`.
     const beyond = sql
       .exec(
