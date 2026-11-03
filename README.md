@@ -96,7 +96,7 @@ Trackers and grids:
 
 Other:
   im :tool embed|mood|clear|..                   (see `im :tool --help`)
-  im :tool config | :c [moods|colors]            open the config in $VISUAL / $EDITOR
+  im :tool config | :c [moods|colors|mm]         open the config in $VISUAL / $EDITOR
   im -                                           browse trackers
   im :db prune|backfill|doctor                   database utilities
 

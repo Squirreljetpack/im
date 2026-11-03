@@ -10,7 +10,8 @@ use crate::date;
 use crate::db::{TrackerPruneRule, TrackerScoreKindRow};
 use crate::editor::open_editor_at;
 use crate::global;
-use crate::paths::{colors_path, default_config_path};
+use crate::paths::{colors_path, default_config_path, mm_config_path};
+use crate::ui::mm_config::{DEFAULT_MM_CONFIG, DEFAULT_MM_DEV_CONFIG};
 
 /// `im :tool clear [@date]` — clear/delete all mood entries from that day.
 /// If interactive, confirm first, showing the computed date.
@@ -398,6 +399,41 @@ pub(super) async fn edit_colors() -> Result<()> {
     if created {
         cba::ibog!(
             "colors";
+            "Created file at {}",
+            path.display()
+        );
+    }
+    open_editor_at(path)
+}
+
+/// `im :tool config mm` — open the matchmaker render config (`mm.toml`, or
+/// `mm.dev.toml` in debug builds) in $VISUAL/$EDITOR.
+///
+/// Like [`edit_config`], a missing file is created from the bundled default
+/// first, announced with `ibog!`. Debug builds regenerate `mm.dev.toml` from
+/// `assets/config/mm.dev.toml` on every view, so edits to it only last until
+/// the next run.
+pub(super) async fn edit_mm() -> Result<()> {
+    let path = mm_config_path();
+    let mut created = false;
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create config dir {:?}", parent))?;
+        }
+        let default = if cfg!(debug_assertions) {
+            DEFAULT_MM_DEV_CONFIG
+        } else {
+            DEFAULT_MM_CONFIG
+        };
+        std::fs::write(path, default.as_bytes()).with_context(|| {
+            format!("Failed to write default matchmaker config to {:?}", path)
+        })?;
+        created = true;
+    }
+    if created {
+        cba::ibog!(
+            "mm";
             "Created file at {}",
             path.display()
         );

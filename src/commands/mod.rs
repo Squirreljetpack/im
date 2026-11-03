@@ -126,6 +126,7 @@ pub async fn execute_command<W: Write>(
                 crate::cli::ConfigTarget::Main => maintenance::edit_config().await,
                 crate::cli::ConfigTarget::Moods => maintenance::edit_moods(config).await,
                 crate::cli::ConfigTarget::Colors => maintenance::edit_colors().await,
+                crate::cli::ConfigTarget::Mm => maintenance::edit_mm().await,
             },
             crate::cli::ToolSubcommand::Mood { mood } => {
                 let mood = join_mood(&mood);

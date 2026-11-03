@@ -1766,6 +1766,24 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_config_mm() {
+        let cmd = parse_from(args(&[":tool", "config", "mm"])).unwrap();
+        assert_eq!(
+            cmd,
+            Command::Tool(ToolSubcommand::Config {
+                target: Some(ConfigTarget::Mm)
+            })
+        );
+        let cmd = parse_from(args(&[":c", "mm"])).unwrap();
+        assert_eq!(
+            cmd,
+            Command::Tool(ToolSubcommand::Config {
+                target: Some(ConfigTarget::Mm)
+            })
+        );
+    }
+
+    #[test]
     fn test_parse_sync() {
         assert_eq!(
             parse_from(args(&[":sync"])).unwrap(),

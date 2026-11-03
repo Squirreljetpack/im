@@ -54,8 +54,9 @@ pub struct Cli {
 
 /// Which file `im :tool config [<target>]` opens in $VISUAL/$EDITOR.
 /// `Main` is the active config; `Moods` the moods file named by
-/// `[moods] source`; `Colors` the colors file (`colors.toml`). `:c` is an
-/// alias for `:tool config`.
+/// `[moods] source`; `Colors` the colors file (`colors.toml`); `Mm` the
+/// matchmaker render config (`mm.toml`). `:c` is an alias for
+/// `:tool config`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum ConfigTarget {
     /// The active config file.
@@ -66,6 +67,8 @@ pub enum ConfigTarget {
     Moods,
     /// The colors file.
     Colors,
+    /// The matchmaker render config.
+    Mm,
 }
 
 #[derive(Debug, Clone, PartialEq)]

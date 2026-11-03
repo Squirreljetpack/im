@@ -275,7 +275,7 @@ arguments are all tracker ids.
 | `:` / `:week\|month\|year` / `:` + ids | `Tracker { period, items }` — dot-sequence tracker views (`:g` bails "not yet implemented") |
 | `:tool embed` | `Tool(Embed)` — stdin lines → one 768-dim vector per line |
 | `:tool score "start" "end"` | `Tool(Score)` — stub (`todo!()`) |
-| `:tool config [moods\|colors]` / `:c …` | `Tool(Config)` — opens the live config, moods file, or colors file in `$VISUAL`/`$EDITOR` |
+| `:tool config [moods\|colors\|mm]` / `:c …` | `Tool(Config)` — opens the live config, moods file, colors file, or matchmaker config in `$VISUAL`/`$EDITOR` |
 | `:tool mood [mood]` | `Tool(Mood)` — full mood-color pipeline diagnostic; bare lists the anchor palette with swatches |
 | `:tool clear [@date]` | `Tool(Clear)` — deletes that day's mood entries (interactive confirm) |
 | `:sync` / `:sync --reset` | `Sync { sub: None, reset, force }` — exchange events with the other devices; `--reset` rebuilds the local copy from the server log, asking first if local changes are unpushed (`--force` skips the question) |

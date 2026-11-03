@@ -2,6 +2,8 @@
 
 ### 🚀 Features
 
+- `im :c mm` opens the matchmaker render config (`mm.toml`) in
+  `$VISUAL`/`$EDITOR`, alongside the config, `moods` and `colors` targets.
 - Log entries (moods, trackers, todo completions) store the UTC offset and
   the location string (the system IANA name, or empty when it has none) in
   effect where they were written. The today view groups log entities by their
