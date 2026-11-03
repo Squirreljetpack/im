@@ -487,7 +487,6 @@ mod tests {
     #[test]
     fn test_recurring_not_done_availability_window() {
         let config = Config::default();
-        let day_secs = 86_400;
         let day = crate::date::span_to_db(&jiff::Span::new().days(1));
         let hour = 3600;
         let now = crate::date::now();
@@ -509,11 +508,17 @@ mod tests {
                 last_time: None,
             };
 
-        // Old chain origin (60 days ago), window open in the current
-        // interval (30min into a 1h window), zero entries → Reset (not
-        // binned as "missed" — the absolute formula marked it passed
-        // forever).
-        let old = now - 60 * day_secs - 1800;
+        // Old chain origin (60 calendar days back, at a wall-clock time 30
+        // minutes before now), so the current interval's window opened 30min
+        // ago: zero entries → Reset (not binned as "missed" — the absolute
+        // formula marked it passed forever).
+        let old = crate::date::zoned_from_unix_secs(now)
+            .expect("now is a valid epoch")
+            .checked_sub(jiff::Span::new().days(60))
+            .expect("60 days back is a valid instant")
+            .timestamp()
+            .as_second()
+            - 1800;
         assert_eq!(
             task_badge(&row(old, hour, 0, 0, None), &config, false),
             ('↻', CtColor::Reset)

@@ -92,11 +92,22 @@ mod tests {
         // it (git's parser draws the same line).
         let now = crate::date::now();
         let parsed_now = parse_datetime("now", crate::date::DATE_DIALECT).unwrap();
-        assert!((parsed_now - now).abs() <= 2, "now drifted by {}", parsed_now - now);
-        let ago = parse_datetime("3 days ago", crate::date::DATE_DIALECT).unwrap();
         assert!(
-            (ago - (now - 3 * 86_400)).abs() <= 2,
-            "3 days ago is not a 3-day offset from now"
+            (parsed_now - now).abs() <= 2,
+            "now drifted by {}",
+            parsed_now - now
+        );
+        let ago = parse_datetime("3 days ago", crate::date::DATE_DIALECT).unwrap();
+        assert_eq!(
+            crate::date::day_start(ago),
+            crate::date::shift_days(crate::date::today_start(), -3),
+            "3 days ago is not three calendar days back"
+        );
+        let noon = parse_datetime("12pm", crate::date::DATE_DIALECT).unwrap();
+        assert_eq!(
+            crate::date::zoned_from_unix_secs(noon).unwrap().hour(),
+            12,
+            "12pm is noon"
         );
     }
 

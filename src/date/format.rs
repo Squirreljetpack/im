@@ -107,6 +107,50 @@ pub fn format_human_datetime(ts: Epoch, named_months: bool) -> String {
     jiff::fmt::strtime::format(fmt, &z).unwrap_or_else(|_| "--".to_string())
 }
 
+/// Format a civil datetime as `HH:MM`.
+pub fn format_civil_time(dt: jiff::civil::DateTime) -> String {
+    jiff::fmt::strtime::format("%H:%M", dt).unwrap_or_else(|_| "--:--".to_string())
+}
+
+/// Two-letter weekday abbreviation for a civil date ("Mo".."Su").
+pub fn format_civil_weekday(dt: jiff::civil::DateTime) -> String {
+    match dt.weekday() {
+        Weekday::Monday => "Mo",
+        Weekday::Tuesday => "Tu",
+        Weekday::Wednesday => "We",
+        Weekday::Thursday => "Th",
+        Weekday::Friday => "Fr",
+        Weekday::Saturday => "Sa",
+        Weekday::Sunday => "Su",
+    }
+    .to_string()
+}
+
+/// Format a civil datetime as `DD HH:MM`.
+pub fn format_civil_day_time(dt: jiff::civil::DateTime) -> String {
+    jiff::fmt::strtime::format("%d %H:%M", dt).unwrap_or_else(|_| "--".to_string())
+}
+
+/// Format an unzoned civil datetime (a config interval anchor) like
+/// [`format_human_datetime`], without resolving it in the system zone.
+pub fn format_civil_datetime(dt: jiff::civil::DateTime, named_months: bool) -> String {
+    let current_year = crate::date::zoned_from_unix_secs(crate::date::now())
+        .map(|nz| nz.year())
+        .unwrap_or_else(|_| dt.year());
+    let fmt = if dt.year() == current_year {
+        if named_months {
+            "%d %b %H:%M"
+        } else {
+            "%m-%d %H:%M"
+        }
+    } else if named_months {
+        "%d %b %Y %H:%M"
+    } else {
+        "%Y-%m-%d %H:%M"
+    };
+    jiff::fmt::strtime::format(fmt, dt).unwrap_or_else(|_| "--".to_string())
+}
+
 /// Short datetime form for per-entry annotations (e.g. the text-tracker
 /// `> value [timestamp]` lines); M-D HH:MM (hour/minute zero-padded)
 pub fn format_datetime_short(ts: Epoch) -> String {

@@ -1,18 +1,21 @@
 //! Unified date/time utilities — module root.
 //!
 //! All wrappers return [`Epoch`] for timestamps and seconds (i64) for durations.
-//! No chrono, humantime, or jiff types leak to callers — all formatting and
-//! parsing is encapsulated here. Calendar math (day/week/month boundaries,
-//! interval arithmetic) runs on jiff with the local system time zone, so
-//! DST transitions and variable month lengths are handled correctly.
+//! The formatting and parsing wrappers do not leak chrono, humantime, or jiff
+//! types to callers; [`logtime`] exposes jiff's civil datetime only where a
+//! recorded wall clock is genuinely needed. Calendar math (day/week/month
+//! boundaries, interval arithmetic) runs on jiff with the local system time
+//! zone, so DST transitions and variable month lengths are handled correctly.
 //!
 //! Sub-modules:
 //! - [`parse`] — date & datetime string parsing
 //! - [`parse_duration`] — human-readable duration parsing
 //! - [`format`] — epoch/duration formatting
 //! - [`span`] — jiff `Span` ↔ database packing and interval math
+//! - [`logtime`] — stamped log times, recorded offsets, and civil ranges
 
 pub mod format;
+pub mod logtime;
 pub mod parse;
 pub mod parse_duration;
 pub mod span;
@@ -32,6 +35,7 @@ pub const DATE_DIALECT: jiff_english::Dialect = jiff_english::Dialect::Uk;
 
 // Re-export sub-module functions at the crate::date level.
 pub use format::*;
+pub use logtime::*;
 pub use parse::*;
 pub use parse_duration::*;
 pub use span::*;
@@ -313,7 +317,7 @@ mod tests {
         let start = today_start();
         let end = today_end();
         assert!(start <= end);
-        assert_eq!(end - start, 86399);
+        assert_eq!(day_start(end + 1), end + 1);
     }
 
     #[test]
@@ -348,7 +352,7 @@ mod tests {
         let ts = today_start() + 12 * 3600;
         assert_eq!(day_start(ts), today_start());
         assert_eq!(day_end(ts), today_end());
-        assert_eq!(day_end(ts) - day_start(ts), 86399);
+        assert_eq!(day_start(day_end(ts) + 1), day_end(ts) + 1);
     }
 
     #[test]
