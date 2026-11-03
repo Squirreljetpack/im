@@ -103,28 +103,113 @@ async fn an_edit_queues_one_cell() {
 }
 
 #[tokio::test]
-async fn a_delete_queues_its_marker_and_a_snapshot() {
+async fn a_delete_drops_pending_field_edits_and_queues_its_marker() {
     let pool = test_pool().await.expect("in-memory db");
     let (id, _) = create_task(&pool, &task("doomed")).await.expect("create");
-    sqlx::query("DELETE FROM _sync_events")
-        .execute(&pool)
+    update_todo_body(&pool, id, "edited before delete")
         .await
-        .unwrap();
+        .expect("edit");
+
+    let image = super::events::row_image(&mut *pool.acquire().await.unwrap(), id, "task")
+        .await
+        .expect("snapshot")
+        .expect("live row has a snapshot");
+    assert!(image.contains("doomed"), "{image}");
+    assert!(image.contains("edited before delete"), "{image}");
 
     delete_task(&pool, id).await.expect("delete");
     let rows = queued(&pool).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].cell.field, EXISTENCE);
     assert_eq!(rows[0].cell.value, Some(CellValue::text("deleted")));
+}
 
-    let image: Option<String> =
-        sqlx::query_scalar("SELECT image FROM _sync_events WHERE event_id = ?")
-            .bind(rows[0].cell.event_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    let image = image.expect("the delete carries a snapshot");
-    assert!(image.contains("doomed"), "{image}");
+#[tokio::test]
+async fn repeated_edits_to_one_field_coalesce_in_the_outbox() {
+    let pool = test_pool().await.expect("in-memory db");
+    let (id, _) = create_task(&pool, &task("draft")).await.expect("create");
+    sqlx::query("DELETE FROM _sync_events")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    update_todo_body(&pool, id, "first").await.expect("edit 1");
+    let first = queued(&pool).await;
+    assert_eq!(first.len(), 1);
+
+    update_todo_body(&pool, id, "second").await.expect("edit 2");
+    let second = queued(&pool).await;
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].cell.field, "body");
+    assert_eq!(second[0].cell.value, Some(CellValue::text("second")));
+    assert_ne!(second[0].cell.event_id, first[0].cell.event_id);
+    assert!(second[0].cell.timestamp > first[0].cell.timestamp);
+}
+
+#[tokio::test]
+async fn a_newer_pending_local_edit_is_not_clobbered_by_an_older_pulled_cell() {
+    let pool = test_pool().await.expect("in-memory db");
+    let (id, _) = create_task(&pool, &task("shared")).await.expect("create");
+    sqlx::query("DELETE FROM _sync_events")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    update_todo_body(&pool, id, "local newer").await.expect("local edit");
+    let local = queued(&pool).await;
+
+    let stale_remote = LogRow {
+        version: 1,
+        cell: CellEvent {
+            event_id: crate::db::EventId::new(),
+            device_id: crate::db::Id::new(),
+            entity_id: id,
+            kind: "task".to_string(),
+            field: "body".to_string(),
+            value: Some(CellValue::text("remote older")),
+            timestamp: local[0].cell.timestamp - 1000,
+        },
+    };
+    apply::apply_rows(
+        &mut pool.acquire().await.unwrap(),
+        &[stale_remote],
+        &mut apply::Pending::default(),
+    )
+    .await
+    .expect("apply stale remote");
+
+    let body: String = sqlx::query_scalar("SELECT body FROM todos WHERE id = ?")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(body, "local newer");
+}
+
+#[tokio::test]
+async fn a_served_completion_retires_a_oneshot_task_short_id() {
+    let source = test_pool().await.expect("in-memory db");
+    let (task_id, _) = create_task(&source, &task("oneshot")).await.expect("create");
+    crate::db::set_scheduled_completion(&source, task_id, Some(1))
+        .await
+        .expect("complete");
+    let page = queued(&source).await;
+
+    let target = test_pool().await.expect("in-memory db");
+    apply::apply_rows(
+        &mut target.acquire().await.unwrap(),
+        &page,
+        &mut apply::Pending::default(),
+    )
+    .await
+    .expect("apply task + completion");
+
+    let short_id: Option<i64> = sqlx::query_scalar("SELECT short_id FROM todos WHERE id = ?")
+        .bind(task_id)
+        .fetch_one(&target)
+        .await
+        .unwrap();
+    assert_eq!(short_id, None, "completed oneshot task retires its short_id");
 }
 
 #[tokio::test]

@@ -9,13 +9,13 @@
 //! * a cell that cannot be written is skipped and reported, never allowed to
 //!   poison the rest of the page.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
-use sqlx::{Row, SqliteConnection};
+use sqlx::{QueryBuilder, Row, Sqlite, SqliteConnection};
 
 use super::schema::{self, KIND_ORDER};
-use super::types::{CellEvent, CellValue, DELETED, EXISTENCE, LogRow};
+use super::types::{CellEvent, CellValue, DELETED, EXISTENCE, LogRow, completion_field};
 use crate::db::Id;
 
 /// What one page did.
@@ -136,10 +136,15 @@ impl Pending {
     }
 
     /// Build every held entity that now has the cells its schema requires.
-    async fn flush(&mut self, conn: &mut SqliteConnection, applied: &mut Applied) -> Result<()> {
+    async fn flush(
+        &mut self,
+        conn: &mut SqliteConnection,
+        applied: &mut Applied,
+        touched_tasks: &mut HashSet<Id>,
+    ) -> Result<()> {
         // Insert first, in `KIND_ORDER` so a referrer's target is built before
         // it; a row still short a required cell stays held.
-        let mut built: Vec<(Id, Held)> = Vec::new();
+        let mut deferred_links: Vec<LogRow> = Vec::new();
         for kind in KIND_ORDER {
             let Some(table) = schema::table(kind) else {
                 continue;
@@ -164,9 +169,22 @@ impl Pending {
                     insert_entity(&mut *conn, kind, table, entity, &cells).await
                 };
                 match outcome {
-                    Ok(()) => {
+                    Ok(omitted) => {
                         applied.created += 1;
-                        built.push((entity, held));
+                        if held.kind == "task" {
+                            touched_tasks.insert(entity);
+                        } else if held.kind == "completion" {
+                            for row in &held.cells {
+                                if row.cell.field == completion_field::TODO_ID
+                                    && let Some(text) =
+                                        row.cell.value.as_ref().and_then(CellValue::as_text)
+                                    && let Ok(task_id) = text.parse::<Id>()
+                                {
+                                    touched_tasks.insert(task_id);
+                                }
+                            }
+                        }
+                        deferred_links.extend(omitted);
                     }
                     Err(error) => {
                         held.reason = format!("{error:#}");
@@ -175,17 +193,15 @@ impl Pending {
                 }
             }
         }
-        // The row, then its cells: a link the insert had to leave out, because
-        // its target was built later in this same flush, is written now that
-        // every row exists.
-        for (entity, held) in built {
-            for row in &held.cells {
-                if row.cell.field != EXISTENCE {
-                    apply_cell(&mut *conn, row, applied).await?;
-                }
-            }
-            if held.kind == "task" {
-                crate::db::sync_short_id(&mut *conn, entity).await?;
+        // Any optional link omitted during `insert_entity` because its target
+        // was built later in the same flush is applied now if the target exists.
+        for row in &deferred_links {
+            if let Some(link_kind) = schema::link(&row.cell.kind, &row.cell.field)
+                && let Some(target) = row.cell.value.as_ref().and_then(CellValue::as_text)
+                && let Ok(target_id) = target.parse::<Id>()
+                && row_exists(&mut *conn, link_kind, target_id).await?
+            {
+                apply_cell(&mut *conn, row, applied, true).await?;
             }
         }
         Ok(())
@@ -202,6 +218,7 @@ pub async fn apply_rows(
     pending: &mut Pending,
 ) -> Result<Applied> {
     let mut applied = Applied::default();
+    let mut touched_tasks = HashSet::new();
     let mut served: Vec<&LogRow> = Vec::with_capacity(rows.len());
     for row in rows {
         let entity = row.cell.entity_id;
@@ -214,11 +231,11 @@ pub async fn apply_rows(
             continue;
         }
         if row.cell.field == EXISTENCE && !is_dead(&row.cell) {
-            let Some(table) = schema::table(&row.cell.kind) else {
+            if schema::table(&row.cell.kind).is_none() {
                 served.push(row);
                 continue;
-            };
-            if !exists(&mut *conn, table, entity).await? {
+            }
+            if !row_exists(&mut *conn, &row.cell.kind, entity).await? {
                 pending.start(row);
                 continue;
             }
@@ -226,18 +243,36 @@ pub async fn apply_rows(
         served.push(row);
     }
 
-    pending.flush(&mut *conn, &mut applied).await?;
-    for row in &served {
-        apply_cell(&mut *conn, row, &mut applied).await?;
-    }
-    // A task's short id is a local projection: a task that just appeared needs
-    // one, and a completion that landed can retire it.
+    pending
+        .flush(&mut *conn, &mut applied, &mut touched_tasks)
+        .await?;
     for row in &served {
         if row.cell.kind == "task" {
-            crate::db::sync_short_id(&mut *conn, row.cell.entity_id).await?;
+            touched_tasks.insert(row.cell.entity_id);
+        } else if row.cell.kind == "completion"
+            && let Some(task_id) = completion_todo_id(&mut *conn, row.cell.entity_id).await?
+        {
+            touched_tasks.insert(task_id);
+        }
+        apply_cell(&mut *conn, row, &mut applied, true).await?;
+    }
+    // A task's short id is a local projection: a task that just appeared needs
+    // one, and a completion that landed or disappeared can retire or restore it.
+    for task_id in touched_tasks {
+        if row_exists(&mut *conn, "task", task_id).await? {
+            crate::db::sync_short_id(&mut *conn, task_id).await?;
         }
     }
     Ok(applied)
+}
+
+/// Look up the task ID of an existing completion row before applying an update or delete.
+async fn completion_todo_id(conn: &mut SqliteConnection, id: Id) -> Result<Option<Id>> {
+    sqlx::query_scalar("SELECT todo_id FROM todo_completions WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await
+        .context("Failed to read completion todo_id")
 }
 
 /// The value a cell materialises as. A null `completion.count` is how an
@@ -252,16 +287,35 @@ fn stored_value(kind: &str, field: &str, value: &Option<CellValue>) -> Option<Ce
     }
 }
 
+/// Push a bound [`CellValue`] onto a [`QueryBuilder`].
+fn push_cell_value(builder: &mut QueryBuilder<Sqlite>, value: Option<CellValue>) {
+    match value {
+        Some(CellValue::Text(text)) => {
+            builder.push_bind(text);
+        }
+        Some(CellValue::Int(number)) => {
+            builder.push_bind(number);
+        }
+        Some(CellValue::Real(number)) => {
+            builder.push_bind(number);
+        }
+        None => {
+            builder.push_bind(None::<String>);
+        }
+    }
+}
+
 /// One `INSERT` from the cells that arrived with the entity's existence cell.
 /// The domain tables have `NOT NULL` columns, so this cannot be done one cell
-/// at a time.
+/// at a time. Returns any optional link cells omitted because their target row
+/// was not yet present.
 async fn insert_entity(
     conn: &mut SqliteConnection,
     kind: &str,
     table: &str,
     entity: Id,
     cells: &[&LogRow],
-) -> Result<()> {
+) -> Result<Vec<LogRow>> {
     let spec = schema::kind(kind).context("unknown kind")?;
     for (name, field) in &spec.fields {
         let populated = cells
@@ -273,11 +327,8 @@ async fn insert_entity(
         );
     }
 
-    // A link is written with the row only when its referent is already here;
-    // otherwise the second pass applies it once every row exists. Completions
-    // come last in `KIND_ORDER`, so their `NOT NULL` task link is always
-    // available.
     let mut included: Vec<&LogRow> = Vec::new();
+    let mut deferred: Vec<LogRow> = Vec::new();
     for row in cells {
         if let Some(link_kind) = schema::link(kind, &row.cell.field) {
             let Some(target) = row.cell.value.as_ref().and_then(CellValue::as_text) else {
@@ -286,24 +337,20 @@ async fn insert_entity(
             let Ok(target) = target.parse::<Id>() else {
                 continue;
             };
-            let Some(link_table) = schema::table(link_kind) else {
-                continue;
-            };
-            if !exists(&mut *conn, link_table, target).await? {
-                // Leaving out a required link is not an option: the row would
-                // stay unbuildable until the target arrives.
+            if !row_exists(&mut *conn, link_kind, target).await? {
                 anyhow::ensure!(
                     schema::field(kind, &row.cell.field).is_none_or(|field| !field.required),
                     "missing required field {}: the row it points at has not arrived",
                     row.cell.field
                 );
+                deferred.push((*row).clone());
                 continue;
             }
         }
         included.push(row);
     }
 
-    let mut builder = sqlx::QueryBuilder::new(format!("INSERT INTO \"{table}\" (id"));
+    let mut builder = QueryBuilder::new(format!("INSERT INTO \"{table}\" (id"));
     for row in &included {
         let column = schema::column(kind, &row.cell.field)
             .with_context(|| format!("unknown field {}", row.cell.field))?;
@@ -312,20 +359,10 @@ async fn insert_entity(
     builder.push(") VALUES (").push_bind(entity);
     for row in &included {
         builder.push(", ");
-        match &stored_value(kind, &row.cell.field, &row.cell.value) {
-            Some(CellValue::Text(text)) => {
-                builder.push_bind(text.clone());
-            }
-            Some(CellValue::Int(number)) => {
-                builder.push_bind(*number);
-            }
-            Some(CellValue::Real(number)) => {
-                builder.push_bind(*number);
-            }
-            None => {
-                builder.push_bind(None::<String>);
-            }
-        }
+        push_cell_value(
+            &mut builder,
+            stored_value(kind, &row.cell.field, &row.cell.value),
+        );
     }
     builder.push(")");
     builder
@@ -333,7 +370,7 @@ async fn insert_entity(
         .execute(&mut *conn)
         .await
         .context("Failed to insert a served row")?;
-    Ok(())
+    Ok(deferred)
 }
 
 /// Write one cell: a value, or the existence cell's `deleted` marker.
@@ -341,6 +378,7 @@ async fn apply_cell(
     conn: &mut SqliteConnection,
     row: &LogRow,
     applied: &mut Applied,
+    honor_outbox: bool,
 ) -> Result<()> {
     let kind = row.cell.kind.as_str();
     let entity = row.cell.entity_id;
@@ -369,7 +407,7 @@ async fn apply_cell(
             Ok(())
         }
     } else {
-        let Some(spec) = schema::field(kind, &row.cell.field) else {
+        let Some(_spec) = schema::field(kind, &row.cell.field) else {
             applied.skipped.push(Skip {
                 entity_id: entity,
                 field: row.cell.field.clone(),
@@ -377,53 +415,41 @@ async fn apply_cell(
             });
             return Ok(());
         };
+        if honor_outbox
+            && super::events::pending_outranks(
+                &mut *conn,
+                entity,
+                &row.cell.field,
+                row.cell.timestamp,
+                row.cell.device_id,
+                row.cell.event_id,
+            )
+            .await?
+        {
+            return Ok(());
+        }
         let column = schema::column(kind, &row.cell.field).unwrap_or(&row.cell.field);
-        // A scalar (tracker score) keeps the storage class the cell carries;
-        // everything else has one class per column.
-        let _ = spec.class;
-        let sql = format!("UPDATE \"{table}\" SET \"{column}\" = ? WHERE id = ?");
-        let value = stored_value(kind, &row.cell.field, &row.cell.value);
-        let result = match &value {
-            Some(CellValue::Text(text)) => {
-                sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
-                    .bind(text)
-                    .bind(entity)
-                    .execute(&mut *conn)
-                    .await
-            }
-            Some(CellValue::Int(number)) => {
-                sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
-                    .bind(number)
-                    .bind(entity)
-                    .execute(&mut *conn)
-                    .await
-            }
-            Some(CellValue::Real(number)) => {
-                sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
-                    .bind(number)
-                    .bind(entity)
-                    .execute(&mut *conn)
-                    .await
-            }
-            None => {
-                sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
-                    .bind(None::<String>)
-                    .bind(entity)
-                    .execute(&mut *conn)
-                    .await
-            }
-        };
-        result.map(|result| {
-            if result.rows_affected() > 0 {
-                applied.updated += 1;
-            } else {
-                applied.skipped.push(Skip {
-                    entity_id: entity,
-                    field: row.cell.field.clone(),
-                    reason: "no local row".to_string(),
-                });
-            }
-        })
+        let mut builder = QueryBuilder::new(format!("UPDATE \"{table}\" SET \"{column}\" = "));
+        push_cell_value(
+            &mut builder,
+            stored_value(kind, &row.cell.field, &row.cell.value),
+        );
+        builder.push(" WHERE id = ").push_bind(entity);
+        builder
+            .build()
+            .execute(&mut *conn)
+            .await
+            .map(|result| {
+                if result.rows_affected() > 0 {
+                    applied.updated += 1;
+                } else {
+                    applied.skipped.push(Skip {
+                        entity_id: entity,
+                        field: row.cell.field.clone(),
+                        reason: "no local row".to_string(),
+                    });
+                }
+            })
     };
     if let Err(error) = outcome {
         applied.skipped.push(Skip {
@@ -458,7 +484,7 @@ pub async fn tracker_slot_key(
 /// them alive on every peer.
 pub async fn dedup_tracker_slots(
     conn: &mut SqliteConnection,
-    touched: &std::collections::HashSet<(String, (i64, i64))>,
+    touched: &HashSet<(String, (i64, i64))>,
 ) -> Result<usize> {
     let mut removed = 0;
     for (tracker_type, (low, high)) in touched {
@@ -496,8 +522,11 @@ pub async fn dedup_tracker_slots(
     Ok(removed)
 }
 
-/// Whether a row exists: the only question `materialise` asks.
-async fn exists(conn: &mut SqliteConnection, table: &str, id: Id) -> Result<bool> {
+/// Whether a local row exists for `(kind, id)`.
+pub async fn row_exists(conn: &mut SqliteConnection, kind: &str, id: Id) -> Result<bool> {
+    let Some(table) = schema::table(kind) else {
+        return Ok(false);
+    };
     let found: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT 1 FROM \"{table}\" WHERE id = ?"
     )))
@@ -508,10 +537,33 @@ async fn exists(conn: &mut SqliteConnection, table: &str, id: Id) -> Result<bool
     Ok(found.is_some())
 }
 
-/// Apply a single cell, for verdict repair.
+/// Apply a single cell unconditionally (for verdict repair).
 pub async fn apply_one(conn: &mut SqliteConnection, row: &LogRow) -> Result<()> {
     let mut applied = Applied::default();
-    apply_cell(conn, row, &mut applied).await
+    apply_cell(conn, row, &mut applied, false).await
+}
+
+/// Reset a single field on `(kind, entity)` to its default (`NULL`, or the
+/// unmarked sentinel for `completion.count`) when a rejected write has no
+/// server winner cell.
+pub async fn clear_field(
+    conn: &mut SqliteConnection,
+    kind: &str,
+    entity: Id,
+    field: &str,
+) -> Result<()> {
+    let ( Some(table), Some(column) ) = (schema::table(kind), schema::column(kind, field)) else {
+        return Ok(());
+    };
+    let mut builder = QueryBuilder::new(format!("UPDATE \"{table}\" SET \"{column}\" = "));
+    push_cell_value(&mut builder, stored_value(kind, field, &None));
+    builder.push(" WHERE id = ").push_bind(entity);
+    builder
+        .build()
+        .execute(&mut *conn)
+        .await
+        .with_context(|| format!("Failed to clear {kind}.{field}"))?;
+    Ok(())
 }
 
 /// Drop an entity's local row without a served death (a refused create).

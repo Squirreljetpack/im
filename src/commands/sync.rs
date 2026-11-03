@@ -88,6 +88,7 @@ async fn run_sync(pool: &SqlitePool, config: &Config, reset: bool, force: bool) 
         totals.created += report.created;
         totals.applied += report.applied;
         totals.deleted += report.deleted;
+        totals.resurrect.extend(report.resurrect);
 
         for notice in &report.notices {
             println!("{notice}");
@@ -139,7 +140,7 @@ async fn run_sync(pool: &SqlitePool, config: &Config, reset: bool, force: bool) 
             );
             continue;
         }
-        for offer in &report.resurrect {
+        for offer in &totals.resurrect {
             maybe_resurrect(pool, offer, interactive).await?;
         }
 
@@ -158,6 +159,7 @@ struct Totals {
     created: usize,
     applied: usize,
     deleted: usize,
+    resurrect: Vec<Resurrect>,
 }
 
 /// Offer a copy of something another device deleted.

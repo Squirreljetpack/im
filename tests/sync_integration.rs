@@ -444,12 +444,28 @@ async fn a_deletion_is_terminal_and_offers_a_copy() {
     // B has not heard about it yet, and edits the row.
     set_body(&device_b, "doomed", "still here").await;
 
-    settle(&[&device_a, &device_b]).await;
+    sync(&device_a).await;
+    let report_b = sync(&device_b).await;
     assert!(task_row(&device_a, "doomed").await.is_none());
     assert!(
         task_row(&device_b, "doomed").await.is_none(),
         "the edit cannot revive it"
     );
+    assert_eq!(report_b.resurrect.len(), 1);
+    assert!(report_b.resurrect[0].image.contains("still here"));
+
+    // Accepting the resurrection offer creates a fresh copy with B's edit and
+    // replicates it to A.
+    let copy_id = session::resurrect(&device_b, &report_b.resurrect[0])
+        .await
+        .expect("resurrect")
+        .expect("created copy");
+    settle(&[&device_a, &device_b]).await;
+    assert_eq!(
+        task_row(&device_a, "doomed").await.unwrap().0,
+        copy_id.to_string()
+    );
+    assert_eq!(body_of(&device_a, "doomed").await.as_deref(), Some("still here"));
 }
 
 #[tokio::test]

@@ -1,18 +1,20 @@
 //! One push+pull round trip.
 //!
-//! The order is load-bearing: apply the served cells, then read the verdicts
-//! (which may repair a cell from the winner they carry), then retire the batch
-//! that was actually sent. Retiring first would destroy the only record of what
-//! this device tried to write.
+//! All database changes for a sync round execute inside a single SQLite
+//! transaction once the HTTP exchange returns: pre-delete resurrection
+//! snapshots, pulled cell application, cursor advancement, tracker slot
+//! deduplication, verdict reconciliation, and outbox retirement commit
+//! atomically.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use sqlx::{Connection, Row, SqliteConnection, SqlitePool};
 
 use super::apply::{self, Pending, Skip};
-use super::client::{Account, AccountStatus, Client, run_blocking};
+use super::client::{Client, run_blocking};
+use super::events;
 use super::schema;
 use super::state;
 use super::types::{
@@ -21,6 +23,12 @@ use super::types::{
 };
 use crate::db::{EventId, Id};
 use crate::tracker::TrackerSlots;
+
+pub use super::client::{account_status, login, register};
+pub use super::events::unsynced_count;
+pub use super::state::{
+    device_id as device_id_of, logout, pool_cursor as cursor, signed_in, store_account, store_token,
+};
 
 /// What one round trip did.
 #[derive(Debug, Clone, Default)]
@@ -56,7 +64,7 @@ pub struct SyncReport {
 pub struct Resurrect {
     pub entity_id: Id,
     pub kind: String,
-    /// The JSON snapshot the delete event carried.
+    /// The JSON snapshot of the local row before the remote delete removed it.
     pub image: String,
     pub device: Option<String>,
     pub at: Option<i64>,
@@ -89,62 +97,6 @@ impl Pull {
     }
 }
 
-/// Store the account a successful `im :sync register`/`login` returned.
-pub async fn store_account(pool: &SqlitePool, account: &Account) -> Result<()> {
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("Failed to acquire a db connection")?;
-    let previous = state::account_user_id(&mut conn).await?;
-    if previous.as_deref() != Some(account.user_id.as_str()) {
-        // A different account's log is not this database's position.
-        state::set_cursor(&mut conn, None).await?;
-    }
-    state::set_account(&mut conn, Some(&account.user_id), &account.token).await
-}
-
-/// Sign a database in with a token someone else obtained (`im :sync login` on a
-/// second machine hands the token over the wire, not the user id).
-pub async fn store_token(pool: &SqlitePool, token: &str) -> Result<()> {
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("Failed to acquire a db connection")?;
-    state::set_account(&mut conn, None, token).await
-}
-
-/// The signed-in account's token, if any.
-pub async fn signed_in(pool: &SqlitePool) -> Result<Option<String>> {
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("Failed to acquire a db connection")?;
-    state::token(&mut conn).await
-}
-
-/// The log this database has read to, and how far, if it has synced anywhere.
-pub async fn cursor(pool: &SqlitePool) -> Result<Option<Cursor>> {
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("Failed to acquire a db connection")?;
-    state::cursor(&mut conn).await
-}
-
-/// Forget the account. Local data and the device identity are untouched.
-pub async fn logout(pool: &SqlitePool) -> Result<()> {
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("Failed to acquire a db connection")?;
-    state::clear_account(&mut conn).await
-}
-
-/// The connection-level device id (for callers that already hold one).
-pub async fn device_id_of(conn: &mut SqliteConnection) -> Result<Id> {
-    state::device_id(conn).await
-}
-
 /// Push the outbox and apply one pull.
 pub async fn sync_once(
     pool: &SqlitePool,
@@ -162,13 +114,13 @@ pub async fn sync_once(
         .context("not logged in — run `im :sync login`")?;
     let device = state::device_id(&mut conn).await?;
 
-    let batch = outbox(&mut conn).await?;
+    let batch = events::outbox(&mut conn).await?;
     let request = SyncRequest {
         protocol: schema::SCHEMA.protocol,
         schema: schema::SCHEMA.version,
         device_id: device,
         cursor: pull.cursor.clone(),
-        events: batch.iter().map(|row| row.1.clone()).collect(),
+        events: batch.clone(),
     };
     let client = Client::with_timeout(server, Some(token), timeout);
     let response: SyncResponse = run_blocking(move || client.sync(&request)).await?;
@@ -191,32 +143,28 @@ pub async fn sync_once(
         ..SyncReport::default()
     };
 
-    // The page and the cursor commit together: a crash replays the page rather
-    // than skipping it. The cursor is a fence and may only pass cells that are
-    // in the database — a create still being built is not, so it holds the fence
-    // back and the next run is re-served the cells above it. That is what lets a
-    // held create stay in memory.
     let mut tx = conn.begin().await.context("Failed to start a sync round")?;
+
+    // Snapshot any local task or mood whose edit was rejected because a peer
+    // deleted the entity, before `apply_rows` or `reconcile` removes the local row.
+    let snapshots = snapshot_deleted_edits(&mut tx, &response.verdicts, &batch).await?;
+
     let applied = apply::apply_rows(&mut tx, &response.events, &mut pull.pending).await?;
     let mut fence = response.cursor.clone();
     if response.has_more {
         fence.version = pull.pending.fence(response.cursor.version);
     }
     state::set_cursor(&mut tx, Some(&fence)).await?;
-    tx.commit().await.context("Failed to commit a sync round")?;
     report.created = applied.created;
     report.applied = applied.updated;
     report.deleted = applied.deleted;
     report.skipped = applied.skipped;
     if !response.has_more {
-        // Nothing else is coming, so a held create can never be completed.
-        // Reporting it beats a fence that would never move again.
         report.skipped.extend(pull.pending.abandon());
     }
-    pull.cursor = Some(response.cursor);
 
-    let touched = tracker_slots(&mut conn, slots, &response.events).await?;
-    let repaired = apply::dedup_tracker_slots(&mut conn, &touched).await?;
+    let touched = tracker_slots(&mut tx, slots, &response.events).await?;
+    let repaired = apply::dedup_tracker_slots(&mut tx, &touched).await?;
     if repaired > 0 {
         report.notices.push(format!(
             "Dropped {repaired} tracker entr{} that lost its slot.",
@@ -224,18 +172,53 @@ pub async fn sync_once(
         ));
     }
 
-    reconcile(&mut conn, &response.verdicts, &batch, response.now, &mut report).await?;
-    explain_lost(&mut conn, &response.superseded, &batch, &mut report).await?;
+    reconcile(
+        &mut tx,
+        &response.verdicts,
+        &batch,
+        response.now,
+        snapshots,
+        &mut report,
+    )
+    .await?;
+    explain_lost(&mut tx, &response.superseded, &batch, &mut report).await?;
 
-    for (event_id, _) in &batch {
-        sqlx::query("DELETE FROM _sync_events WHERE event_id = ?")
-            .bind(event_id)
-            .execute(&mut *conn)
-            .await
-            .context("Failed to retire a pushed event")?;
-    }
-    report.pending = unsynced_in(&mut conn).await?;
+    events::retire(&mut tx, &batch).await?;
+    report.pending = events::unsynced_in(&mut tx).await?;
+
+    tx.commit().await.context("Failed to commit a sync round")?;
+    pull.cursor = Some(response.cursor);
     Ok(report)
+}
+
+/// Capture pre-delete JSON snapshots for any local `task` or `mood` whose pushed
+/// edit was rejected with a deletion tombstone.
+async fn snapshot_deleted_edits(
+    conn: &mut SqliteConnection,
+    verdicts: &[Verdict],
+    batch: &[CellEvent],
+) -> Result<HashMap<Id, String>> {
+    let mut snapshots = HashMap::new();
+    for verdict in verdicts {
+        if verdict.outcome != Outcome::Rejected
+            || verdict.reason.as_deref() != Some("deleted")
+            || verdict.tombstone.is_none()
+        {
+            continue;
+        }
+        let Some(event) = batch.iter().find(|event| event.event_id == verdict.event_id) else {
+            continue;
+        };
+        if !matches!(event.kind.as_str(), "task" | "mood")
+            || snapshots.contains_key(&event.entity_id)
+        {
+            continue;
+        }
+        if let Some(image) = events::row_image(&mut *conn, event.entity_id, &event.kind).await? {
+            snapshots.insert(event.entity_id, image);
+        }
+    }
+    Ok(snapshots)
 }
 
 /// Turn supersession notices into prose. The winning value arrived in the same
@@ -244,19 +227,15 @@ pub async fn sync_once(
 async fn explain_lost(
     conn: &mut SqliteConnection,
     notices: &[Notice],
-    batch: &[(EventId, CellEvent)],
+    batch: &[CellEvent],
     report: &mut SyncReport,
 ) -> Result<()> {
-    let pushed: HashSet<String> = batch.iter().map(|(id, _)| id.to_string()).collect();
+    let pushed: HashSet<EventId> = batch.iter().map(|event| event.event_id).collect();
     for notice in notices {
-        // The local row is gone: the entity was deleted, which is reported on
-        // its own.
-        if !row_exists(&mut *conn, &notice.winner.cell.kind, notice.entity_id).await? {
+        if !apply::row_exists(&mut *conn, &notice.winner.cell.kind, notice.entity_id).await? {
             continue;
         }
-        // A queued edit of our own is the next word on that cell, so the loss
-        // is not the user's latest intent.
-        if pending_outranks(&mut *conn, &notice.winner, &pushed).await? {
+        if unpushed_outranks(&mut *conn, &notice.winner, &pushed).await? {
             continue;
         }
         report.notices.push(format!(
@@ -272,115 +251,20 @@ async fn explain_lost(
     Ok(())
 }
 
-async fn row_exists(conn: &mut SqliteConnection, kind: &str, id: Id) -> Result<bool> {
-    let Some(table) = schema::table(kind) else {
-        return Ok(false);
-    };
-    let row: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT 1 FROM \"{table}\" WHERE id = ?"
-    )))
-    .bind(id)
-    .fetch_optional(&mut *conn)
-    .await
-    .with_context(|| format!("Failed to look up a {kind}"))?;
-    Ok(row.is_some())
-}
-
-/// Events in one push: the server refuses more, and one push is one batch.
-const MAX_PUSH: usize = 1000;
-
-/// Read the outbox in emission order: a create's existence cell must reach the
-/// server before the fields it introduces.
-///
-/// A push never splits a *create*. `create` appends the existence cell and its
-/// fields back to back, the server gives a whole push one batch, and a page may
-/// only break between batches. A reader materialises a row only from the page
-/// that carries its existence cell, and requires that page to also carry the
-/// fields the schema marks required (`insert_entity`); every later cell is a
-/// blind `UPDATE`, so a create split across two pushes is lost on the reader for
-/// good. The window therefore ends at an entity boundary: when the entity of the
-/// last row continues past it, its rows wait for the next round. Later edits of
-/// an already-created entity may split freely; the row exists by then and its
-/// cells apply on their own.
-///
-/// Deferral is skipped only when the whole window belongs to the entity that
-/// continues past it, which liveness needs: a single entity must not stall the
-/// outbox. That cannot cut a create, because a create is one existence cell
-/// plus at most its kind's fields — only repeated edits can fill a window.
-async fn outbox(conn: &mut SqliteConnection) -> Result<Vec<(EventId, CellEvent)>> {
-    let mut rows = sqlx::query(
-        "SELECT id, event_id, device_id, entity_id, kind, field, value, timestamp
-           FROM _sync_events ORDER BY id ASC LIMIT ?",
-    )
-    .bind(MAX_PUSH as i64)
-    .fetch_all(&mut *conn)
-    .await
-    .context("Failed to read the outbox")?;
-    if rows.len() == MAX_PUSH
-        && let Some(last) = rows.last()
-    {
-        let tail = last.get::<String, _>("entity_id");
-        let last_id = last.get::<i64, _>("id");
-        let first = rows
-            .iter()
-            .position(|row| row.get::<String, _>("entity_id") == tail)
-            .unwrap_or(0);
-        let continues: Option<i64> =
-            sqlx::query_scalar("SELECT 1 FROM _sync_events WHERE entity_id = ? AND id > ? LIMIT 1")
-                .bind(&tail)
-                .bind(last_id)
-                .fetch_optional(&mut *conn)
-                .await
-                .context("Failed to read the outbox tail")?;
-        if continues.is_some() && first > 0 {
-            rows.truncate(first);
-        }
-    }
-    let mut batch = Vec::with_capacity(rows.len());
-    for row in rows {
-        let value: Option<String> = row.get("value");
-        batch.push((
-            row.get("event_id"),
-            CellEvent {
-                event_id: row.get("event_id"),
-                device_id: row.get("device_id"),
-                entity_id: row.get("entity_id"),
-                kind: row.get("kind"),
-                field: row.get("field"),
-                value: match value {
-                    Some(json) => Some(
-                        serde_json::from_str(&json)
-                            .context("Failed to read a queued cell value")?,
-                    ),
-                    None => None,
-                },
-                timestamp: row.get("timestamp"),
-            },
-        ));
-    }
-    Ok(batch)
-}
-
-async fn unsynced_in(conn: &mut SqliteConnection) -> Result<usize> {
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sync_events")
-        .fetch_one(&mut *conn)
-        .await
-        .context("Failed to count the outbox")?;
-    Ok(count as usize)
-}
-
 /// The tracker slots this page touched, so slot collisions can be settled once.
 async fn tracker_slots(
     conn: &mut SqliteConnection,
     slots: &TrackerSlots,
     rows: &[LogRow],
 ) -> Result<HashSet<(String, (i64, i64))>> {
+    let tracker_ids: HashSet<Id> = rows
+        .iter()
+        .filter(|row| row.cell.kind == "tracker" && row.cell.field != EXISTENCE)
+        .map(|row| row.cell.entity_id)
+        .collect();
     let mut touched = HashSet::new();
-    for row in rows {
-        if row.cell.kind != "tracker" || row.cell.field == EXISTENCE {
-            continue;
-        }
-        let Some((tracker_type, time)) = apply::tracker_slot_key(&mut *conn, row.cell.entity_id).await?
+    for entity_id in tracker_ids {
+        let Some((tracker_type, time)) = apply::tracker_slot_key(&mut *conn, entity_id).await?
         else {
             continue;
         };
@@ -395,14 +279,15 @@ async fn tracker_slots(
 async fn reconcile(
     conn: &mut SqliteConnection,
     verdicts: &[Verdict],
-    batch: &[(EventId, CellEvent)],
+    batch: &[CellEvent],
     now: i64,
+    mut snapshots: HashMap<Id, String>,
     report: &mut SyncReport,
 ) -> Result<()> {
-    let pushed: HashSet<String> = batch
-        .iter()
-        .map(|(id, _)| id.to_string())
-        .collect();
+    let pushed: HashSet<EventId> = batch.iter().map(|event| event.event_id).collect();
+    let mut ahead_events: Vec<CellEvent> = Vec::new();
+    let mut deleted_entities: HashSet<Id> = HashSet::new();
+
     for verdict in verdicts {
         match verdict.outcome {
             Outcome::Accepted => {}
@@ -410,7 +295,7 @@ async fn reconcile(
                 let Some(winner) = &verdict.winner else {
                     continue;
                 };
-                if pending_outranks(conn, winner, &pushed).await? {
+                if unpushed_outranks(&mut *conn, winner, &pushed).await? {
                     continue;
                 }
                 apply::apply_one(&mut *conn, winner).await?;
@@ -427,18 +312,21 @@ async fn reconcile(
                 let reason = verdict.reason.as_deref().unwrap_or("unknown");
                 if reason == "clock_ahead" {
                     report.clock_ahead = Some(now);
-                    restamp(conn, verdict, batch).await?;
+                    if let Some(event) = batch.iter().find(|e| e.event_id == verdict.event_id) {
+                        ahead_events.push(event.clone());
+                    }
                     continue;
                 }
                 if let Some(tombstone) = &verdict.tombstone {
                     apply::apply_one(&mut *conn, tombstone).await?;
                 }
-                if let Some(event) = batch
-                    .iter()
-                    .map(|(_, event)| event)
-                    .find(|event| event.event_id == verdict.event_id)
-                {
-                    if reason == "deleted" {
+                let Some(event) = batch.iter().find(|event| event.event_id == verdict.event_id)
+                else {
+                    continue;
+                };
+
+                if reason == "deleted" && verdict.tombstone.is_some() {
+                    if deleted_entities.insert(event.entity_id) {
                         let device = verdict
                             .tombstone
                             .as_ref()
@@ -453,45 +341,62 @@ async fn reconcile(
                             "{} was deleted on {device} at {at}; the local edit was dropped",
                             short(event.entity_id),
                         ));
-                        report.resurrect.push(Resurrect {
-                            entity_id: event.entity_id,
-                            kind: event.kind.clone(),
-                            image: image_of(conn, verdict.event_id).await?.unwrap_or_default(),
-                            device: verdict
-                                .tombstone
-                                .as_ref()
-                                .map(|cell| cell.cell.device_id.to_string()),
-                            at: verdict
-                                .tombstone
-                                .as_ref()
-                                .map(|cell| cell.cell.timestamp),
-                        });
-                    } else if let Some(winner) = &verdict.winner {
-                        apply::apply_one(&mut *conn, winner).await?;
-                        report.notices.push(format!(
-                            "{} refused ({reason}); showing {} instead",
-                            describe(winner),
-                            describe_value(&winner.cell.value),
-                        ));
-                    } else if event.field == EXISTENCE {
-                        // A refused create leaves nothing behind.
-                        apply::forget(&mut *conn, &event.kind, event.entity_id).await?;
-                        report
-                            .notices
-                            .push(format!("refused ({reason}): {}", short(event.entity_id)));
+                        if let Some(image) = snapshots.remove(&event.entity_id) {
+                            report.resurrect.push(Resurrect {
+                                entity_id: event.entity_id,
+                                kind: event.kind.clone(),
+                                image,
+                                device: verdict
+                                    .tombstone
+                                    .as_ref()
+                                    .map(|cell| cell.cell.device_id.to_string()),
+                                at: verdict
+                                    .tombstone
+                                    .as_ref()
+                                    .map(|cell| cell.cell.timestamp),
+                            });
+                        }
                     }
+                } else if let Some(winner) = &verdict.winner {
+                    apply::apply_one(&mut *conn, winner).await?;
+                    report.notices.push(format!(
+                        "{} refused ({reason}); showing {} instead",
+                        describe(winner),
+                        describe_value(&winner.cell.value),
+                    ));
+                } else if event.field == EXISTENCE
+                    || schema::field(&event.kind, &event.field).is_some_and(|field| field.required)
+                {
+                    // A refused create (or a refused required field on a create)
+                    // leaves no local row behind.
+                    apply::forget(&mut *conn, &event.kind, event.entity_id).await?;
+                    report
+                        .notices
+                        .push(format!("refused ({reason}): {}", short(event.entity_id)));
+                } else {
+                    apply::clear_field(&mut *conn, &event.kind, event.entity_id, &event.field)
+                        .await?;
+                    report.notices.push(format!(
+                        "{}.{} refused ({reason}); showing empty instead",
+                        short(event.entity_id),
+                        event.field,
+                    ));
                 }
             }
         }
+    }
+
+    if !ahead_events.is_empty() {
+        events::restamp(&mut *conn, &ahead_events, now).await?;
     }
     Ok(())
 }
 
 /// Whether a local edit that was *not* part of this push outranks a served cell.
-async fn pending_outranks(
+async fn unpushed_outranks(
     conn: &mut SqliteConnection,
     winner: &LogRow,
-    pushed: &HashSet<String>,
+    pushed: &HashSet<EventId>,
 ) -> Result<bool> {
     let rows = sqlx::query(
         "SELECT event_id, timestamp FROM _sync_events WHERE entity_id = ? AND field = ?",
@@ -504,39 +409,8 @@ async fn pending_outranks(
     Ok(rows.iter().any(|row| {
         let event_id: EventId = row.get("event_id");
         let timestamp: i64 = row.get("timestamp");
-        !pushed.contains(&event_id.to_string()) && timestamp > winner.cell.timestamp
+        !pushed.contains(&event_id) && timestamp > winner.cell.timestamp
     }))
-}
-
-/// Re-stamp a refused event: same change, fresh stamp and id.
-async fn restamp(
-    conn: &mut SqliteConnection,
-    verdict: &Verdict,
-    batch: &[(EventId, CellEvent)],
-) -> Result<()> {
-    if !batch.iter().any(|(_, event)| event.event_id == verdict.event_id) {
-        return Ok(());
-    }
-    let stamp = state::next_stamp(&mut *conn).await?;
-    sqlx::query("UPDATE _sync_events SET timestamp = ?, event_id = ? WHERE event_id = ?")
-        .bind(stamp)
-        .bind(EventId::new())
-        .bind(verdict.event_id)
-        .execute(&mut *conn)
-        .await
-        .context("Failed to re-stamp a refused event")?;
-    Ok(())
-}
-
-/// The snapshot a delete event carried, if this device queued it.
-async fn image_of(conn: &mut SqliteConnection, event_id: EventId) -> Result<Option<String>> {
-    let image: Option<String> = sqlx::query_scalar("SELECT image FROM _sync_events WHERE event_id = ?")
-        .bind(event_id)
-        .fetch_optional(&mut *conn)
-        .await
-        .context("Failed to read a delete's snapshot")?
-        .flatten();
-    Ok(image)
 }
 
 /// A stamp (milliseconds) as the user reads it.
@@ -570,7 +444,8 @@ fn short(id: Id) -> String {
     text.chars().take(8).collect()
 }
 
-/// Re-create a deleted entity from the snapshot its delete carried.
+/// Re-create a deleted entity from the snapshot captured before the remote
+/// delete removed it.
 ///
 /// This decides nothing about which write wins: the copy is a new entity with a
 /// fresh id, published as an ordinary create, so peers accept it without ever
@@ -614,7 +489,7 @@ pub async fn resurrect(pool: &SqlitePool, offer: &Resurrect) -> Result<Option<Id
                 continue;
             };
             let Some(target) = target.parse::<Id>().ok() else { continue };
-            if !referent_exists(&mut conn, link, target).await? {
+            if !apply::row_exists(&mut conn, link, target).await? {
                 continue;
             }
         }
@@ -635,43 +510,19 @@ pub async fn resurrect(pool: &SqlitePool, offer: &Resurrect) -> Result<Option<Id
         .begin()
         .await
         .context("Failed to start the resurrection")?;
-    // The copy is built and written in one go, so nothing needs holding.
     let applied = apply::apply_rows(&mut tx, &rows, &mut Pending::default()).await?;
     if applied.created == 0 {
         return Ok(None);
     }
     match offer.kind.as_str() {
-        "task" => super::events::task_create(&mut tx, entity).await?,
-        "mood" => super::events::mood_create(&mut tx, entity).await?,
+        "task" => events::task_create(&mut tx, entity).await?,
+        "mood" => events::mood_create(&mut tx, entity).await?,
         _ => {}
     }
     tx.commit()
         .await
         .context("Failed to commit the resurrection")?;
     Ok(Some(entity))
-}
-
-async fn referent_exists(conn: &mut SqliteConnection, kind: &str, id: Id) -> Result<bool> {
-    let Some(table) = schema::table(kind) else {
-        return Ok(false);
-    };
-    let found: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT 1 FROM \"{table}\" WHERE id = ?"
-    )))
-        .bind(id)
-        .fetch_optional(&mut *conn)
-        .await
-        .with_context(|| format!("Failed to look up a {kind}"))?;
-    Ok(found.is_some())
-}
-
-/// How many local changes are waiting to be pushed.
-pub async fn unsynced_count(pool: &SqlitePool) -> Result<usize> {
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("Failed to acquire a db connection")?;
-    unsynced_in(&mut conn).await
 }
 
 /// Throw the local copy away: the next pull rebuilds it from the register.
@@ -711,24 +562,4 @@ pub async fn reset_local_state(pool: &SqlitePool) -> Result<usize> {
         .await
         .context("Failed to commit the reset transaction")?;
     Ok(discarded as usize)
-}
-
-/// Create an account (blocking HTTP, off the async worker threads).
-pub async fn register(base: &str, email: &str, password: &str) -> Result<Account> {
-    let client = Client::new(base, None);
-    let (email, password) = (email.to_string(), password.to_string());
-    run_blocking(move || client.register(&email, &password)).await
-}
-
-/// Sign in to an existing account.
-pub async fn login(base: &str, email: &str, password: &str) -> Result<Account> {
-    let client = Client::new(base, None);
-    let (email, password) = (email.to_string(), password.to_string());
-    run_blocking(move || client.login(&email, &password)).await
-}
-
-/// The account a stored token belongs to.
-pub async fn account_status(base: &str, token: &str) -> Result<AccountStatus> {
-    let client = Client::new(base, Some(token.to_string()));
-    run_blocking(move || client.status()).await
 }

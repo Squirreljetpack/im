@@ -335,3 +335,23 @@ where
         .await
         .context("The sync task panicked")?
 }
+
+/// Create an account (blocking HTTP, off the async worker threads).
+pub async fn register(base: &str, email: &str, password: &str) -> Result<Account> {
+    let client = Client::new(base, None);
+    let (email, password) = (email.to_string(), password.to_string());
+    run_blocking(move || client.register(&email, &password)).await
+}
+
+/// Sign in to an existing account.
+pub async fn login(base: &str, email: &str, password: &str) -> Result<Account> {
+    let client = Client::new(base, None);
+    let (email, password) = (email.to_string(), password.to_string());
+    run_blocking(move || client.login(&email, &password)).await
+}
+
+/// The account a stored token belongs to.
+pub async fn account_status(base: &str, token: &str) -> Result<AccountStatus> {
+    let client = Client::new(base, Some(token.to_string()));
+    run_blocking(move || client.status()).await
+}
