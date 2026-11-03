@@ -134,13 +134,6 @@ impl CellValue {
             _ => None,
         }
     }
-
-    pub fn as_int(&self) -> Option<i64> {
-        match self {
-            CellValue::Int(number) => Some(*number),
-            _ => None,
-        }
-    }
 }
 
 impl From<&TrackerValue> for CellValue {
@@ -244,13 +237,53 @@ pub enum Outcome {
     Rejected,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RejectReason {
+    Shape,
+    Device,
+    Kind,
+    Field,
+    Class,
+    Deleted,
+    TargetDeleted,
+    Dangling,
+    SelfParent,
+    KindChange,
+    Immutable,
+    ClockAhead,
+    #[serde(other)]
+    Unknown,
+}
+
+impl std::fmt::Display for RejectReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Self::Shape => "shape",
+            Self::Device => "device",
+            Self::Kind => "kind",
+            Self::Field => "field",
+            Self::Class => "class",
+            Self::Deleted => "deleted",
+            Self::TargetDeleted => "target_deleted",
+            Self::Dangling => "dangling",
+            Self::SelfParent => "self_parent",
+            Self::KindChange => "kind_change",
+            Self::Immutable => "immutable",
+            Self::ClockAhead => "clock_ahead",
+            Self::Unknown => "unknown",
+        };
+        f.write_str(label)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Verdict {
     pub event_id: EventId,
     pub outcome: Outcome,
     /// Why a push was refused, when it was.
     #[serde(default)]
-    pub reason: Option<String>,
+    pub reason: Option<RejectReason>,
     /// The cell's winning event, when the push did not become it.
     #[serde(default)]
     pub winner: Option<LogRow>,

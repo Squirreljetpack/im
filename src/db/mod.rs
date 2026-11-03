@@ -330,7 +330,8 @@ pub async fn create_schema(pool: &SqlitePool) -> anyhow::Result<()> {
     .await?;
 
     // Sync engine: the outbox. A row here *is* an unsent cell — presence means
-    // pending, and the row is deleted once the server has judged it.
+    // pending, coalesced per `(entity_id, field)`, and the row is deleted once
+    // the server has judged it.
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS _sync_events (
@@ -342,7 +343,8 @@ pub async fn create_schema(pool: &SqlitePool) -> anyhow::Result<()> {
             field      TEXT NOT NULL,
             value      TEXT,
             timestamp  INTEGER NOT NULL,
-            created_at INTEGER NOT NULL DEFAULT (unixepoch())
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            UNIQUE (entity_id, field)
         )
         "#,
     )
@@ -410,12 +412,6 @@ pub async fn create_schema(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_todo_completions_todo_time ON todo_completions(todo_id, time)")
         .execute(pool)
         .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_sync_events_cell ON _sync_events(entity_id, field)",
-    )
-    .execute(pool)
-    .await?;
 
     log::debug!("Database schema ready");
     Ok(())

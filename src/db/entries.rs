@@ -165,8 +165,6 @@ pub async fn clear_moods(
             .fetch_all(&mut *tx)
             .await
             .context("Failed to read mood entries")?;
-    // Publish before the rows go: a delete carries a snapshot of what it
-    // removed, and that snapshot is only readable while the row exists.
     for id in &removed_trackers {
         crate::sync::events::delete(&mut tx, *id, "tracker").await?;
     }
@@ -825,25 +823,10 @@ pub async fn update_tracker_time(
     Ok(1)
 }
 
-/// Delete a mood row and any linked tracker rows in a transaction
-/// (`tracker.mood` is `ON DELETE SET NULL`, so the rows are removed here).
+/// Delete a mood row. Any linked tracker entries remain and have their `mood`
+/// link cleared (`ON DELETE SET NULL`), matching the sync cascade rule.
 pub async fn delete_mood(pool: &SqlitePool, id: Id) -> Result<()> {
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
-
-    let linked: Vec<Id> = sqlx::query_scalar("SELECT id FROM tracker WHERE mood = ?")
-        .bind(id)
-        .fetch_all(&mut *tx)
-        .await
-        .context("Failed to read linked tracker rows")?;
-    sqlx::query("DELETE FROM tracker WHERE mood = ?")
-        .bind(id)
-        .execute(&mut *tx)
-        .await
-        .context("Failed to delete linked tracker rows")?;
-    for tracker in &linked {
-        crate::sync::events::delete(&mut tx, *tracker, "tracker").await?;
-    }
-
     let res = sqlx::query("DELETE FROM mood WHERE id = ?")
         .bind(id)
         .execute(&mut *tx)
@@ -852,7 +835,6 @@ pub async fn delete_mood(pool: &SqlitePool, id: Id) -> Result<()> {
     if res.rows_affected() > 0 {
         crate::sync::events::delete(&mut tx, id, "mood").await?;
     }
-
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(())
 }

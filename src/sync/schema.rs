@@ -66,8 +66,7 @@ pub struct Field {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Cascade {
     pub kind: String,
-    #[serde(default)]
-    pub field: Option<String>,
+    pub field: String,
     pub action: Action,
 }
 

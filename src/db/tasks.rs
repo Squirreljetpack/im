@@ -157,22 +157,14 @@ fn edit_diff(
 /// (peers replaying the delete event cascade identically).
 pub async fn delete_task(pool: &SqlitePool, id: Id) -> Result<u64> {
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
-    // Publish while the row still exists: the delete event carries a snapshot
-    // of it, which is the only thing left to offer as a copy afterwards.
-    let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM todos WHERE id = ?")
+    let affected = sqlx::query("DELETE FROM todos WHERE id = ?")
         .bind(id)
-        .fetch_optional(&mut *tx)
+        .execute(&mut *tx)
         .await
-        .context("Failed to look up the task being deleted")?;
-    let mut affected = 0;
-    if exists.is_some() {
+        .context("Failed to delete task")?
+        .rows_affected();
+    if affected > 0 {
         crate::sync::events::delete(&mut tx, id, "task").await?;
-        affected = sqlx::query("DELETE FROM todos WHERE id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .context("Failed to delete task")?
-            .rows_affected();
     }
     tx.commit().await.context("Failed to commit transaction")?;
     Ok(affected)

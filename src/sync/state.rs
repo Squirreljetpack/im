@@ -42,14 +42,6 @@ pub async fn set(conn: &mut SqliteConnection, key: &str, value: &str) -> Result<
     Ok(())
 }
 
-/// The user id this database last signed in as, if it ever did.
-pub async fn account_user_id(conn: &mut SqliteConnection) -> Result<Option<String>> {
-    sqlx::query_scalar("SELECT user_id FROM _sync_account WHERE id = 1")
-        .fetch_optional(&mut *conn)
-        .await
-        .context("Failed to read the synced account")
-}
-
 pub async fn token(conn: &mut SqliteConnection) -> Result<Option<String>> {
     sqlx::query_scalar("SELECT token FROM _sync_account WHERE id = 1")
         .fetch_optional(&mut *conn)
@@ -151,6 +143,13 @@ pub async fn next_stamp(conn: &mut SqliteConnection) -> Result<i64> {
 }
 
 /// Reset the last-emitted stamp after the server reports `clock_ahead`.
+///
+/// Clamping `KEY_LAST_STAMP` back to `server_now + n` means that if this device
+/// previously pushed cells with stamps inside `(server_now, server_now + SKEW_MS]`
+/// that the server accepted, a subsequent edit to one of those cells before wall
+/// time catches up can carry a smaller stamp and lose LWW to the device's own
+/// pre-correction write (producing a supersession notice, then self-healing on
+/// the next edit after the skew window passes).
 pub async fn reset_clock(conn: &mut SqliteConnection, stamp: i64) -> Result<()> {
     set(conn, KEY_LAST_STAMP, &stamp.to_string()).await
 }

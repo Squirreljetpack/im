@@ -1,4 +1,4 @@
-//! Applying served cells.
+//! Applying served cells and verdict repairs.
 //!
 //! The server already names the winner of every cell, so applying a page is
 //! mostly writing values. Two things are deliberate:
@@ -6,8 +6,8 @@
 //! * a row is **materialised once**, from its existence cell plus the field
 //!   cells that arrived with it, in [`KIND_ORDER`] so a referrer's foreign keys
 //!   are satisfied;
-//! * a cell that cannot be written is skipped and reported, never allowed to
-//!   poison the rest of the page.
+//! * a cell or verdict repair that cannot be written is skipped and reported in
+//!   [`Applied::skipped`], never allowed to poison the rest of the round.
 
 use std::collections::{HashMap, HashSet};
 
@@ -16,15 +16,15 @@ use sqlx::{QueryBuilder, Row, Sqlite, SqliteConnection};
 
 use super::schema::{self, KIND_ORDER};
 use super::types::{CellEvent, CellValue, DELETED, EXISTENCE, LogRow, completion_field};
-use crate::db::Id;
+use crate::db::{EventId, Id};
 
-/// What one page did.
+/// What one page or verdict pass did.
 #[derive(Debug, Clone, Default)]
 pub struct Applied {
     pub created: usize,
     pub updated: usize,
     pub deleted: usize,
-    /// Cells that could not be written.
+    /// Cells or repairs that could not be written.
     pub skipped: Vec<Skip>,
 }
 
@@ -41,15 +41,19 @@ fn is_dead(cell: &CellEvent) -> bool {
     cell.field == EXISTENCE && cell.value.as_ref().and_then(CellValue::as_text) == Some(DELETED)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ApplyMode {
+    /// Served pull row: skip if a newer unpushed local edit in `_sync_events` outranks it.
+    Served,
+    /// Server verdict repair: overwrite unconditionally with the server's winning cell.
+    VerdictRepair,
+}
+
 /// Entities whose create arrived without the cells that make a row buildable.
 ///
-/// A pull is cut by register version, and a required cell's register row moves
-/// forward whenever that cell is rewritten — a rename, a rescore. So the
-/// existence cell can arrive on one page and its required cells on another, and
-/// the domain tables cannot be filled one cell at a time: the row is one
-/// `INSERT`, so every cell it needs has to be in hand. Those cells are held
-/// here until they are, and [`Pending::fence`] says how far the cursor may move
-/// while they wait — which is what lets them stay in memory.
+/// A create whose required link target has not arrived yet is held here until
+/// the target is available, and [`Pending::fence`] says how far the cursor may
+/// move while it waits.
 #[derive(Debug, Default)]
 pub struct Pending {
     held: HashMap<Id, Held>,
@@ -142,8 +146,6 @@ impl Pending {
         applied: &mut Applied,
         touched_tasks: &mut HashSet<Id>,
     ) -> Result<()> {
-        // Insert first, in `KIND_ORDER` so a referrer's target is built before
-        // it; a row still short a required cell stays held.
         let mut deferred_links: Vec<LogRow> = Vec::new();
         for kind in KIND_ORDER {
             let Some(table) = schema::table(kind) else {
@@ -201,7 +203,7 @@ impl Pending {
                 && let Ok(target_id) = target.parse::<Id>()
                 && row_exists(&mut *conn, link_kind, target_id).await?
             {
-                apply_cell(&mut *conn, row, applied, true).await?;
+                apply_cell(&mut *conn, row, applied, ApplyMode::Served).await?;
             }
         }
         Ok(())
@@ -247,23 +249,42 @@ pub async fn apply_rows(
         .flush(&mut *conn, &mut applied, &mut touched_tasks)
         .await?;
     for row in &served {
-        if row.cell.kind == "task" {
-            touched_tasks.insert(row.cell.entity_id);
-        } else if row.cell.kind == "completion"
-            && let Some(task_id) = completion_todo_id(&mut *conn, row.cell.entity_id).await?
-        {
-            touched_tasks.insert(task_id);
-        }
-        apply_cell(&mut *conn, row, &mut applied, true).await?;
+        record_touched_task(&mut *conn, &row.cell.kind, row.cell.entity_id, &mut touched_tasks)
+            .await?;
+        apply_cell(&mut *conn, row, &mut applied, ApplyMode::Served).await?;
     }
-    // A task's short id is a local projection: a task that just appeared needs
-    // one, and a completion that landed or disappeared can retire or restore it.
-    for task_id in touched_tasks {
+    sync_touched_short_ids(&mut *conn, &touched_tasks).await?;
+    Ok(applied)
+}
+
+/// Record the affected task ID when a `task` or `completion` row is about to be mutated.
+async fn record_touched_task(
+    conn: &mut SqliteConnection,
+    kind: &str,
+    entity: Id,
+    touched_tasks: &mut HashSet<Id>,
+) -> Result<()> {
+    if kind == "task" {
+        touched_tasks.insert(entity);
+    } else if kind == "completion"
+        && let Some(task_id) = completion_todo_id(&mut *conn, entity).await?
+    {
+        touched_tasks.insert(task_id);
+    }
+    Ok(())
+}
+
+/// Recompute `short_id` for every task touched by a page or verdict pass.
+async fn sync_touched_short_ids(
+    conn: &mut SqliteConnection,
+    touched_tasks: &HashSet<Id>,
+) -> Result<()> {
+    for &task_id in touched_tasks {
         if row_exists(&mut *conn, "task", task_id).await? {
             crate::db::sync_short_id(&mut *conn, task_id).await?;
         }
     }
-    Ok(applied)
+    Ok(())
 }
 
 /// Look up the task ID of an existing completion row before applying an update or delete.
@@ -378,7 +399,7 @@ async fn apply_cell(
     conn: &mut SqliteConnection,
     row: &LogRow,
     applied: &mut Applied,
-    honor_outbox: bool,
+    mode: ApplyMode,
 ) -> Result<()> {
     let kind = row.cell.kind.as_str();
     let entity = row.cell.entity_id;
@@ -415,16 +436,9 @@ async fn apply_cell(
             });
             return Ok(());
         };
-        if honor_outbox
-            && super::events::pending_outranks(
-                &mut *conn,
-                entity,
-                &row.cell.field,
-                row.cell.timestamp,
-                row.cell.device_id,
-                row.cell.event_id,
-            )
-            .await?
+        if mode == ApplyMode::Served
+            && super::events::pending_outranks(&mut *conn, &row.cell, &HashSet::<EventId>::new())
+                .await?
         {
             return Ok(());
         }
@@ -537,10 +551,19 @@ pub async fn row_exists(conn: &mut SqliteConnection, kind: &str, id: Id) -> Resu
     Ok(found.is_some())
 }
 
-/// Apply a single cell unconditionally (for verdict repair).
+/// Apply a single cell during verdict reconciliation.
 pub async fn apply_one(conn: &mut SqliteConnection, row: &LogRow) -> Result<()> {
+    let mut touched_tasks = HashSet::new();
+    record_touched_task(
+        &mut *conn,
+        &row.cell.kind,
+        row.cell.entity_id,
+        &mut touched_tasks,
+    )
+    .await?;
     let mut applied = Applied::default();
-    apply_cell(conn, row, &mut applied, false).await
+    apply_cell(&mut *conn, row, &mut applied, ApplyMode::VerdictRepair).await?;
+    sync_touched_short_ids(&mut *conn, &touched_tasks).await
 }
 
 /// Reset a single field on `(kind, entity)` to its default (`NULL`, or the
@@ -552,9 +575,11 @@ pub async fn clear_field(
     entity: Id,
     field: &str,
 ) -> Result<()> {
-    let ( Some(table), Some(column) ) = (schema::table(kind), schema::column(kind, field)) else {
+    let (Some(table), Some(column)) = (schema::table(kind), schema::column(kind, field)) else {
         return Ok(());
     };
+    let mut touched_tasks = HashSet::new();
+    record_touched_task(&mut *conn, kind, entity, &mut touched_tasks).await?;
     let mut builder = QueryBuilder::new(format!("UPDATE \"{table}\" SET \"{column}\" = "));
     push_cell_value(&mut builder, stored_value(kind, field, &None));
     builder.push(" WHERE id = ").push_bind(entity);
@@ -562,8 +587,8 @@ pub async fn clear_field(
         .build()
         .execute(&mut *conn)
         .await
-        .with_context(|| format!("Failed to clear {kind}.{field}"))?;
-    Ok(())
+        .with_context(|| format!("Failed to clear {table}.{column}"))?;
+    sync_touched_short_ids(&mut *conn, &touched_tasks).await
 }
 
 /// Drop an entity's local row without a served death (a refused create).
@@ -571,14 +596,16 @@ pub async fn forget(conn: &mut SqliteConnection, kind: &str, entity: Id) -> Resu
     let Some(table) = schema::table(kind) else {
         return Ok(());
     };
+    let mut touched_tasks = HashSet::new();
+    record_touched_task(&mut *conn, kind, entity, &mut touched_tasks).await?;
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "DELETE FROM \"{table}\" WHERE id = ?"
     )))
     .bind(entity)
     .execute(&mut *conn)
     .await
-    .with_context(|| format!("Failed to drop a refused {kind}"))?;
-    Ok(())
+    .with_context(|| format!("Failed to remove a refused row from {table}"))?;
+    sync_touched_short_ids(&mut *conn, &touched_tasks).await
 }
 
 #[cfg(test)]

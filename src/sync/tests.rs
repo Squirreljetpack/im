@@ -110,12 +110,20 @@ async fn a_delete_drops_pending_field_edits_and_queues_its_marker() {
         .await
         .expect("edit");
 
-    let image = super::events::row_image(&mut *pool.acquire().await.unwrap(), id, "task")
+    let cells = super::events::row_cells(&mut *pool.acquire().await.unwrap(), "task", id)
         .await
         .expect("snapshot")
         .expect("live row has a snapshot");
-    assert!(image.contains("doomed"), "{image}");
-    assert!(image.contains("edited before delete"), "{image}");
+    assert!(
+        cells
+            .iter()
+            .any(|(f, v)| f == "name" && *v == CellValue::text("doomed"))
+    );
+    assert!(
+        cells
+            .iter()
+            .any(|(f, v)| f == "body" && *v == CellValue::text("edited before delete"))
+    );
 
     delete_task(&pool, id).await.expect("delete");
     let rows = queued(&pool).await;
@@ -413,4 +421,222 @@ async fn a_create_split_across_pages_waits_for_its_required_cells() {
         .await
         .expect("the row");
     assert_eq!(name, "late");
+}
+
+#[tokio::test]
+async fn a_served_completion_update_and_delete_refresh_task_short_id() {
+    let source = test_pool().await.expect("in-memory db");
+    let (task_id, _) = create_task(&source, &task("oneshot")).await.expect("create");
+    crate::db::set_scheduled_completion(&source, task_id, Some(1))
+        .await
+        .expect("complete");
+    let create_page = queued(&source).await;
+    let completion_id = create_page
+        .iter()
+        .find(|row| row.cell.kind == "completion")
+        .expect("completion cell")
+        .cell
+        .entity_id;
+
+    let target = test_pool().await.expect("in-memory db");
+    apply::apply_rows(
+        &mut target.acquire().await.unwrap(),
+        &create_page,
+        &mut apply::Pending::default(),
+    )
+    .await
+    .expect("apply task + completion");
+
+    let short_after_done: Option<i64> =
+        sqlx::query_scalar("SELECT short_id FROM todos WHERE id = ?")
+            .bind(task_id)
+            .fetch_one(&target)
+            .await
+            .unwrap();
+    assert_eq!(short_after_done, None);
+
+    // Updating completion.count to unmarked (-1) restores a short_id.
+    let unmark = LogRow {
+        version: 10,
+        cell: CellEvent {
+            event_id: crate::db::EventId::new(),
+            device_id: crate::db::Id::new(),
+            entity_id: completion_id,
+            kind: "completion".to_string(),
+            field: "count".to_string(),
+            value: Some(CellValue::Int(i64::from(crate::db::SCHEDULED_UNMARKED))),
+            timestamp: 10,
+        },
+    };
+    apply::apply_rows(
+        &mut target.acquire().await.unwrap(),
+        &[unmark],
+        &mut apply::Pending::default(),
+    )
+    .await
+    .expect("apply unmark");
+    let short_after_unmark: Option<i64> =
+        sqlx::query_scalar("SELECT short_id FROM todos WHERE id = ?")
+            .bind(task_id)
+            .fetch_one(&target)
+            .await
+            .unwrap();
+    assert_eq!(short_after_unmark, Some(1));
+
+    // Re-marking done retires short_id, and deleting the completion row restores it.
+    let mark_done = LogRow {
+        version: 11,
+        cell: CellEvent {
+            event_id: crate::db::EventId::new(),
+            device_id: crate::db::Id::new(),
+            entity_id: completion_id,
+            kind: "completion".to_string(),
+            field: "count".to_string(),
+            value: Some(CellValue::Int(1)),
+            timestamp: 11,
+        },
+    };
+    let delete_completion = LogRow {
+        version: 12,
+        cell: CellEvent {
+            event_id: crate::db::EventId::new(),
+            device_id: crate::db::Id::new(),
+            entity_id: completion_id,
+            kind: "completion".to_string(),
+            field: EXISTENCE.to_string(),
+            value: super::types::deleted(),
+            timestamp: 12,
+        },
+    };
+    apply::apply_rows(
+        &mut target.acquire().await.unwrap(),
+        &[mark_done],
+        &mut apply::Pending::default(),
+    )
+    .await
+    .expect("apply mark done");
+    apply::apply_rows(
+        &mut target.acquire().await.unwrap(),
+        &[delete_completion],
+        &mut apply::Pending::default(),
+    )
+    .await
+    .expect("apply completion delete");
+    let short_after_delete: Option<i64> =
+        sqlx::query_scalar("SELECT short_id FROM todos WHERE id = ?")
+            .bind(task_id)
+            .fetch_one(&target)
+            .await
+            .unwrap();
+    assert_eq!(short_after_delete, Some(1));
+}
+
+#[tokio::test]
+async fn delete_mood_nulls_linked_tracker_mood_without_deleting_tracker() {
+    let pool = test_pool().await.expect("in-memory db");
+    let mood_id = crate::db::create_entry(
+        &pool,
+        &crate::db::EntryObject {
+            mood: "calm".to_string(),
+            body: "notes".to_string(),
+            time: crate::date::LogTime {
+                epoch: 1_700_000_000,
+                offset: 0,
+            },
+            location: "home".to_string(),
+            embedding: None,
+            score: None,
+            trackers: vec![crate::db::TrackerObject {
+                tracker_type: "weight".to_string(),
+                value: crate::db::TrackerValue::Integer(70),
+                replace_slot: None,
+            }],
+            duration: None,
+            todo_id: None,
+        },
+    )
+    .await
+    .expect("create entry")
+    .expect("mood id");
+    let tracker_id: crate::db::Id = sqlx::query_scalar("SELECT id FROM tracker WHERE mood = ?")
+        .bind(mood_id)
+        .fetch_one(&pool)
+        .await
+        .expect("linked tracker");
+    sqlx::query("DELETE FROM _sync_events")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    crate::db::delete_mood(&pool, mood_id)
+        .await
+        .expect("delete mood");
+
+    let linked_mood: Option<crate::db::Id> =
+        sqlx::query_scalar("SELECT mood FROM tracker WHERE id = ?")
+            .bind(tracker_id)
+            .fetch_one(&pool)
+            .await
+            .expect("tracker row survives mood delete");
+    assert_eq!(linked_mood, None);
+
+    let rows = queued(&pool).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].cell.entity_id, mood_id);
+    assert_eq!(rows[0].cell.field, EXISTENCE);
+    assert_eq!(rows[0].cell.value, Some(CellValue::text("deleted")));
+}
+
+#[tokio::test]
+async fn resurrect_recreates_mood_and_drops_dangling_task_parent() {
+    let pool = test_pool().await.expect("in-memory db");
+    let mood_offer = super::session::Resurrect {
+        entity_id: crate::db::Id::new(),
+        kind: "mood".to_string(),
+        cells: vec![
+            ("mood".to_string(), CellValue::text("joyful")),
+            ("body".to_string(), CellValue::text("sunny walk")),
+            ("location".to_string(), CellValue::text("park")),
+            ("time".to_string(), CellValue::Int(1_700_000_000)),
+            ("tz_offset".to_string(), CellValue::Int(0)),
+        ],
+        device: Some("peer".to_string()),
+        at: Some(1_700_000_000_000),
+    };
+    let copy_mood = super::session::resurrect(&pool, &mood_offer)
+        .await
+        .expect("resurrect mood")
+        .expect("new mood id");
+    let body: String = sqlx::query_scalar("SELECT body FROM mood WHERE id = ?")
+        .bind(copy_mood)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(body, "sunny walk");
+
+    let missing_parent = crate::db::Id::new();
+    let task_offer = super::session::Resurrect {
+        entity_id: crate::db::Id::new(),
+        kind: "task".to_string(),
+        cells: vec![
+            ("name".to_string(), CellValue::text("orphan copy")),
+            ("start_time".to_string(), CellValue::Int(1_700_000_000)),
+            (
+                "parent_id".to_string(),
+                CellValue::text(missing_parent.to_string()),
+            ),
+        ],
+        device: Some("peer".to_string()),
+        at: Some(1_700_000_000_000),
+    };
+    let copy_task = super::session::resurrect(&pool, &task_offer)
+        .await
+        .expect("resurrect task")
+        .expect("new task id");
+    let parent: Option<String> = sqlx::query_scalar("SELECT parent FROM todos WHERE id = ?")
+        .bind(copy_task)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(parent, None, "dangling parent link is dropped on resurrect");
 }

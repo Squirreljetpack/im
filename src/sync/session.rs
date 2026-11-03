@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use sqlx::{Connection, Row, SqliteConnection, SqlitePool};
+use sqlx::{Connection, SqliteConnection, SqlitePool};
 
 use super::apply::{self, Pending, Skip};
 use super::client::{Client, run_blocking};
@@ -18,17 +18,11 @@ use super::events;
 use super::schema;
 use super::state;
 use super::types::{
-    self, CellEvent, CellValue, Cursor, EXISTENCE, LogRow, Notice, Outcome, SyncRequest,
-    SyncResponse, Verdict,
+    self, CellEvent, CellValue, Cursor, EXISTENCE, LogRow, Notice, Outcome, RejectReason,
+    SyncRequest, SyncResponse, Verdict,
 };
 use crate::db::{EventId, Id};
 use crate::tracker::TrackerSlots;
-
-pub use super::client::{account_status, login, register};
-pub use super::events::unsynced_count;
-pub use super::state::{
-    device_id as device_id_of, logout, pool_cursor as cursor, signed_in, store_account, store_token,
-};
 
 /// What one round trip did.
 #[derive(Debug, Clone, Default)]
@@ -64,8 +58,8 @@ pub struct SyncReport {
 pub struct Resurrect {
     pub entity_id: Id,
     pub kind: String,
-    /// The JSON snapshot of the local row before the remote delete removed it.
-    pub image: String,
+    /// The field cells of the local row captured before the remote delete removed it.
+    pub cells: Vec<(String, CellValue)>,
     pub device: Option<String>,
     pub at: Option<i64>,
 }
@@ -172,7 +166,7 @@ pub async fn sync_once(
         ));
     }
 
-    reconcile(
+    let keep_for_restamp = reconcile(
         &mut tx,
         &response.verdicts,
         &batch,
@@ -183,7 +177,10 @@ pub async fn sync_once(
     .await?;
     explain_lost(&mut tx, &response.superseded, &batch, &mut report).await?;
 
-    events::retire(&mut tx, &batch).await?;
+    events::retire_judged(&mut tx, &batch, &keep_for_restamp).await?;
+    if let Some(now) = report.clock_ahead {
+        events::restamp_all(&mut tx, now).await?;
+    }
     report.pending = events::unsynced_in(&mut tx).await?;
 
     tx.commit().await.context("Failed to commit a sync round")?;
@@ -191,17 +188,17 @@ pub async fn sync_once(
     Ok(report)
 }
 
-/// Capture pre-delete JSON snapshots for any local `task` or `mood` whose pushed
+/// Capture pre-delete field cells for any local `task` or `mood` whose pushed
 /// edit was rejected with a deletion tombstone.
 async fn snapshot_deleted_edits(
     conn: &mut SqliteConnection,
     verdicts: &[Verdict],
     batch: &[CellEvent],
-) -> Result<HashMap<Id, String>> {
+) -> Result<HashMap<Id, Vec<(String, CellValue)>>> {
     let mut snapshots = HashMap::new();
     for verdict in verdicts {
         if verdict.outcome != Outcome::Rejected
-            || verdict.reason.as_deref() != Some("deleted")
+            || verdict.reason != Some(RejectReason::Deleted)
             || verdict.tombstone.is_none()
         {
             continue;
@@ -214,8 +211,8 @@ async fn snapshot_deleted_edits(
         {
             continue;
         }
-        if let Some(image) = events::row_image(&mut *conn, event.entity_id, &event.kind).await? {
-            snapshots.insert(event.entity_id, image);
+        if let Some(cells) = events::row_cells(&mut *conn, &event.kind, event.entity_id).await? {
+            snapshots.insert(event.entity_id, cells);
         }
     }
     Ok(snapshots)
@@ -232,10 +229,13 @@ async fn explain_lost(
 ) -> Result<()> {
     let pushed: HashSet<EventId> = batch.iter().map(|event| event.event_id).collect();
     for notice in notices {
+        if notice.field == EXISTENCE {
+            continue;
+        }
         if !apply::row_exists(&mut *conn, &notice.winner.cell.kind, notice.entity_id).await? {
             continue;
         }
-        if unpushed_outranks(&mut *conn, &notice.winner, &pushed).await? {
+        if events::pending_outranks(&mut *conn, &notice.winner.cell, &pushed).await? {
             continue;
         }
         report.notices.push(format!(
@@ -244,7 +244,7 @@ async fn explain_lost(
             notice.field,
             describe_value(&notice.lost),
             describe_value(&notice.winner.cell.value),
-            notice.winner.cell.device_id,
+            short(notice.winner.cell.device_id),
             format_stamp(notice.winner.cell.timestamp),
         ));
     }
@@ -275,18 +275,28 @@ async fn tracker_slots(
     Ok(touched)
 }
 
-/// Turn verdicts into local state: repair what lost, retire what was refused.
+/// Turn verdicts into local state: repair what lost, retire what was refused,
+/// and return the event ids that should remain queued for `clock_ahead` restamping.
 async fn reconcile(
     conn: &mut SqliteConnection,
     verdicts: &[Verdict],
     batch: &[CellEvent],
     now: i64,
-    mut snapshots: HashMap<Id, String>,
+    mut snapshots: HashMap<Id, Vec<(String, CellValue)>>,
     report: &mut SyncReport,
-) -> Result<()> {
+) -> Result<HashSet<EventId>> {
     let pushed: HashSet<EventId> = batch.iter().map(|event| event.event_id).collect();
-    let mut ahead_events: Vec<CellEvent> = Vec::new();
+    let mut keep_for_restamp: HashSet<EventId> = HashSet::new();
     let mut deleted_entities: HashSet<Id> = HashSet::new();
+    let mut refused_entities: HashSet<Id> = HashSet::new();
+
+    let rejected_creates: HashSet<Id> = verdicts
+        .iter()
+        .filter(|verdict| verdict.outcome == Outcome::Rejected)
+        .filter_map(|verdict| batch.iter().find(|event| event.event_id == verdict.event_id))
+        .filter(|event| event.field == EXISTENCE && event.value == types::live())
+        .map(|event| event.entity_id)
+        .collect();
 
     for verdict in verdicts {
         match verdict.outcome {
@@ -295,26 +305,26 @@ async fn reconcile(
                 let Some(winner) = &verdict.winner else {
                     continue;
                 };
-                if unpushed_outranks(&mut *conn, winner, &pushed).await? {
+                if winner.cell.field == EXISTENCE {
+                    continue;
+                }
+                if events::pending_outranks(&mut *conn, &winner.cell, &pushed).await? {
                     continue;
                 }
                 apply::apply_one(&mut *conn, winner).await?;
                 report.notices.push(format!(
-                    "{} {} reverted to {} ({} at {})",
-                    verdict.event_id,
+                    "{} reverted to {} ({} at {})",
                     describe(winner),
                     describe_value(&winner.cell.value),
-                    winner.cell.device_id,
+                    short(winner.cell.device_id),
                     format_stamp(winner.cell.timestamp),
                 ));
             }
             Outcome::Rejected => {
-                let reason = verdict.reason.as_deref().unwrap_or("unknown");
-                if reason == "clock_ahead" {
+                let reason = verdict.reason.unwrap_or(RejectReason::Unknown);
+                if reason == RejectReason::ClockAhead {
                     report.clock_ahead = Some(now);
-                    if let Some(event) = batch.iter().find(|e| e.event_id == verdict.event_id) {
-                        ahead_events.push(event.clone());
-                    }
+                    keep_for_restamp.insert(verdict.event_id);
                     continue;
                 }
                 if let Some(tombstone) = &verdict.tombstone {
@@ -325,12 +335,12 @@ async fn reconcile(
                     continue;
                 };
 
-                if reason == "deleted" && verdict.tombstone.is_some() {
+                if reason == RejectReason::Deleted && verdict.tombstone.is_some() {
                     if deleted_entities.insert(event.entity_id) {
                         let device = verdict
                             .tombstone
                             .as_ref()
-                            .map(|cell| cell.cell.device_id.to_string())
+                            .map(|cell| short(cell.cell.device_id))
                             .unwrap_or_else(|| "another device".to_string());
                         let at = verdict
                             .tombstone
@@ -341,15 +351,15 @@ async fn reconcile(
                             "{} was deleted on {device} at {at}; the local edit was dropped",
                             short(event.entity_id),
                         ));
-                        if let Some(image) = snapshots.remove(&event.entity_id) {
+                        if let Some(cells) = snapshots.remove(&event.entity_id) {
                             report.resurrect.push(Resurrect {
                                 entity_id: event.entity_id,
                                 kind: event.kind.clone(),
-                                image,
+                                cells,
                                 device: verdict
                                     .tombstone
                                     .as_ref()
-                                    .map(|cell| cell.cell.device_id.to_string()),
+                                    .map(|cell| short(cell.cell.device_id)),
                                 at: verdict
                                     .tombstone
                                     .as_ref()
@@ -364,15 +374,16 @@ async fn reconcile(
                         describe(winner),
                         describe_value(&winner.cell.value),
                     ));
-                } else if event.field == EXISTENCE
+                } else if rejected_creates.contains(&event.entity_id)
+                    || event.field == EXISTENCE
                     || schema::field(&event.kind, &event.field).is_some_and(|field| field.required)
                 {
-                    // A refused create (or a refused required field on a create)
-                    // leaves no local row behind.
-                    apply::forget(&mut *conn, &event.kind, event.entity_id).await?;
-                    report
-                        .notices
-                        .push(format!("refused ({reason}): {}", short(event.entity_id)));
+                    if refused_entities.insert(event.entity_id) {
+                        apply::forget(&mut *conn, &event.kind, event.entity_id).await?;
+                        report
+                            .notices
+                            .push(format!("refused ({reason}): {}", short(event.entity_id)));
+                    }
                 } else {
                     apply::clear_field(&mut *conn, &event.kind, event.entity_id, &event.field)
                         .await?;
@@ -386,31 +397,7 @@ async fn reconcile(
         }
     }
 
-    if !ahead_events.is_empty() {
-        events::restamp(&mut *conn, &ahead_events, now).await?;
-    }
-    Ok(())
-}
-
-/// Whether a local edit that was *not* part of this push outranks a served cell.
-async fn unpushed_outranks(
-    conn: &mut SqliteConnection,
-    winner: &LogRow,
-    pushed: &HashSet<EventId>,
-) -> Result<bool> {
-    let rows = sqlx::query(
-        "SELECT event_id, timestamp FROM _sync_events WHERE entity_id = ? AND field = ?",
-    )
-    .bind(winner.cell.entity_id)
-    .bind(&winner.cell.field)
-    .fetch_all(&mut *conn)
-    .await
-    .context("Failed to read the outbox for a cell")?;
-    Ok(rows.iter().any(|row| {
-        let event_id: EventId = row.get("event_id");
-        let timestamp: i64 = row.get("timestamp");
-        !pushed.contains(&event_id) && timestamp > winner.cell.timestamp
-    }))
+    Ok(keep_for_restamp)
 }
 
 /// A stamp (milliseconds) as the user reads it.
@@ -439,9 +426,8 @@ fn describe_value(value: &Option<CellValue>) -> String {
     }
 }
 
-fn short(id: Id) -> String {
-    let text = id.to_string();
-    text.chars().take(8).collect()
+fn short<T: std::fmt::Display>(id: T) -> String {
+    id.to_string().chars().take(8).collect()
 }
 
 /// Re-create a deleted entity from the snapshot captured before the remote
@@ -449,15 +435,9 @@ fn short(id: Id) -> String {
 ///
 /// This decides nothing about which write wins: the copy is a new entity with a
 /// fresh id, published as an ordinary create, so peers accept it without ever
-/// seeing a question. A link that no longer resolves is dropped rather than
-/// re-pointed at a guess.
+/// seeing a question. A link that no longer resolves is dropped by `apply_rows`
+/// rather than re-pointed at a guess.
 pub async fn resurrect(pool: &SqlitePool, offer: &Resurrect) -> Result<Option<Id>> {
-    let Ok(image) = serde_json::from_str::<serde_json::Value>(&offer.image) else {
-        return Ok(None);
-    };
-    let Some(cells) = image.get("cells").and_then(|value| value.as_array()) else {
-        return Ok(None);
-    };
     let mut conn = pool
         .acquire()
         .await
@@ -465,7 +445,8 @@ pub async fn resurrect(pool: &SqlitePool, offer: &Resurrect) -> Result<Option<Id
     let device = state::device_id(&mut conn).await?;
     let stamp = state::next_stamp(&mut conn).await?;
     let entity = Id::new();
-    let mut rows = vec![LogRow {
+    let mut rows = Vec::with_capacity(1 + offer.cells.len());
+    rows.push(LogRow {
         version: 0,
         cell: CellEvent {
             event_id: EventId::new(),
@@ -476,23 +457,8 @@ pub async fn resurrect(pool: &SqlitePool, offer: &Resurrect) -> Result<Option<Id
             value: types::live(),
             timestamp: stamp,
         },
-    }];
-    for cell in cells {
-        let Some(pair) = cell.as_array() else { continue };
-        let Some(field) = pair.first().and_then(|value| value.as_str()) else {
-            continue;
-        };
-        let Some(value) = pair.get(1) else { continue };
-        let value: Option<CellValue> = serde_json::from_value(value.clone()).ok();
-        if let Some(link) = schema::link(&offer.kind, field) {
-            let Some(target) = value.as_ref().and_then(CellValue::as_text) else {
-                continue;
-            };
-            let Some(target) = target.parse::<Id>().ok() else { continue };
-            if !apply::row_exists(&mut conn, link, target).await? {
-                continue;
-            }
-        }
+    });
+    for (field, value) in &offer.cells {
         rows.push(LogRow {
             version: 0,
             cell: CellEvent {
@@ -500,8 +466,8 @@ pub async fn resurrect(pool: &SqlitePool, offer: &Resurrect) -> Result<Option<Id
                 device_id: device,
                 entity_id: entity,
                 kind: offer.kind.clone(),
-                field: field.to_string(),
-                value,
+                field: field.clone(),
+                value: Some(value.clone()),
                 timestamp: stamp,
             },
         });

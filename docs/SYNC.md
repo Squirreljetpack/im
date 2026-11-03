@@ -223,11 +223,12 @@ notice of the form `… body: yours (…) was replaced by … (<device> at …)`
 is no text-conflict prompt any more — only deletions can ask a question.
 
 Deletion: `im :tool clear` (confirm the prompt) removes today's moods and their
-tracker rows; the delete events go out on the next `im :sync`. The other device
-prints `deleted <n>` and the entries disappear. If you had unsynced edits to
-something the other side deleted, the edit is dropped with a notice and an
-interactive `im :sync` offers to re-create the content as a copy (tasks and
-moods).
+tracker rows; the delete events go out on the next `im :sync`. Deleting a single
+mood nulls the `mood` link on any attached tracker entries (`ON DELETE SET NULL`)
+while keeping the tracker rows. The other device prints `deleted <n>` and the
+deleted rows disappear. If you had unsynced local edits in `_sync_events` to a
+task or mood that another device deleted, the edit is dropped with a notice and
+an interactive `im :sync` offers to re-create the content as a copy.
 
 Offline tolerance:
 
@@ -418,5 +419,7 @@ npx wrangler dev --persist-to /tmp/im-sync-local
 
 The device id, pull cursor and last emitted stamp are in `_sync_state`; the
 signed-in account and bearer token are in `_sync_account` (tokens last 30 days).
-The local outbox is `_sync_events`. A reset rotates the device id but keeps the
-account. A row with no cursor is a database that has read nowhere yet.
+The local outbox is `_sync_events`, coalesced per `(entity_id, field)` so
+repeated offline edits to the same cell update the queued row in place. A reset
+rotates the device id but keeps the account. A row with no cursor is a database
+that has read nowhere yet.

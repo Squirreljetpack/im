@@ -2,16 +2,18 @@
 //! `_sync_events` inside the same transaction as the row it describes, so the
 //! outbox and the domain tables never disagree.
 //!
-//! The outbox is coalesced by `(entity_id, field)`: a later offline edit to the
-//! same cell updates the pending row in place with a fresh `event_id` and
-//! timestamp while preserving its queue position, and a delete drops any
+//! The outbox is coalesced by `UNIQUE(entity_id, field)`: a later offline edit
+//! to the same cell updates the pending row in place with a fresh `event_id`
+//! and timestamp while preserving its queue position, and a delete drops any
 //! pending field cells for that entity before recording the `deleted` existence
 //! cell.
+
+use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
-use crate::db::{EventId, Id, log_offset};
+use crate::db::{EventId, Id};
 
 use super::schema::{self, Class};
 use super::state;
@@ -85,38 +87,17 @@ pub async fn completion_count(conn: &mut SqliteConnection, id: Id, value: i32) -
 
 /// Emit the moment a completion row describes, for a row edited in place.
 pub async fn completion_time(conn: &mut SqliteConnection, id: Id) -> Result<()> {
-    let row = sqlx::query("SELECT time, tz_offset, location FROM todo_completions WHERE id = ?")
-        .bind(id)
-        .fetch_optional(&mut *conn)
-        .await
-        .context("Failed to read a completion's time")?;
-    if let Some(row) = row {
-        append(
-            conn,
-            id,
-            "completion",
+    emit_fields(
+        conn,
+        "completion",
+        id,
+        &[
             completion_field::TIME,
-            Some(CellValue::int(row.get::<i64, _>("time"))),
-        )
-        .await?;
-        append(
-            conn,
-            id,
-            "completion",
             completion_field::TZ_OFFSET,
-            Some(CellValue::int(log_offset(&row, "tz_offset"))),
-        )
-        .await?;
-        append(
-            conn,
-            id,
-            "completion",
             completion_field::LOCATION,
-            Some(CellValue::text(row.get::<String, _>("location"))),
-        )
-        .await?;
-    }
-    Ok(())
+        ],
+    )
+    .await
 }
 
 /// Emit a delete, dropping any pending field cells for the entity first.
@@ -137,7 +118,25 @@ async fn emit_create(conn: &mut SqliteConnection, kind: &str, id: Id) -> Result<
     };
     append(conn, id, kind, EXISTENCE, live()).await?;
     for (field, value) in cells {
-        append(&mut *conn, id, kind, field, Some(value)).await?;
+        append(&mut *conn, id, kind, &field, Some(value)).await?;
+    }
+    Ok(())
+}
+
+/// Emit a subset of populated schema fields of `id`.
+async fn emit_fields(
+    conn: &mut SqliteConnection,
+    kind: &str,
+    id: Id,
+    wanted: &[&str],
+) -> Result<()> {
+    let Some(cells) = row_cells(&mut *conn, kind, id).await? else {
+        return Ok(());
+    };
+    for (field, value) in cells {
+        if wanted.contains(&field.as_str()) {
+            append(&mut *conn, id, kind, &field, Some(value)).await?;
+        }
     }
     Ok(())
 }
@@ -159,48 +158,36 @@ async fn append(
         }
         None => None,
     };
-    let updated = sqlx::query(
-        "UPDATE _sync_events
-            SET event_id = ?, device_id = ?, kind = ?, value = ?, timestamp = ?
-          WHERE entity_id = ? AND field = ?",
+    sqlx::query(
+        "INSERT INTO _sync_events
+           (event_id, device_id, entity_id, kind, field, value, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(entity_id, field) DO UPDATE SET
+           event_id  = excluded.event_id,
+           device_id = excluded.device_id,
+           kind      = excluded.kind,
+           value     = excluded.value,
+           timestamp = excluded.timestamp",
     )
     .bind(event_id)
     .bind(device)
+    .bind(entity_id)
     .bind(kind)
+    .bind(field)
     .bind(&json)
     .bind(timestamp)
-    .bind(entity_id)
-    .bind(field)
     .execute(&mut *conn)
     .await
-    .context("Failed to update a pending sync event")?;
-
-    if updated.rows_affected() == 0 {
-        sqlx::query(
-            "INSERT INTO _sync_events
-               (event_id, device_id, entity_id, kind, field, value, timestamp)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(event_id)
-        .bind(device)
-        .bind(entity_id)
-        .bind(kind)
-        .bind(field)
-        .bind(&json)
-        .bind(timestamp)
-        .execute(&mut *conn)
-        .await
-        .context("Failed to append a sync event")?;
-    }
+    .context("Failed to append a sync event")?;
     Ok(timestamp)
 }
 
 /// Read all populated schema cells of a live domain row.
-async fn row_cells(
+pub(super) async fn row_cells(
     conn: &mut SqliteConnection,
     kind: &str,
     id: Id,
-) -> Result<Option<Vec<(&'static str, CellValue)>>> {
+) -> Result<Option<Vec<(String, CellValue)>>> {
     let Some(spec) = schema::kind(kind) else {
         return Ok(None);
     };
@@ -226,7 +213,7 @@ async fn row_cells(
         .with_context(|| format!("Failed to read {kind} {id}"))?;
     let Some(row) = row else { return Ok(None) };
 
-    let mut cells: Vec<(&'static str, CellValue)> = Vec::new();
+    let mut cells: Vec<(String, CellValue)> = Vec::new();
     for (name, field) in &spec.fields {
         let column = field.column.as_deref().unwrap_or(name);
         let value = match field.class {
@@ -247,24 +234,10 @@ async fn row_cells(
             }
         };
         if let Some(value) = value {
-            cells.push((name.as_str(), value));
+            cells.push((name.clone(), value));
         }
     }
     Ok(Some(cells))
-}
-
-/// Snapshot the cells a row holds right now as JSON so a rejected edit against
-/// a concurrently deleted entity can offer resurrection.
-pub(super) async fn row_image(
-    conn: &mut SqliteConnection,
-    id: Id,
-    kind: &str,
-) -> Result<Option<String>> {
-    let Some(cells) = row_cells(conn, kind, id).await? else {
-        return Ok(None);
-    };
-    let image = serde_json::json!({ "kind": kind, "cells": cells });
-    Ok(Some(image.to_string()))
 }
 
 /// Read the next batch of unsent cells from the outbox without splitting a
@@ -302,7 +275,8 @@ pub(super) async fn outbox(conn: &mut SqliteConnection) -> Result<Vec<CellEvent>
     }
 
     if rows.len() as i64 == MAX_PUSH
-        && let (Some(last_row), Some(last_entity)) = (rows.last(), events.last().map(|e| e.entity_id))
+        && let (Some(last_row), Some(last_entity)) =
+            (rows.last(), events.last().map(|event| event.entity_id))
     {
         let is_split_create = events.iter().any(|event| {
             event.entity_id == last_entity && event.field == EXISTENCE && event.value == live()
@@ -350,64 +324,74 @@ pub async fn unsynced_count(pool: &SqlitePool) -> Result<usize> {
     unsynced_in(&mut conn).await
 }
 
-/// Whether the outbox holds a pending write to `(entity_id, field)` whose LWW
-/// stamp `(timestamp, device_id, event_id)` outranks the incoming remote cell.
+/// Whether the outbox holds a pending write to `(remote.entity_id, remote.field)`
+/// outside `exclude` whose LWW key `(timestamp, device_id, event_id)` strictly
+/// outranks `remote`.
 pub(super) async fn pending_outranks(
     conn: &mut SqliteConnection,
-    entity_id: Id,
-    field: &str,
-    remote_ts: i64,
-    remote_device: Id,
-    remote_event: EventId,
+    remote: &CellEvent,
+    exclude: &HashSet<EventId>,
 ) -> Result<bool> {
     let row = sqlx::query(
         "SELECT timestamp, device_id, event_id FROM _sync_events
           WHERE entity_id = ? AND field = ?",
     )
-    .bind(entity_id)
-    .bind(field)
+    .bind(remote.entity_id)
+    .bind(&remote.field)
     .fetch_optional(&mut *conn)
     .await
     .context("Failed to read pending outbox cell")?;
     let Some(row) = row else {
         return Ok(false);
     };
+    let local_event: EventId = row.get("event_id");
+    if exclude.contains(&local_event) {
+        return Ok(false);
+    }
     let local_ts: i64 = row.get("timestamp");
     let local_device: Id = row.get("device_id");
-    let local_event: EventId = row.get("event_id");
-    Ok((local_ts, local_device, local_event) > (remote_ts, remote_device, remote_event))
+    Ok((local_ts, local_device, local_event)
+        > (remote.timestamp, remote.device_id, remote.event_id))
 }
 
-/// Re-stamp `batch` relative to `server_now` with fresh `event_id`s and clamp
-/// the local stamp watermark after a `clock_ahead` rejection.
-pub(super) async fn restamp(
+/// Retire every event in `batch` except those in `keep` (which are restamped
+/// for a `clock_ahead` retry).
+pub(super) async fn retire_judged(
     conn: &mut SqliteConnection,
     batch: &[CellEvent],
-    server_now: i64,
+    keep: &HashSet<EventId>,
 ) -> Result<()> {
-    let mut stamp = server_now;
     for event in batch {
+        if !keep.contains(&event.event_id) {
+            sqlx::query("DELETE FROM _sync_events WHERE event_id = ?")
+                .bind(event.event_id)
+                .execute(&mut *conn)
+                .await
+                .context("Failed to retire an outbox cell")?;
+        }
+    }
+    Ok(())
+}
+
+/// Re-stamp the entire remaining outbox in queue order relative to `server_now`
+/// with fresh `event_id`s and clamp the local stamp watermark after a
+/// `clock_ahead` rejection.
+pub(super) async fn restamp_all(conn: &mut SqliteConnection, server_now: i64) -> Result<()> {
+    let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM _sync_events ORDER BY id ASC")
+        .fetch_all(&mut *conn)
+        .await
+        .context("Failed to read outbox ids for restamping")?;
+    let mut stamp = server_now;
+    for id in ids {
         stamp = stamp.saturating_add(1);
         let fresh = EventId::new();
-        sqlx::query("UPDATE _sync_events SET event_id = ?, timestamp = ? WHERE event_id = ?")
+        sqlx::query("UPDATE _sync_events SET event_id = ?, timestamp = ? WHERE id = ?")
             .bind(fresh)
             .bind(stamp)
-            .bind(event.event_id)
+            .bind(id)
             .execute(&mut *conn)
             .await
             .context("Failed to restamp an outbox cell")?;
     }
     state::reset_clock(&mut *conn, stamp).await
-}
-
-/// Delete a judged batch from the outbox.
-pub(super) async fn retire(conn: &mut SqliteConnection, batch: &[CellEvent]) -> Result<()> {
-    for event in batch {
-        sqlx::query("DELETE FROM _sync_events WHERE event_id = ?")
-            .bind(event.event_id)
-            .execute(&mut *conn)
-            .await
-            .context("Failed to retire an outbox cell")?;
-    }
-    Ok(())
 }

@@ -13,6 +13,7 @@ use im::db::{
 };
 use im::sync::client::Client;
 use im::sync::session;
+use im::sync::state;
 use im::sync::sync_once;
 use im::tracker::TrackerSlots;
 use sqlx::{Row, SqlitePool};
@@ -137,7 +138,7 @@ async fn device(name: &str) -> (SqlitePool, String) {
         .register(&email, "correct horse battery")
         .expect("register");
     let pool = test_pool().await.expect("in-memory db");
-    session::store_account(&pool, &account)
+    state::store_account(&pool, &account)
         .await
         .expect("store the account");
     (pool, account.token)
@@ -147,7 +148,7 @@ async fn device(name: &str) -> (SqlitePool, String) {
 /// machine produces).
 async fn second_device(token: &str) -> SqlitePool {
     let pool = test_pool().await.expect("in-memory db");
-    session::store_token(&pool, token)
+    state::store_token(&pool, token)
         .await
         .expect("seed the token");
     pool
@@ -452,7 +453,12 @@ async fn a_deletion_is_terminal_and_offers_a_copy() {
         "the edit cannot revive it"
     );
     assert_eq!(report_b.resurrect.len(), 1);
-    assert!(report_b.resurrect[0].image.contains("still here"));
+    assert!(
+        report_b.resurrect[0]
+            .cells
+            .iter()
+            .any(|(f, v)| f == "body" && *v == im::sync::CellValue::text("still here"))
+    );
 
     // Accepting the resurrection offer creates a fresh copy with B's edit and
     // replicates it to A.
@@ -665,7 +671,7 @@ async fn a_cursor_from_another_log_is_refused() {
         .unwrap();
     let report = sync(&pool).await;
     assert!(report.created > 0 || report.applied > 0);
-    let cursor = session::cursor(&pool).await.expect("read the cursor");
+    let cursor = state::pool_cursor(&pool).await.expect("read the cursor");
     let log = cursor.expect("the first sync names the log").log;
 
     forge_cursor(&pool, "another-log/0").await;
@@ -691,7 +697,7 @@ async fn a_cursor_past_the_end_of_the_log_is_refused() {
         .await
         .unwrap();
     sync(&pool).await;
-    let cursor = session::cursor(&pool)
+    let cursor = state::pool_cursor(&pool)
         .await
         .expect("read the cursor")
         .expect("the first sync names the log");
@@ -712,4 +718,147 @@ async fn a_cursor_past_the_end_of_the_log_is_refused() {
     session::reset_local_state(&pool).await.expect("reset");
     try_sync(&pool).await.expect("rebuild from the server");
     assert!(body_of(&pool, "mine").await.is_some());
+}
+
+#[tokio::test]
+async fn clock_ahead_restamps_and_succeeds_on_retry() {
+    let (device_a, token) = device("clock-ahead").await;
+    let device_b = second_device(&token).await;
+    create_task(&device_a, &task_object("fast-clock", "from future stamp"))
+        .await
+        .unwrap();
+
+    // Forge outbox timestamps 1 hour into the future.
+    let future_ms = im::sync::now_ms() + 3_600_000;
+    sqlx::query("UPDATE _sync_events SET timestamp = ?")
+        .bind(future_ms)
+        .execute(&device_a)
+        .await
+        .unwrap();
+
+    let first = sync(&device_a).await;
+    assert!(
+        first.clock_ahead.is_some(),
+        "first sync detects clock_ahead"
+    );
+    assert!(
+        first.pending > 0,
+        "rejected events remain queued after restamping"
+    );
+
+    let second = sync(&device_a).await;
+    assert!(
+        second.clock_ahead.is_none(),
+        "restamped retry succeeds without clock_ahead"
+    );
+    assert_eq!(second.pending, 0);
+
+    sync(&device_b).await;
+    assert_eq!(
+        body_of(&device_b, "fast-clock").await.as_deref(),
+        Some("from future stamp")
+    );
+}
+
+#[tokio::test]
+async fn optional_dead_link_on_update_and_create_clears_link_without_losing_task() {
+    let (device_a, token) = device("dead-optional-link").await;
+    let device_b = second_device(&token).await;
+    let (parent_id, _) = create_task(&device_a, &task_object("parent", ""))
+        .await
+        .unwrap();
+    let (existing_id, _) = create_task(&device_a, &task_object("existing", ""))
+        .await
+        .unwrap();
+    settle(&[&device_a, &device_b]).await;
+
+    // Device A deletes the parent task and pushes.
+    im::db::delete_task(&device_a, parent_id).await.unwrap();
+    sync(&device_a).await;
+
+    // Device B (before pulling the delete) links `existing` to `parent_id` and
+    // also creates a new task with `parent = Some(parent_id)`.
+    im::db::set_task_parent(&device_b, existing_id, parent_id)
+        .await
+        .unwrap();
+    let mut new_child = task_object("new-child", "survives");
+    new_child.parent = Some(parent_id);
+    let (new_child_id, _) = create_task(&device_b, &new_child).await.unwrap();
+
+    let report = sync(&device_b).await;
+    assert!(
+        report
+            .notices
+            .iter()
+            .any(|n| n.contains("parent_id refused (target_deleted)")),
+        "expected target_deleted notice in {:?}",
+        report.notices
+    );
+
+    for id in [existing_id, new_child_id] {
+        let parent: Option<String> = sqlx::query_scalar("SELECT parent FROM todos WHERE id = ?")
+            .bind(id)
+            .fetch_one(&device_b)
+            .await
+            .expect("task survives optional link refusal");
+        assert_eq!(parent, None);
+    }
+    sync(&device_a).await;
+    assert_eq!(
+        body_of(&device_a, "new-child").await.as_deref(),
+        Some("survives")
+    );
+}
+
+#[tokio::test]
+async fn required_dead_link_on_completion_create_rejects_and_forgets_completion() {
+    let (device_a, token) = device("dead-required-link").await;
+    let device_b = second_device(&token).await;
+    let (task_id, _) = create_task(&device_a, &task_object("doomed-task", ""))
+        .await
+        .unwrap();
+    settle(&[&device_a, &device_b]).await;
+
+    // Device A deletes the task and pushes.
+    im::db::delete_task(&device_a, task_id).await.unwrap();
+    sync(&device_a).await;
+
+    // Device B records a completion for the deleted task before pulling.
+    im::db::update_task(&device_b, task_id, 1).await.unwrap();
+    let report = sync(&device_b).await;
+    assert!(
+        report
+            .notices
+            .iter()
+            .any(|n| n.contains("refused (target_deleted)")),
+        "expected refused (target_deleted) notice in {:?}",
+        report.notices
+    );
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM todo_completions")
+        .fetch_one(&device_b)
+        .await
+        .unwrap();
+    assert_eq!(remaining, 0, "refused completion create is forgotten");
+}
+
+#[tokio::test]
+async fn switching_account_preserves_cursor_and_refuses_foreign_log() {
+    let server = server().await;
+    let (pool, _token_a) = device("account-one").await;
+    create_task(&pool, &task_object("one", "")).await.unwrap();
+    sync(&pool).await;
+
+    // Sign the same local database into a second account without `--reset`.
+    let account_two = Client::new(&server.base, None)
+        .register("account-two@example.com", "correct horse battery")
+        .expect("register second account");
+    state::store_account(&pool, &account_two)
+        .await
+        .expect("store second account");
+
+    let error = try_sync(&pool)
+        .await
+        .expect_err("syncing against a different account's log without reset is refused");
+    let message = format!("{error:#}");
+    assert!(message.contains("different server log"), "{message}");
 }

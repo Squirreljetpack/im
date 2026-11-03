@@ -17,8 +17,10 @@ use sqlx::SqlitePool;
 
 use crate::cli::SyncSubcommand;
 use crate::config::Config;
-use crate::sync::client::server_url;
+use crate::sync::client::{self, server_url};
+use crate::sync::events;
 use crate::sync::session::{self, Resurrect, sync_once};
+use crate::sync::state;
 use crate::tracker::TrackerSlots;
 
 /// `im :sync` — sync, or manage the account this device syncs with.
@@ -49,7 +51,7 @@ async fn confirm_reset(pool: &SqlitePool, interactive: bool, force: bool) -> Res
     if force {
         return Ok(());
     }
-    let pending = session::unsynced_count(pool).await?;
+    let pending = events::unsynced_count(pool).await?;
     if pending == 0 {
         return Ok(());
     }
@@ -199,8 +201,8 @@ async fn maybe_resurrect(pool: &SqlitePool, offer: &Resurrect, interactive: bool
 async fn register(pool: &SqlitePool, config: &Config) -> Result<()> {
     let (email, password) = prompt_credentials()?;
     let server = server_url(config);
-    let account = session::register(&server, &email, &password).await?;
-    session::store_account(pool, &account).await?;
+    let account = client::register(&server, &email, &password).await?;
+    state::store_account(pool, &account).await?;
     println!(
         "Registered {} on {server}; this device is signed in.",
         account.email
@@ -213,8 +215,8 @@ async fn register(pool: &SqlitePool, config: &Config) -> Result<()> {
 async fn login(pool: &SqlitePool, config: &Config) -> Result<()> {
     let (email, password) = prompt_credentials()?;
     let server = server_url(config);
-    let account = session::login(&server, &email, &password).await?;
-    session::store_account(pool, &account).await?;
+    let account = client::login(&server, &email, &password).await?;
+    state::store_account(pool, &account).await?;
     println!("Signed in as {} on {server}.", account.email);
     println!("Run `im :sync` to exchange events with the other devices.");
     Ok(())
@@ -222,14 +224,14 @@ async fn login(pool: &SqlitePool, config: &Config) -> Result<()> {
 
 /// `:sync status` — show the account this device is signed in as.
 async fn status(pool: &SqlitePool, config: &Config) -> Result<()> {
-    let Some(token) = session::signed_in(pool).await? else {
+    let Some(token) = state::signed_in(pool).await? else {
         println!("Not signed in (run `im :sync login`).");
         return Ok(());
     };
     let server = server_url(config);
-    match session::account_status(&server, &token).await {
+    match client::account_status(&server, &token).await {
         Ok(status) => {
-            let queued = session::unsynced_count(pool).await?;
+            let queued = events::unsynced_count(pool).await?;
             println!(
                 "Signed in as {} ({}) on {server}.",
                 status.email, status.user_id
@@ -247,7 +249,7 @@ async fn status(pool: &SqlitePool, config: &Config) -> Result<()> {
 /// Where this database has read to, plus the versions this build speaks — the
 /// numbers a refusal quotes back.
 async fn describe_cursor(pool: &SqlitePool) -> Result<String> {
-    let cursor = session::cursor(pool).await?;
+    let cursor = state::pool_cursor(pool).await?;
     let versions = format!(
         "protocol {}, schema {}",
         crate::sync::schema::SCHEMA.protocol,
@@ -269,7 +271,7 @@ async fn describe_cursor(pool: &SqlitePool) -> Result<String> {
 async fn logout(pool: &SqlitePool) -> Result<()> {
     // The server keeps the events it already has; this device keeps
     // its data and simply stops syncing it.
-    session::logout(pool).await?;
+    state::logout(pool).await?;
     println!("Signed out. Local data is untouched.");
     Ok(())
 }
