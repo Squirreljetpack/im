@@ -157,11 +157,14 @@ converts a pre-existing WAL db).
 
 ```text
 mood:           id, mood TEXT NOT NULL, body TEXT NOT NULL DEFAULT '',
-                time INTEGER (unixepoch), embedding BLOB, score REAL,
+                time INTEGER (unixepoch), tz_offset INTEGER NOT NULL,
+                location TEXT NOT NULL, embedding BLOB, score REAL,
                 duration INTEGER, todo_id INTEGER → todos(id) ON DELETE SET NULL
 tracker:        id, type TEXT, score BLOB NOT NULL        -- storage class = declared kind
                 CHECK (typeof(score) IN ('integer','text','real')),
-                time, mood INTEGER → mood(id)             -- nullable
+                time INTEGER, tz_offset INTEGER NOT NULL,
+                location TEXT NOT NULL,
+                mood INTEGER → mood(id)                   -- nullable
 todos:          id (AUTOINCREMENT), name TEXT NOT NULL, body, priority DEFAULT 5,
                 short_id INTEGER UNIQUE,   -- user-facing id; first-free-gap,
                                            -- NULL once a oneshot task is done
@@ -174,11 +177,19 @@ todos:          id (AUTOINCREMENT), name TEXT NOT NULL, body, priority DEFAULT 5
                 optional DEFAULT 0, end_time, parent → todos(id) ON DELETE SET NULL
                 -- deleting a parent re-parents its children to root
 todo_completions: id, todo_id → todos(id) ON DELETE CASCADE,
-                time INTEGER, count INTEGER NOT NULL DEFAULT 1
+                time INTEGER, tz_offset INTEGER NOT NULL,
+                location TEXT NOT NULL,
+                count INTEGER NOT NULL DEFAULT 1
 embedding_cache: text TEXT PRIMARY KEY, embedding BLOB
 ```
 
-Timestamps are Unix epoch seconds everywhere, via the `date` module.
+Task timestamps are Unix epoch seconds via the `date` module. Log rows
+(mood, tracker, completion) also store the UTC offset and the location string
+in effect where they were recorded; `date::LogTime` carries `(epoch, offset)`
+and derives the recorded civil clock (`epoch + offset`). The location is the
+system IANA name at write time, or the empty string when the system has no
+name. It is opaque display/journal metadata: it is never parsed back into a
+`TimeZone`, and civil-time arithmetic uses only the offset.
 
 - **Completion semantics**: `todo_completions` is an event log — one row per
   update, `count` = that update's value; totals are `SUM(count)`. Done-ness and

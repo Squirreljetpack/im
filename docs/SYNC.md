@@ -17,7 +17,7 @@ end — against a real deployment (§1) and entirely on one machine with Minifla
   command, so a stale export wins over the config.
 - Sync ships from v0.2.6 on; v0.2.5 and earlier predate it. A client from
   v0.2.9 or earlier sends no version of its own, so a server that speaks
-  protocol 1 refuses it with `this server speaks sync protocol 1 and schema 2`.
+  protocol 1 refuses it with `this server speaks sync protocol 1 and schema 4`.
   Upgrade the client; there is no compatibility mode.
 - A pre-sync database (v0.2.5) has INTEGER ids and is not migrated. Do not point
   a sync build at an old state dir; move the file aside first (appendix A).
@@ -328,6 +328,13 @@ envelope and `version` for the cell vocabulary. Bump the one you changed; a peer
 that speaks another refuses the round rather than reading half of it.
 `sync-server/test/schema.test.ts` pins every `version` to the digest of its
 `kinds`, so editing the vocabulary without a bump fails `npm test`.
+
+Vocabulary 4 adds the log time cells: `tz_offset` (int, required) and
+`location` (text, required) on `mood`, `tracker`, and `completion`. The
+location is the writing system's IANA name, or an empty string when it has
+none; it is display metadata and is never parsed. A create replayed from a
+pre-v4 log lacks one or both cells and is intentionally unbuildable; reset the
+sync log when upgrading a deployment that would replay one.
 
 ### 2.3 Manual: one server, two clients
 

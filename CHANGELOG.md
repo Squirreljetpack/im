@@ -1,3 +1,36 @@
+## [Unreleased]
+
+### 🚀 Features
+
+- Log entries (moods, trackers, todo completions) store the UTC offset and
+  the location string (the system IANA name, or empty when it has none) in
+  effect where they were written. The today view groups log entities by their
+  recorded **civil day** and renders their recorded civil time; ordering stays
+  absolute. Mood/tracker previews show the differing location and wall-clock
+  shift under the timestamp; task previews append the same parts inline to
+  `last:` as `prev:`.
+- Tracker interval anchors are unzoned civil datetimes resolved in the current
+  local zone. Replace-mode slots and cumulative sums assign foreign logs by
+  their recorded wall clock, so an entry stays in the same civil slot when
+  viewed from another zone.
+- Replace-mode null trackers store their absolute seconds from the interval
+  start in the entry payload; color and the strict when-zone use that stored
+  position.
+- Explicit todo completions join the today view on their civil completion day.
+  `B` now merges explicitly completed scheduled tasks on that day instead of on
+  an overlapping availability window.
+
+### 💥 Breaking changes
+
+- Sync vocabulary is version 4: `tz_offset` (required int) and `location`
+  (required text; empty when the system has no name) on mood, tracker and
+  completion. Pre-v4 creates lack the
+  location or offset and are intentionally unbuildable; reset the sync log
+  when replaying one.
+- Databases from earlier builds are not migrated. Delete the database file and
+  sign in to rebuild from the log. Tracker configs must drop the `Z`/numeric
+  offset from interval anchors.
+
 ## [0.2.10] - 2026-10-31
 
 ### 🚀 Features

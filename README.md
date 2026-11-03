@@ -149,10 +149,14 @@ Trackers are defined in your configuration (`im :tool config`); each `[tracker.<
 section is logged through `im -<name> <value>` (no value for `null` trackers):
 
 - Kinds: `text`, `integer`, `float`, `duration` (strings like `6m 30s`), `null` (timestamp/count markers — requires an interval).
-- `interval = { anchor = "2026-01-01T00:00:00-04:00", span = "1 day" }` bins
-  entries into calendar slots. By default, a new log in a slot
-  replaces the slot's previous entry; `interval.cumulative = true` keeps every log and
-  the slot's grid dot shows the aggregate.
+- `interval = { anchor = "2026-01-01T00:00:00", span = "1 day" }` bins
+  entries into calendar slots. The anchor is an unzoned civil datetime (no `Z`
+  or numeric offset) resolved in your current local zone. By default, a new log
+  in a slot replaces the slot's previous entry; `interval.cumulative = true`
+  keeps every log and the slot's grid dot shows the aggregate. Logs record the
+  UTC offset and location string (the system IANA name, or empty) they were
+  written in, so they stay on their recorded civil day and interval slot when
+  viewed from another zone.
 
 ## FAQ
 
