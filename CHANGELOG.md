@@ -1,3 +1,49 @@
+## [0.3.0] - 2026-11-03
+
+### 🚀 Features
+
+- Sync creates are driven by `sync_schema.json`: a push that creates an
+  entity carries every field of its kind, so no peer ever builds a
+  half-filled row.
+- The outbox coalesces per cell (`UNIQUE(entity_id, field)`): repeated
+  offline edits to the same field update the queued row in place instead
+  of queueing a chain of writes.
+- The server pre-validates each create (existence cell, required fields
+  and links, timestamp) and reports the failures as per-event verdicts
+  with a typed reason. `target_deleted` is new; a reason this build does
+  not know deserializes as `unknown` instead of failing the response.
+- Deleting a mood keeps the tracker entries logged against it: their
+  `mood` link is cleared and the rows stay, matching the sync cascade.
+  Deleting a task still deletes its completions.
+- `im :sync` offers to re-create content another device deleted from a
+  snapshot taken before the row was removed, and asks once per entity
+  after every push of the run.
+
+### 🐛 Bug Fixes
+
+- `sync_once` lands the outbox, the domain rows, the cursor and the
+  verdict reconciliation in one transaction, so an interrupted push
+  cannot leave a half-applied batch.
+- The existence cell folds monotonically: a stale create can no longer
+  resurrect an entity another device deleted, and a create the server
+  rejected leaves no cells behind in the log.
+- `clock_ahead` restamps the device forward against the server clock and
+  resets its last emitted stamp, so later edits from that device keep
+  winning last-writer-wins.
+- Editing a mood's body or a tracker's mood link queues only the cells
+  that changed.
+- Pull is bounded and reports `has_more`, so a long log pages instead of
+  arriving in one response.
+
+### 💥 Breaking changes
+
+- `tracker.time` is required: a create without it is rejected as
+  `shape`.
+- `_sync_events` carries its coalescing uniqueness in the table
+  definition and no longer stores `image`. Databases from earlier builds
+  are not migrated: delete the database file and sign in to rebuild from
+  the log.
+
 ## [0.2.11] - 2026-11-02
 
 ### 🚀 Features

@@ -36,7 +36,7 @@ max = 30
 wrap = true
 scroll_wrap = true
 show = true
-border = { type = "Plain" }
+border = { type = "Plain", sides = "ALL" }
 
 [overlay]
 border = { type = "Rounded", color = "darkGrey", padding = 1 }
