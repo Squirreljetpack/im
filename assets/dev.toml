@@ -1,0 +1,142 @@
+[moods]
+# Mood-to-color anchors live in the file named by `source` (relative to the
+# config directory); see assets/moods.dev.toml for the bundled default set.
+source = "moods.dev.toml"
+
+prefix_string = "person says: "
+# A neutral phrase standing for "no particular mood"; anchor colors are measured from this baseline.
+base_string = "this person feels:"
+
+# How decisively the strongest anchor mood wins the final color (1.0 = even mix, higher = dominant).
+blend_steepness = 2.0
+
+# How strongly emotional saliency biases the day-average embedding behind a
+# tracker-grid dot: per-mood weights are s^k, so 1 = plain saliency weighting,
+# higher = the most salient moods of the day dominate its color.
+grid_blend_steepness = 1
+
+# How much emotional intensity (saliency) moves a color away from neutral:
+# 0 disables it entirely, 100 keeps the full effect. Default 50.
+effective_saliency_gate = 80
+
+# Neutral gray lightness (0-100) used when no anchor mood matches, default 65.
+baseline_oklab_l = 65
+
+# An anchor mood must make up at least this % of the color mix to be included at all.
+# min_contribution = 7
+# top_k = 5
+
+[tasks]
+colors = ["dark_red", "dark_yellow", "dark_green"]
+default_priority = 5                               # 1..=999
+default_recurring_priority = 5                     # 1..=999 (recurring tasks)
+default_scheduled_priority = 10                    # 1..=999 (scheduled tasks)
+overdue_color = "#FFB6C1"   # pale pink: today-view date column + preview `due:` of overdue tasks
+
+[grid]
+week_rolling = false
+month_rolling = true
+year_rolling = true
+week_start = "Monday"
+
+[preview]
+# Show a `last:` field for done tasks in the preview pane.
+show_last_when_done = true
+
+[today_view]
+# Merge a task's adjacent completion entries into a single done row
+# in the today view (accepted for future use; no behavior yet).
+coalesce_completions = false
+# Swap which variant lists every recurring availability window: by default
+# All lists every window intersecting the view period and Due only the
+# current/next window per task; when true, All keeps just the current/next
+# window and Due lists every window. Past-anchored days always list every
+# window.
+swap_all_and_due_recurring_task_views = false
+
+[tasks_view]
+# Keep a just-completed task visible in the pending view (@) for this many
+# seconds after its last completion entry.
+persist_pending_seconds = 300
+
+[tracker]
+# populatable as: [tracker.<name>]
+# interval = { anchor = "2020-01-01T00:00:00", span = "1 day" }  # unzoned anchor datetime + calendar span
+#   cumulative = true  # keep every log per period (default false = replace)
+# kind = "float"      # text | integer | float | duration | null
+# low = 0
+# high = 10
+# strict = true       # gate logging outside [low, high] (see config.toml docs)
+
+[tracker.sleep]
+interval = { anchor = "2020-01-01T00:00:00", span = "1 day" }
+kind = "float"
+low = 0
+high = 10
+colors = "sleep"
+
+[tracker.run_times]
+interval = { anchor = "2020-01-01T00:00:00", span = "1 week" }
+kind = "float"
+low = 100
+high = 0
+colors = "rating"
+
+# Interval trackers without low/high — binning falls back to the middle color
+[tracker.water]
+interval = { anchor = "2020-01-01T00:00:00", span = "1 day" }
+kind = "float"
+colors = "awake"
+
+# Interval text tracker — entries stored as strings, no numeric binning
+[tracker.notes]
+interval = { anchor = "2020-01-01T00:00:00", span = "1 week" }
+kind = "text"
+colors = "grateful"
+
+# Non-interval integer tracker with only low (no high — bins from low upward).
+[tracker.steps]
+kind = "integer"
+low = 0
+colors = "rating"
+
+[tracker.mood_notes]
+kind = "text"
+colors = "grateful"
+
+# Tracker with values spanning below low, in range, and above high
+# to exercise the full color binning palette.
+[tracker.temperature]
+interval = { anchor = "2020-01-01T00:00:00", span = "1 day" }
+kind = "integer"
+low = 10
+high = 30
+colors = "rating"
+[editor]
+# Body-editor templates per entry kind (arrays): a bare `.` opens the
+# editor seeded with the first template, `..` with the second, and so on;
+# out-of-range dot counts fall back to the legacy hint line. An empty
+# entry opens a blank document; a non-empty path that can't be read warns
+# and opens blank. Lines between two `%%` markers are stripped from the
+# saved body (markers included).
+# mood_template = ["templates/mood.txt"]
+# task_template = []
+# recurring_template = []
+# scheduled_template = []
+
+[session]
+# title = "im"
+# sound = "chime"
+# sound_duration = "5s"
+# delay = 0
+# kind = "bell"
+# dismiss = "10s" # auto-dismiss timeout for toast/dialogue (unset = indefinite)
+# prompt = "Thoughts:"
+# countdown = "bar"
+# countdown_style = { fg = "cyan" }
+
+[sync]
+# Base URL of the sync server, for every `im :sync` subcommand. Unset means
+# http://127.0.0.1:8787 (the local
+# `wrangler dev` server); `IM_SYNC_URL` overrides it for a single command.
+# server = "https://im-sync.<subdomain>.workers.dev"

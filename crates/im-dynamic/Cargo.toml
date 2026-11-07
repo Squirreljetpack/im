@@ -1,0 +1,22 @@
+[package]
+name = "im-dynamic"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Dynamic ONNX Runtime variant of im CLI (requires system libonnxruntime)"
+
+[dependencies]
+im = { path = "../..", default-features = false, features = ["load-dynamic"] }
+tokio = { version = "1", features = ["full"] }
+mimalloc = "0.1"
+
+# Target override: Builds on all platforms including Intel Mac & musl Linux via load-dynamic
+[package.metadata.dist]
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+  "x86_64-unknown-linux-musl",
+  "x86_64-pc-windows-msvc",
+]

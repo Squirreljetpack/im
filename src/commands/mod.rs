@@ -1,0 +1,173 @@
+use anyhow::Result;
+use cba::_dbg;
+use sqlx::SqlitePool;
+use std::io::Write;
+
+use crate::cli::{CliOpts, Command};
+use crate::config::Config;
+
+mod create;
+mod diagnostics;
+mod edit_task;
+mod entry;
+mod maintenance;
+mod refs;
+mod sync;
+mod task;
+mod update;
+
+pub use diagnostics::print_embeddings;
+
+// The TUI's in-process execute flows call these directly instead of
+// spawning the `im` binary.
+pub(crate) use create::create_interactive;
+pub(crate) use edit_task::edit_task_by_id;
+pub(crate) use sync::sync_command;
+
+pub async fn execute_command<W: Write>(
+    cmd: Command,
+    pool: &SqlitePool,
+    config: &Config,
+    opts: &CliOpts,
+    out: &mut W,
+    tui: bool,
+) -> Result<()> {
+    match cmd {
+        Command::Entry(entry) => entry::record_entry(pool, config, opts, _dbg!(entry))
+            .await
+            .map(drop),
+
+        Command::View { mode, show } => {
+            if tui {
+                crate::ui::tasks::TasksApp::new(mode, config.clone(), show, opts.fullscreen)
+                    .await
+                    .run()
+                    .await
+            } else {
+                crate::task_view::write_task_view(pool, mode, config, show, out).await
+            }
+        }
+
+        Command::Tracker { period, items } => {
+            let axes = crate::color::ColorAxes::build(pool, &config.moods).await?;
+            crate::tracker::write_tracker_grid(pool, config, &axes, opts, period, items, out).await
+        }
+
+        Command::Task(task) => task::create_task_command(pool, config, opts, task)
+            .await
+            .map(drop),
+
+        Command::TaskEdit { task } => edit_task::handle_task_edit(pool, config, opts, task).await,
+
+        Command::Today {
+            date,
+            show,
+            horizon,
+        } => {
+            // `im @<date>` anchors the view to that day; parse with
+            // the fixed `DATE_DIALECT`.
+            let day_epoch = match &date {
+                Some(d) => crate::date::parse_date(d, crate::date::DATE_DIALECT)?,
+                None => crate::date::today_start(),
+            };
+            if tui {
+                crate::ui::today::TodayApp::new(
+                    config.clone(),
+                    day_epoch,
+                    show,
+                    horizon,
+                    opts.fullscreen,
+                )
+                .await
+                .run()
+                .await
+            } else {
+                let axes = crate::color::ColorAxes::build(pool, &config.moods).await?;
+                crate::today::write_today_view(
+                    pool, config, &axes, day_epoch, show, horizon, opts, out,
+                )
+                .await
+            }
+        }
+
+        Command::Help => {
+            // assets/help.txt and assets/vhelp.txt are bundled via
+            // `include_str!` so the compiled binary always has the help text
+            // even when the working directory does not contain the assets
+            // directory.
+            const HELP: &str = include_str!("../../assets/help.txt");
+            const VHELP: &str = include_str!("../../assets/vhelp.txt");
+            if opts.verbose() {
+                out.write_all(VHELP.as_bytes())?;
+            } else {
+                out.write_all(HELP.as_bytes())?;
+            }
+            Ok(())
+        }
+
+        Command::Version => {
+            writeln!(out, "{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))?;
+            Ok(())
+        }
+
+        Command::Matchmaker => crate::ui::tracker_picker::run_trackers_app(config)
+            .await
+            .map(drop),
+
+        Command::Tool(sub) => match sub {
+            crate::cli::ToolSubcommand::Db(sub) => match sub {
+                crate::cli::DbSubcommand::Prune => maintenance::db_prune(pool, config).await,
+                crate::cli::DbSubcommand::Backfill => maintenance::db_backfill(pool).await,
+                crate::cli::DbSubcommand::Doctor => maintenance::db_doctor(pool, config, tui).await,
+            },
+            crate::cli::ToolSubcommand::Embed => {
+                let stdin = std::io::stdin();
+                let mut reader = stdin.lock();
+                diagnostics::print_embeddings(&mut reader, out)
+            }
+            crate::cli::ToolSubcommand::Score { .. } => todo!(),
+            crate::cli::ToolSubcommand::Config { target } => match target.unwrap_or_default() {
+                crate::cli::ConfigTarget::Main => maintenance::edit_config().await,
+                crate::cli::ConfigTarget::Moods => maintenance::edit_moods(config).await,
+                crate::cli::ConfigTarget::Colors => maintenance::edit_colors().await,
+                crate::cli::ConfigTarget::Mm => maintenance::edit_mm().await,
+            },
+            crate::cli::ToolSubcommand::Mood { mood } => {
+                let mood = join_mood(&mood);
+                let axes = crate::color::ColorAxes::build(pool, &config.moods).await?;
+                diagnostics::diagnose_color(mood.as_deref(), config, &axes, opts, out)
+            }
+            crate::cli::ToolSubcommand::Clear { date } => {
+                let date = clear_date(&date);
+                maintenance::clear_moods(pool, config, date, tui).await
+            }
+            crate::cli::ToolSubcommand::Datetime { expr, format } => {
+                diagnostics::print_datetime(&expr, format, opts.quiet(), out)
+            }
+            crate::cli::ToolSubcommand::Notify(cli) => {
+                cli.run()?;
+                Ok(())
+            }
+        },
+
+        Command::Sync { sub, reset, force } => {
+            sync::sync_command(pool, config, sub, reset, force).await
+        }
+    }
+}
+
+fn join_mood(words: &[String]) -> Option<String> {
+    let joined = words.join(" ");
+    let mood = joined.trim().trim_matches('"').trim();
+    (!mood.is_empty()).then(|| mood.to_string())
+}
+
+fn clear_date(words: &[String]) -> Option<String> {
+    if words.is_empty() {
+        return None;
+    }
+    let joined = words.join(" ");
+    let trimmed = joined.trim();
+    let stripped = trimmed.strip_prefix('@').unwrap_or(trimmed).trim();
+    (!stripped.is_empty()).then(|| stripped.to_string())
+}

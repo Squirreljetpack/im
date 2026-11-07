@@ -1,0 +1,137 @@
+# moods-earth.toml — Earth, woodland & warm terracotta mood palette variant.
+#
+# Evokes warm clay, antique ocher, deep woodland pine, slate, and dusk.
+# Rich in dynamic range with deeply saturated dark moods and warm golden highlights.
+# Use in config.toml with: [moods] source = "moods-earth.toml"
+
+[[pairs]]
+mood = "happy"
+color = "#caa048"
+
+[[pairs]]
+mood = "sad"
+color = "#3b5585"
+
+[[pairs]]
+mood = "drained"
+color = "#544f59"
+
+[[pairs]]
+mood = "energetic"
+color = "#b85842"
+
+[[pairs]]
+mood = "thoughtful"
+color = "#6b4d7c"
+
+[[pairs]]
+mood = "purposeful"
+color = "#be8532"
+
+[[pairs]]
+mood = "passive"
+color = "#4c607a"
+
+[[pairs]]
+mood = "frustrated"
+color = "#993a4a"
+
+[[pairs]]
+mood = "neutral"
+color = "#5c5761"
+
+[[pairs]]
+mood = "nostalgic"
+color = "#8f5742"
+
+[[pairs]]
+mood = "humble"
+color = "#5e6356"
+
+[[pairs]]
+mood = "secure"
+color = "#483d63"
+
+[[pairs]]
+mood = "pained"
+color = "#852a2a"
+
+[[pairs]]
+mood = "comfortable"
+color = "#3d827e"
+
+[[pairs]]
+mood = "guarded"
+color = "#3a5252"
+
+[[pairs]]
+mood = "vulnerable"
+color = "#7d3e82"
+
+[[pairs]]
+mood = "isolated"
+color = "#333d73"
+
+[[pairs]]
+mood = "sociable"
+color = "#a85444"
+
+[[pairs]]
+mood = "connected"
+color = "#3a6644"
+
+[[pairs]]
+mood = "confused"
+color = "#582670"
+
+[[pairs]]
+mood = "lucid"
+color = "#948a46"
+
+[[pairs]]
+mood = "proud"
+color = "#964082"
+
+[[pairs]]
+mood = "let down"
+color = "#453c73"
+
+[[pairs]]
+mood = "engrossed"
+color = "#7d7859"
+
+[[pairs]]
+mood = "disgusted"
+color = "#596138"
+
+[[pairs]]
+mood = "satiated"
+color = "#994d2e"
+
+[[pairs]]
+mood = "hungry"
+color = "#8a382e"
+
+[[pairs]]
+mood = "bereaved"
+color = "#3c3c4d"
+
+[[pairs]]
+mood = "vengeful"
+color = "#822424"
+
+[[pairs]]
+mood = "fearful"
+color = "#4d5454"
+
+[[pairs]]
+mood = "smitten"
+color = "#b86577"
+
+[[pairs]]
+mood = "optimistic"
+color = "#d69e3a"
+
+[[pairs]]
+mood = "envious"
+color = "#526135"

@@ -1,0 +1,36 @@
+Entry creation full grammar:
+  im <mood> [. [body]]                           log a mood (with an optional body)
+  im %<duration> [purpose..] [[+<task> [count]] | [-<tracker> [value..]]]...
+                                                 start a timed session (optionally linked with tasks/trackers)
+  im <mood> [[+<task> [count]] | [-<tracker> [value..]]]...
+                                                 log a mood linked with a task and trackers
+  im [[+<task> [count]] | [-<tracker> [value..]]]...
+                                                 log task and trackers without a mood
+  
+  im + [name] [@<time>]                          create a oneshot task (interactive without a name)
+  im +[task] [name] [@<time>]                    create a oneshot task linked to parent
+  im + %[<interval>] [:<name>]                   create a recurring task (interactive)
+  im + @ [<time>] [:<name>] [%<duration>]        create a scheduled task (interactive if partial)
+  im +[task]                                     edit a task by its reference
+  im +[task] <count>                             update task completion state (count may be negative)
+
+  Tasks are referred to (when linking in an entry, updating completion, or editing),
+  by a single argument that begins with `+`, followed by either:
+  - the short id of the task (+7)
+  - (a string of) one or more words that uniquely queries a task name (+groceries)
+  - or nothing (+): pick interactively (in entry task linking).
+
+  At most one task reference can be specified per entry. A task reference and
+  trackers can freely mix after the mood or session purpose. Pure numeric
+  tracker names (`-5`) are rejected: negative numbers are tracker values or
+  completion deltas.
+
+  With an attached `+<ref>`, the next word decides between an entry and child
+  creation: a number, `.`, `+`, or `-` starts an entry (completion, body,
+  another reference, or a tracker); anything else is the child task's name.
+
+  Entry creation (`im <mood>`, tracker-only entries, and `im %<duration>`)
+  accepts a trailing [<dots> [body]].
+  - <dots> is some number of `.`'s.
+  - If without a body, `$EDITOR` will open: the number of dots then chooses
+    which template (defined in your config file) the `$EDITOR` opens.

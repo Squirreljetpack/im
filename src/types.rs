@@ -1,0 +1,283 @@
+use crate::date::{self, Epoch};
+
+/// Category of a task, derived from its scheduling fields or selected during creation.
+///
+/// A target count distinguishes threshold-style completion behavior, but does not
+/// create a separate task kind: those tasks are still one-shot tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskKind {
+    /// One-shot task, with or without a completion target.
+    Oneshot,
+    /// Recurring task (has an interval).
+    Recurring,
+    /// Scheduled task (has an availability window and no interval).
+    Scheduled,
+}
+
+impl TaskKind {
+    /// Derive a task's kind from its two scheduling columns — the same rule
+    /// `sync_schema.json` uses to name a task row's subkind. The kind is never
+    /// stored, so a writer that clears one of these columns reclassifies the
+    /// row; see [`crate::task::validate_edit`].
+    pub fn of(interval_secs: Option<i64>, available_duration_secs: Option<i64>) -> Self {
+        if interval_secs.is_some() {
+            Self::Recurring
+        } else if available_duration_secs.is_some() {
+            Self::Scheduled
+        } else {
+            Self::Oneshot
+        }
+    }
+}
+
+impl std::fmt::Display for TaskKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            TaskKind::Oneshot => "oneshot",
+            TaskKind::Recurring => "recurring",
+            TaskKind::Scheduled => "scheduled",
+        })
+    }
+}
+
+/// The task-list mode selected by `@` and `@done` views.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    PendingTasks,
+    DoneTasks,
+}
+
+/// Shared view subset control used by both the task and today TUIs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewVariant {
+    #[default]
+    All,
+    A,
+    B,
+}
+
+impl ViewVariant {
+    /// TUI title label for the today app: `[show: all|journal|due]`.
+    /// `A` is "journal" (moods, trackers, and task completion events);
+    /// `B` is "due" (overdue/due tasks, scheduled, recurring).
+    pub fn today_label(&self) -> &'static str {
+        match self {
+            ViewVariant::All => "all",
+            ViewVariant::A => "journal",
+            ViewVariant::B => "due",
+        }
+    }
+
+    /// TUI title label for the tasks app: `[show: all|oneshot|other]`
+    /// (`A` = oneshots only, `B` = recurring + scheduled).
+    pub fn tasks_label(&self) -> &'static str {
+        match self {
+            ViewVariant::All => "all",
+            ViewVariant::A => "oneshot",
+            ViewVariant::B => "other",
+        }
+    }
+
+    /// Cycle order: All → A → B → All.
+    pub fn next(&self) -> Self {
+        match self {
+            ViewVariant::All => ViewVariant::A,
+            ViewVariant::A => ViewVariant::B,
+            ViewVariant::B => ViewVariant::All,
+        }
+    }
+}
+
+/// Oneshot tasks filter used by internal task fetchers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TasksFilter {
+    /// No tasks at all — the entire task section (oneshots, scheduled,
+    /// recurring, completed-today) is hidden, leaving a journal-only view.
+    None,
+    /// Any open oneshot task, any date, no bounds. Completed oneshots
+    /// drop out of the regular lists — tasks completed today surface
+    /// through the completed-today section instead.
+    #[default]
+    All,
+    /// Only dated oneshots due within the horizon or overdue (`end_time`
+    /// set and <= horizon end). Undated tasks are never overdue, so they
+    /// don't appear here — use `Pending` or `All`.
+    Due,
+    /// Open (incomplete) oneshot tasks, any date — the undated-inbox view.
+    Pending,
+    /// Open oneshot tasks due within the horizon; overdue ones (due before
+    /// the day start) excluded.
+    Horizon,
+    /// Open oneshot tasks created within the view window
+    /// (`[day_start, horizon_end]`) — the today view's past-anchored
+    /// filter, where a historical day lists only the oneshots that were
+    /// created in it.
+    CreatedInWindow,
+}
+
+/// How far ahead to include incomplete todos in the today view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TodayHorizon {
+    Today,
+    Tomorrow,
+    Week,
+    Month,
+}
+
+impl TodayHorizon {
+    pub fn next(&self) -> Self {
+        match self {
+            TodayHorizon::Today => TodayHorizon::Tomorrow,
+            TodayHorizon::Tomorrow => TodayHorizon::Week,
+            TodayHorizon::Week => TodayHorizon::Month,
+            TodayHorizon::Month => TodayHorizon::Today,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            TodayHorizon::Today => "today",
+            TodayHorizon::Tomorrow => "+tomorrow",
+            TodayHorizon::Week => "+this week",
+            TodayHorizon::Month => "+this month",
+        }
+    }
+
+    /// End of the horizon (inclusive) as epoch seconds, relative to the
+    /// anchored day (its day-start). `Week` is always the next 7 days from
+    /// the anchored day. `Month` goes up to not including the next matching
+    /// day of the next month (or end of next month).
+    pub fn end_epoch(&self, day_start: i64) -> i64 {
+        match self {
+            TodayHorizon::Today => date::day_end(day_start),
+            TodayHorizon::Tomorrow => date::day_end(date::shift_days(day_start, 1)),
+            TodayHorizon::Week => date::day_end(date::shift_days(day_start, 6)),
+            TodayHorizon::Month => date::month_horizon_end(day_start),
+        }
+    }
+
+    /// The horizon as an inclusive civil-seconds range: the anchored day
+    /// through the horizon's last calendar day, `00:00:00`..=`23:59:59` on
+    /// the recorded wall clock. Distinct from [`Self::end_epoch`], which is
+    /// the absolute range used for task schedules.
+    pub fn civil_range(&self, day_start: i64) -> date::CivilRange {
+        let Ok(anchored) = date::zoned_from_unix_secs(day_start) else {
+            return date::CivilRange {
+                start: day_start,
+                end: self.end_epoch(day_start),
+            };
+        };
+        let start = anchored.date();
+        let end = match self {
+            TodayHorizon::Today => Some(start),
+            TodayHorizon::Tomorrow => date::zoned_from_unix_secs(date::shift_days(day_start, 1))
+                .ok()
+                .map(|z| z.date()),
+            TodayHorizon::Week => date::zoned_from_unix_secs(date::shift_days(day_start, 6))
+                .ok()
+                .map(|z| z.date()),
+            TodayHorizon::Month => date::zoned_from_unix_secs(date::month_horizon_end(day_start))
+                .ok()
+                .map(|z| z.date()),
+        }
+        .unwrap_or(start);
+        date::CivilRange::from_dates(start, end).unwrap_or(date::CivilRange {
+            start: day_start,
+            end: self.end_epoch(day_start),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskRef {
+    Pick,
+    Id(i64),
+    Words(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Entry {
+    pub mood: String,
+    // Raw tracker values ("-type value"): interpreted per the tracker's
+    // declared kind (text/number/float/null) at write time in handle_entry.
+    pub trackers: Vec<(String, String)>,
+    /// Optional task reference (`+[id]` / `+[words]` / bare `+` to pick):
+    /// resolved to one task row and linked to the mood entry at write time
+    /// (a plain link via `mood.todo_id`, not a completion). At most one per
+    /// entry.
+    pub task_ref: Option<TaskRef>,
+    /// Completion delta carried by a nonempty `+<ref>` followed by a plain
+    /// numeric word (`+7 2`, `good +task 3`): applied to the resolved task.
+    /// A bare `+` never takes a payload; without a payload the ref is a link only.
+    pub count: Option<i32>,
+    /// Body text: `Ok(text)` when words followed the body delimiter; `Err(n)`
+    /// when the delimiter was bare or absent — `n` is the delimiter's dot
+    /// count (0 = no delimiter). `Err(n > 0)` opens the body editor in the
+    /// handler with the `n`th template (1-based; see `open_editor_for_body`).
+    pub body: Result<String, usize>,
+    /// Session duration in seconds when logged as a timed mood session (`%<duration>`).
+    pub duration: Option<i64>,
+    /// Optional session purpose (`im %<duration> [purpose..]`).
+    pub purpose: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Task {
+    pub task_type: TaskKind,
+    pub name: Option<String>,
+    pub priority: Option<i32>,
+    /// Start/due time for oneshot and scheduled creations (`+ name @<time>`),
+    /// resolved to an epoch at CLI parse time (`DATE_DIALECT`).
+    pub date: Option<Epoch>,
+    /// Body text: `Ok(text)` when words followed the body delimiter; `Err(n)`
+    /// when the delimiter was bare or absent — `n` is the delimiter's dot
+    /// count (0 = no delimiter). `Err(n > 0)` opens the body editor in the
+    /// handler with the `n`th template (1-based; see `open_editor_for_body`).
+    pub body: Result<String, usize>,
+    /// Pre-filled name for interactive recurring creation
+    /// (`im + % [interval] :<name>`), like oneshot creation where the
+    /// name comes from the command line. `Some` always implies creation.
+    pub prefill: Option<String>,
+    /// Parent task reference from `im +<ref> <name>`; `None` for a
+    /// root-level task. Resolved to a row id at creation time.
+    pub parent: Option<TaskRef>,
+    /// Available duration in seconds for scheduled creation
+    /// (`+ @<time> … %<duration>`); carried into the interactive flow so the
+    /// duration prompt can be skipped when it came from the command line.
+    pub available_duration: Option<Epoch>,
+    /// Recurrence interval prefill for interactive recurring creation
+    /// (`+ %<interval> [:<name>]`), validated at CLI parse time and kept in its
+    /// original form so calendar units (`1 month`) survive into the flow.
+    /// `None` on a bare `+ %`, which prompts for the interval.
+    pub interval: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_today_horizon_cycle_and_labels() {
+        assert_eq!(TodayHorizon::Today.next(), TodayHorizon::Tomorrow);
+        assert_eq!(TodayHorizon::Tomorrow.next(), TodayHorizon::Week);
+        assert_eq!(TodayHorizon::Week.next(), TodayHorizon::Month);
+        assert_eq!(TodayHorizon::Month.next(), TodayHorizon::Today);
+
+        assert_eq!(TodayHorizon::Today.label(), "today");
+        assert_eq!(TodayHorizon::Tomorrow.label(), "+tomorrow");
+        assert_eq!(TodayHorizon::Week.label(), "+this week");
+        assert_eq!(TodayHorizon::Month.label(), "+this month");
+    }
+
+    #[test]
+    fn civil_range_is_calendar_based() {
+        // A 23-hour local day still has 24 hours of civil seconds.
+        let day = date::parse_datetime("2026-03-08 00:00", date::DATE_DIALECT).unwrap();
+        let today = TodayHorizon::Today.civil_range(day);
+        assert_eq!(today.end - today.start, 86_399);
+        let week = TodayHorizon::Week.civil_range(day);
+        assert_eq!(week.end - week.start, 7 * 86_400 - 1);
+        assert!(week.contains(today.end + 86_400));
+    }
+}

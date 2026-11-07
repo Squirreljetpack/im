@@ -1,0 +1,29 @@
+# Mood-to-color anchors, imported by the config's `[moods] source` field.
+# `source` is relative to the config directory; point it here (or at your
+# own copy) to customize the anchor set. One `[[pairs]]` entry per mood.
+#
+# Color format: #RRGGBB hex, rgb_(r,g,b), or a named crossterm color.
+
+[[pairs]]
+mood = "happy"
+color = "#a5f69c"
+
+[[pairs]]
+mood = "sad"
+color = "#00327f"
+
+[[pairs]]
+mood = "drained"
+color = "#495057"
+
+[[pairs]]
+mood = "charged"
+color = "#FF3D00"
+
+[[pairs]]
+mood = "passive"
+color = "#9370DB"
+
+[[pairs]]
+mood = "purposeful"
+color = "#FFC107"

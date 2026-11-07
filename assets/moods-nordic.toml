@@ -1,0 +1,137 @@
+# moods-nordic.toml — Scandinavian twilight & boreal landscape mood palette variant.
+#
+# Evokes glacial fjords, mist, lingonberry, pine shadow, birch gray, and pale winter sun.
+# Cool, atmospheric, serene, and grounded.
+# Use in config.toml with: [moods] source = "moods-nordic.toml"
+
+[[pairs]]
+mood = "happy"
+color = "#d4b46a"
+
+[[pairs]]
+mood = "sad"
+color = "#466b99"
+
+[[pairs]]
+mood = "drained"
+color = "#535e6b"
+
+[[pairs]]
+mood = "energetic"
+color = "#bf5054"
+
+[[pairs]]
+mood = "thoughtful"
+color = "#6a5d85"
+
+[[pairs]]
+mood = "purposeful"
+color = "#a88d51"
+
+[[pairs]]
+mood = "passive"
+color = "#61798f"
+
+[[pairs]]
+mood = "frustrated"
+color = "#a63e48"
+
+[[pairs]]
+mood = "neutral"
+color = "#6d7680"
+
+[[pairs]]
+mood = "nostalgic"
+color = "#99685a"
+
+[[pairs]]
+mood = "humble"
+color = "#5e7069"
+
+[[pairs]]
+mood = "secure"
+color = "#3b4a63"
+
+[[pairs]]
+mood = "pained"
+color = "#8f2b33"
+
+[[pairs]]
+mood = "comfortable"
+color = "#477d85"
+
+[[pairs]]
+mood = "guarded"
+color = "#385257"
+
+[[pairs]]
+mood = "vulnerable"
+color = "#806385"
+
+[[pairs]]
+mood = "isolated"
+color = "#2f4061"
+
+[[pairs]]
+mood = "sociable"
+color = "#b8685e"
+
+[[pairs]]
+mood = "connected"
+color = "#396657"
+
+[[pairs]]
+mood = "confused"
+color = "#54466b"
+
+[[pairs]]
+mood = "lucid"
+color = "#85a396"
+
+[[pairs]]
+mood = "proud"
+color = "#784f7a"
+
+[[pairs]]
+mood = "let down"
+color = "#3f4b66"
+
+[[pairs]]
+mood = "engrossed"
+color = "#80857a"
+
+[[pairs]]
+mood = "disgusted"
+color = "#475440"
+
+[[pairs]]
+mood = "satiated"
+color = "#b3834b"
+
+[[pairs]]
+mood = "hungry"
+color = "#a63a35"
+
+[[pairs]]
+mood = "bereaved"
+color = "#384052"
+
+[[pairs]]
+mood = "vengeful"
+color = "#781f28"
+
+[[pairs]]
+mood = "fearful"
+color = "#465a63"
+
+[[pairs]]
+mood = "smitten"
+color = "#b8607c"
+
+[[pairs]]
+mood = "optimistic"
+color = "#dec066"
+
+[[pairs]]
+mood = "envious"
+color = "#4a5e38"

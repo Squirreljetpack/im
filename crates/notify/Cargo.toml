@@ -1,0 +1,36 @@
+[package]
+name = "notify"
+description = "Tiny cross-platform toast and dialogue notification library and CLI with audio support"
+version = "0.1.0"
+edition.workspace = true
+repository.workspace = true
+homepage.workspace = true
+license = "MIT"
+
+[[bin]]
+name = "notify"
+path = "src/main.rs"
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+humantime = "2"
+notify-rust = "4"
+serde = { version = "1", features = ["derive"], optional = true }
+thiserror = "2"
+
+[target.'cfg(not(target_env = "musl"))'.dependencies]
+rodio = { version = "0.23", default-features = false, features = [
+  "playback",
+  "flac",
+  "mp3",
+  "mp4",
+  "vorbis",
+  "wav",
+] }
+
+[package.metadata.workspaces]
+independent = true
