@@ -1,0 +1,137 @@
+# moods-bloom.toml — Botanical watercolor & woodblock harmony mood palette variant.
+#
+# Evokes wisteria twilight, camellia scarlet, matcha green, persimmon, and lotus pond.
+# Soft, natural, poetic, and refined.
+# Use in config.toml with: [moods] source = "moods-bloom.toml"
+
+[[pairs]]
+mood = "happy"
+color = "#c7a356"
+
+[[pairs]]
+mood = "sad"
+color = "#536e94"
+
+[[pairs]]
+mood = "drained"
+color = "#666166"
+
+[[pairs]]
+mood = "energetic"
+color = "#ba5c54"
+
+[[pairs]]
+mood = "thoughtful"
+color = "#7c638c"
+
+[[pairs]]
+mood = "purposeful"
+color = "#b3884b"
+
+[[pairs]]
+mood = "passive"
+color = "#6b8294"
+
+[[pairs]]
+mood = "frustrated"
+color = "#9e4456"
+
+[[pairs]]
+mood = "neutral"
+color = "#7a726d"
+
+[[pairs]]
+mood = "nostalgic"
+color = "#996b61"
+
+[[pairs]]
+mood = "humble"
+color = "#64705c"
+
+[[pairs]]
+mood = "secure"
+color = "#4b4561"
+
+[[pairs]]
+mood = "pained"
+color = "#87363e"
+
+[[pairs]]
+mood = "comfortable"
+color = "#4f8280"
+
+[[pairs]]
+mood = "guarded"
+color = "#415754"
+
+[[pairs]]
+mood = "vulnerable"
+color = "#8f6089"
+
+[[pairs]]
+mood = "isolated"
+color = "#3a4a6b"
+
+[[pairs]]
+mood = "sociable"
+color = "#b56f60"
+
+[[pairs]]
+mood = "connected"
+color = "#46785c"
+
+[[pairs]]
+mood = "confused"
+color = "#664b73"
+
+[[pairs]]
+mood = "lucid"
+color = "#7a9668"
+
+[[pairs]]
+mood = "proud"
+color = "#8f4a7c"
+
+[[pairs]]
+mood = "let down"
+color = "#4d536e"
+
+[[pairs]]
+mood = "engrossed"
+color = "#827c68"
+
+[[pairs]]
+mood = "disgusted"
+color = "#525c40"
+
+[[pairs]]
+mood = "satiated"
+color = "#b07a46"
+
+[[pairs]]
+mood = "hungry"
+color = "#9c4238"
+
+[[pairs]]
+mood = "bereaved"
+color = "#423d4c"
+
+[[pairs]]
+mood = "vengeful"
+color = "#7a2632"
+
+[[pairs]]
+mood = "fearful"
+color = "#50615e"
+
+[[pairs]]
+mood = "smitten"
+color = "#ba6d82"
+
+[[pairs]]
+mood = "optimistic"
+color = "#d19a4d"
+
+[[pairs]]
+mood = "envious"
+color = "#4a6142"

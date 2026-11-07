@@ -1,0 +1,21 @@
+name = "im-sync"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+# One Durable Object per user (`env.USER_DO.idFromName(user_id)`); its SQLite
+# storage holds that user's append-only sync log.
+[[durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserSyncDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserSyncDO"]
+
+# User accounts. `wrangler dev` keeps a local copy of this database under
+# `.wrangler/state`; deploys use the D1 instance below.
+[[d1_databases]]
+binding = "AUTH_DB"
+database_name = "im-sync-auth"
+database_id = "f1303edc-22de-4a34-aa12-0b2f51cd181c"
+migrations_dir = "migrations"

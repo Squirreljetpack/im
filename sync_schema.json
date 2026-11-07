@@ -1,0 +1,70 @@
+{
+  "$comment": "Sync schema: the rules both sides obey. Rust reads it at compile time, the worker imports it at runtime. A field's class is its SQLite storage class; `link` names the kind it must point at; `immutable` means the cell may be written once, at create. `protocol` versions the envelope and `version` the cell vocabulary: bump either whenever the envelope or a kind, field, class, link or cascade changes, because a client and a server that disagree refuse to sync. That is deliberate — a peer that silently skipped what it could not read would advance its cursor past it. `test/schema.test.ts` pins the vocabulary to `version`, so forgetting the bump fails CI.",
+  "protocol": 1,
+  "version": 4,
+  "kinds": {
+    "task": {
+      "table": "todos",
+      "fields": {
+        "name": { "class": "text", "required": true },
+        "body": { "class": "text" },
+        "priority": { "class": "int" },
+        "start_time": { "class": "int", "required": true },
+        "available_duration_secs": { "class": "int" },
+        "interval_secs": { "class": "int" },
+        "target_count": { "class": "int" },
+        "optional": { "class": "int" },
+        "end_time": { "class": "int" },
+        "parent_id": { "class": "text", "column": "parent", "link": "task" }
+      },
+      "cascade": [
+        { "kind": "task", "field": "parent_id", "action": "set_null" },
+        { "kind": "mood", "field": "todo_id", "action": "set_null" },
+        { "kind": "completion", "field": "todo_id", "action": "delete" }
+      ],
+      "subkind": {
+        "default": "oneshot",
+        "from": [
+          ["interval_secs", "recurring"],
+          ["available_duration_secs", "scheduled"]
+        ]
+      }
+    },
+    "mood": {
+      "table": "mood",
+      "fields": {
+        "mood": { "class": "text", "required": true },
+        "body": { "class": "text" },
+        "time": { "class": "int" },
+        "tz_offset": { "class": "int", "required": true },
+        "location": { "class": "text", "required": true },
+        "duration": { "class": "int" },
+        "todo_id": { "class": "text", "link": "task" }
+      },
+      "cascade": [{ "kind": "tracker", "field": "mood_id", "action": "set_null" }]
+    },
+    "tracker": {
+      "table": "tracker",
+      "fields": {
+        "type": { "class": "text", "required": true, "immutable": true },
+        "score": { "class": "scalar", "required": true },
+        "time": { "class": "int", "required": true, "immutable": true },
+        "tz_offset": { "class": "int", "required": true, "immutable": true },
+        "location": { "class": "text", "required": true, "immutable": true },
+        "mood_id": { "class": "text", "column": "mood", "link": "mood" }
+      },
+      "cascade": []
+    },
+    "completion": {
+      "table": "todo_completions",
+      "fields": {
+        "todo_id": { "class": "text", "required": true, "link": "task" },
+        "time": { "class": "int" },
+        "tz_offset": { "class": "int", "required": true },
+        "location": { "class": "text", "required": true },
+        "count": { "class": "int" }
+      },
+      "cascade": []
+    }
+  }
+}

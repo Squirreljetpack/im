@@ -1,0 +1,61 @@
+pub mod badge;
+pub mod cli;
+pub mod color;
+pub mod commands;
+pub mod config;
+pub mod date;
+pub mod db;
+pub mod editor;
+pub mod global;
+pub mod logger;
+pub use notify;
+pub mod ort_compat;
+pub mod output;
+pub mod paths;
+pub mod prompts;
+pub mod sync;
+pub mod task;
+pub mod task_tree;
+pub mod task_view;
+pub mod today;
+pub mod tracker;
+pub mod types;
+pub mod ui;
+pub mod utils;
+
+pub async fn run_app() {
+    use cba::{_dbg, bog};
+    use cba::{bo::load_type_or_default, bog::BogOkExt};
+
+    bog::init_bogger(true, false);
+
+    prompts::install_theme();
+
+    let cli = cli::parse_args().__ebog();
+
+    let [q, v] = cli.opts.qv;
+    logger::init_logger([q, 1 + v], paths::log_path());
+
+    let mut config: config::Config =
+        load_type_or_default(paths::default_config_path(), None, |s| toml::from_str(s));
+    config.init();
+
+    let tui = atty::is(atty::Stream::Stdout);
+
+    // An unreadable database is quarantined and replaced inside
+    // `init_database` (§4.4); anything else is fatal.
+    let db_path = paths::database_path();
+    let pool = db::init_database(db_path).await.__ebog();
+    crate::global::set_pool(pool.clone());
+
+    let result = commands::execute_command(
+        cli.cmd,
+        &pool,
+        &config,
+        &cli.opts,
+        &mut std::io::stdout(),
+        tui,
+    )
+    .await;
+    _dbg!(result).__ebog()
+}

@@ -1,0 +1,93 @@
+[env]
+# clang defaults the deployment target to the build host's SDK, so a newer
+# macOS runner image would silently raise the floor of the shipped binaries.
+MACOSX_DEPLOYMENT_TARGET = "14.0"
+# ONNX models recurse deeper than
+# the default 8 MiB test-thread stack; without this the test suite aborts with
+# a stack overflow as soon as any embedding is computed.
+RUST_MIN_STACK = "33554432"
+
+# Deprecated
+# NLI_MODEL = "xtremedistil"
+# NLI_MODEL = "deberta"
+# NLI_MODEL = "ettinx"
+
+EMBED_MODEL = "nomic"
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=-crt-static"]
+
+# ---------------------------------------------------------------------------
+# Aliases. The `@` prefix keeps these task names clear of cargo's own
+# subcommands, so `cargo @sync-deploy` cannot be confused with a real verb.
+# ---------------------------------------------------------------------------
+[alias]
+
+# Publish `crates/jiff-english` to crates.io (`cargo publish -p jiff-english`).
+# It is the workspace's only publishable crate: `im` ships as a binary and
+# `crates/im-dynamic` is internal. Its version is its own (`0.0.3`, not the
+# workspace's), so bump it there before running this.
+"@publish" = "publish -p jiff-english"
+
+# The pty suites: `tests/today_tui.rs` and `tests/integration.rs` spawn the
+# real binary behind a pty and type at it, so every case wants to own the
+# terminal and the debug state it drives. `--test-threads 1` is part of the
+# command rather than a preference — the default parallel harness runs cases
+# against each other and the suite panics.
+"@tui-tests" = "test --test today_tui --test integration -- --test-threads 1"
+
+# --- sync server (sync-server/) ---
+# A Cloudflare Worker (`im-sync`) that authenticates a bearer token, keeps
+# accounts in the D1 database `im-sync-auth`, and gives each user one
+# append-only log in a Durable Object. It and the Rust client both read
+# `sync_schema.json`, whose `protocol` and `version` are compared on every push,
+# so the aliases below ship the two together.
+
+# Check the worker: `tsc --noEmit` over `src/` and `test/`, then the vitest suite
+# running *inside workerd* — the same
+# V8 runtime Cloudflare's edge uses, with a real local D1 and DO storage — so
+# bindings and storage behave as they do in production rather than being mocked.
+# Everything the tests drive is the worker itself: DO logic, cell merging,
+# superseded cells, the cursor refusals, 409 bodies, and `test/schema.test.ts`,
+# which pins each vocabulary version in `sync_schema.json` to the digest of its
+# `kinds`, so a kind or field edited without bumping `version` fails here.
+# The tests call `exports.default.fetch` directly, so they prove the worker is
+# correct but say nothing about the Rust client; `@sync-e2e` is the other half.
+"@sync-test" = ["exec", "-s", "cd sync-server && npx tsc --noEmit && npx vitest run"]
+
+# Serve the worker for local work (`wrangler dev`): `main = src/index.ts`
+# bundled on the fly, a local copy of the D1 and DO storage under
+# `sync-server/.wrangler/state`, secrets from `sync-server/.dev.vars`. Point the
+# client's `[sync] server` at http://localhost:8787 to click through a sync by
+# hand; `tests/sync_integration.rs` starts its own instance the same way.
+"@sync-dev" = ["exec", "-s", "cd sync-server && npx wrangler dev"]
+
+# Ship this checkout to Cloudflare. `npm test` runs first (`wrangler types` then
+# the vitest suite), so an unbumped vocabulary cannot leave the machine; then
+# `wrangler deploy` uploads the worker, its `UserSyncDO` migration tag and the
+# `AUTH_DB` binding to https://im-sync.squirreljetpacks.workers.dev. Needs a
+# logged-in wrangler. The account is cached per project in
+# `node_modules/.cache/wrangler/wrangler-account.json`; a cache naming an
+# account the token cannot reach fails every remote call with code 7403, and
+# deleting that file makes wrangler re-resolve it from the token.
+"@sync-deploy" = ["exec", "-s", "cd sync-server && npm test && npx wrangler deploy"]
+
+# Apply `sync-server/migrations/*.sql` to the deployed D1 (`AUTH_DB --remote`):
+# the `users` table. A worker without it authenticates nobody. `wrangler dev`
+# reads its own local copy under `.wrangler/state`, so local work needs nothing
+# here; this touches the live database, and the file names are recorded in
+# `d1_migrations` so each one applies once.
+"@sync-migrate" = ["exec", "-s", "cd sync-server && npx wrangler d1 migrations apply AUTH_DB --remote"]
+
+# The other half of the same contract: `tests/sync_integration.rs` boots a real
+# `wrangler dev` worker on a free port with temp D1/DO state, then drives two
+# device databases through push, pull, conflicts, refusals and `--reset` over
+# HTTP. Where `@sync-test` asks "is the worker right?", this asks "do the worker
+# and the Rust client still agree?" — it is the only check that runs the actual
+# client against the actual server, so it catches wire drift (JSON shapes,
+# `Cursor` encode/parse, headers, verdict counts) that each side's own tests
+# pass while disagreeing with the other. Slowest of the two by far; nothing
+# reaches Cloudflare. Needs `sync-server/node_modules` installed.
+"@sync-e2e" = "test --test sync_integration"
+
+

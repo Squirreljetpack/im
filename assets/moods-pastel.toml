@@ -1,0 +1,137 @@
+# moods-pastel.toml — Soft pastel & Ayu-adjacent mood palette variant.
+#
+# Evokes warm apricot glow, soft periwinkle, lavender mist, mint seafoam,
+# and buttercup gold. Light, airy, delicate, and soothing on dark backgrounds.
+# Use in config.toml with: [moods] source = "moods-pastel.toml"
+
+[[pairs]]
+mood = "happy"
+color = "#ffd580"
+
+[[pairs]]
+mood = "sad"
+color = "#8faad4"
+
+[[pairs]]
+mood = "drained"
+color = "#8c929e"
+
+[[pairs]]
+mood = "energetic"
+color = "#ffaa6b"
+
+[[pairs]]
+mood = "thoughtful"
+color = "#cfa6e6"
+
+[[pairs]]
+mood = "purposeful"
+color = "#f2bf63"
+
+[[pairs]]
+mood = "passive"
+color = "#94b8c7"
+
+[[pairs]]
+mood = "frustrated"
+color = "#d9778c"
+
+[[pairs]]
+mood = "neutral"
+color = "#c4beb5"
+
+[[pairs]]
+mood = "nostalgic"
+color = "#d9987e"
+
+[[pairs]]
+mood = "humble"
+color = "#b5b394"
+
+[[pairs]]
+mood = "secure"
+color = "#7f688a"
+
+[[pairs]]
+mood = "pained"
+color = "#bf5c5c"
+
+[[pairs]]
+mood = "comfortable"
+color = "#8fe3c9"
+
+[[pairs]]
+mood = "guarded"
+color = "#617d85"
+
+[[pairs]]
+mood = "vulnerable"
+color = "#df8cc4"
+
+[[pairs]]
+mood = "isolated"
+color = "#627291"
+
+[[pairs]]
+mood = "sociable"
+color = "#f59387"
+
+[[pairs]]
+mood = "connected"
+color = "#88cf9b"
+
+[[pairs]]
+mood = "confused"
+color = "#9b7ea6"
+
+[[pairs]]
+mood = "lucid"
+color = "#bdf0c0"
+
+[[pairs]]
+mood = "proud"
+color = "#e88bba"
+
+[[pairs]]
+mood = "let down"
+color = "#79769e"
+
+[[pairs]]
+mood = "engrossed"
+color = "#dedcd0"
+
+[[pairs]]
+mood = "disgusted"
+color = "#595b43"
+
+[[pairs]]
+mood = "satiated"
+color = "#e0bd58"
+
+[[pairs]]
+mood = "hungry"
+color = "#cf6751"
+
+[[pairs]]
+mood = "bereaved"
+color = "#474559"
+
+[[pairs]]
+mood = "vengeful"
+color = "#8a3b45"
+
+[[pairs]]
+mood = "fearful"
+color = "#698080"
+
+[[pairs]]
+mood = "smitten"
+color = "#f29bb7"
+
+[[pairs]]
+mood = "optimistic"
+color = "#ffe07a"
+
+[[pairs]]
+mood = "envious"
+color = "#9ebd52"

@@ -1,0 +1,137 @@
+# moods-jewel.toml — Luminous gemstone & nocturne mood palette variant.
+#
+# Evokes deep royal sapphire, ruby garnet, velvet amethyst, warm topaz, and dark emerald.
+# Luminous, rich, highly distinct, and jewel-toned on dark backgrounds.
+# Use in config.toml with: [moods] source = "moods-jewel.toml"
+
+[[pairs]]
+mood = "happy"
+color = "#d9a638"
+
+[[pairs]]
+mood = "sad"
+color = "#335ca8"
+
+[[pairs]]
+mood = "drained"
+color = "#4d4d5c"
+
+[[pairs]]
+mood = "energetic"
+color = "#c7423e"
+
+[[pairs]]
+mood = "thoughtful"
+color = "#7b4db3"
+
+[[pairs]]
+mood = "purposeful"
+color = "#c48927"
+
+[[pairs]]
+mood = "passive"
+color = "#4a7099"
+
+[[pairs]]
+mood = "frustrated"
+color = "#b02a45"
+
+[[pairs]]
+mood = "neutral"
+color = "#696670"
+
+[[pairs]]
+mood = "nostalgic"
+color = "#9c5443"
+
+[[pairs]]
+mood = "humble"
+color = "#546e54"
+
+[[pairs]]
+mood = "secure"
+color = "#3f356b"
+
+[[pairs]]
+mood = "pained"
+color = "#941e2a"
+
+[[pairs]]
+mood = "comfortable"
+color = "#2f878a"
+
+[[pairs]]
+mood = "guarded"
+color = "#2e5757"
+
+[[pairs]]
+mood = "vulnerable"
+color = "#944d99"
+
+[[pairs]]
+mood = "isolated"
+color = "#263970"
+
+[[pairs]]
+mood = "sociable"
+color = "#bf5b43"
+
+[[pairs]]
+mood = "connected"
+color = "#287a4d"
+
+[[pairs]]
+mood = "confused"
+color = "#5f2e82"
+
+[[pairs]]
+mood = "lucid"
+color = "#6bb382"
+
+[[pairs]]
+mood = "proud"
+color = "#a13587"
+
+[[pairs]]
+mood = "let down"
+color = "#373a6e"
+
+[[pairs]]
+mood = "engrossed"
+color = "#8c8260"
+
+[[pairs]]
+mood = "disgusted"
+color = "#4a572c"
+
+[[pairs]]
+mood = "satiated"
+color = "#bf782e"
+
+[[pairs]]
+mood = "hungry"
+color = "#b32c25"
+
+[[pairs]]
+mood = "bereaved"
+color = "#353757"
+
+[[pairs]]
+mood = "vengeful"
+color = "#8f1822"
+
+[[pairs]]
+mood = "fearful"
+color = "#3c5c63"
+
+[[pairs]]
+mood = "smitten"
+color = "#cc4780"
+
+[[pairs]]
+mood = "optimistic"
+color = "#e6a329"
+
+[[pairs]]
+mood = "envious"
+color = "#266336"

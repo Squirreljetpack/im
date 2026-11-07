@@ -1,0 +1,749 @@
+#![allow(clippy::derivable_impls)]
+
+use cba::{ebog, wbog};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+use crate::cli::FLAG_CHARACTERS;
+use crate::paths;
+
+#[cfg(debug_assertions)]
+pub const DEFAULT_CONFIG: &str = include_str!("../../assets/dev.toml");
+#[cfg(not(debug_assertions))]
+pub const DEFAULT_CONFIG: &str = include_str!("../../assets/config.toml");
+
+#[cfg(debug_assertions)]
+pub const DEFAULT_MOODS: &str = include_str!("../../assets/moods.dev.toml");
+#[cfg(not(debug_assertions))]
+pub const DEFAULT_MOODS: &str = include_str!("../../assets/moods.toml");
+
+pub const DEFAULT_TRACKER_COLORS: &str = include_str!("../../assets/colors.toml");
+
+mod types;
+pub use types::*;
+
+mod colors;
+pub use colors::*;
+
+mod moods;
+pub use moods::*;
+mod tasks;
+pub use tasks::*;
+mod trackers;
+pub use trackers::*;
+mod views;
+pub use views::*;
+mod sync;
+pub use sync::*;
+mod session;
+pub use session::*;
+
+/// The whole configuration file (`config.toml`). Every section is optional
+/// — a missing section or key falls back to a built-in default, so a config
+/// can be as small as a single `[tracker.sleep]` block.
+///
+/// Sections: `[moods]` (color settings; the anchor pairs live in the file
+/// named by `[moods] source`), `[tasks]` (defaults for new tasks, badge
+/// colors), `[tracker.<name>]` (trackers), `[grid]` (tracker grid
+/// ranges), `[tasks_view]` and `[today_view]` (view options), `[badges]`
+/// (row marker glyphs and colors), `[editor]` (body editor), `[sync]`
+/// (server URL).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    #[serde(default)]
+    pub moods: MoodConfig,
+
+    #[serde(default)]
+    pub tasks: TasksConfig,
+
+    #[serde(default)]
+    pub tracker: HashMap<String, TrackerSetting>,
+
+    #[serde(default)]
+    pub grid: GridViewConfig,
+
+    #[serde(default)]
+    pub preview: PreviewConfig,
+
+    #[serde(default)]
+    pub tasks_view: TasksViewConfig,
+
+    #[serde(default)]
+    pub today_view: TodayViewConfig,
+
+    #[serde(default)]
+    pub badges: BadgesConfig,
+
+    #[serde(default)]
+    pub editor: EditorConfig,
+
+    #[serde(default)]
+    pub sync: SyncConfig,
+
+    #[serde(default)]
+    pub session: SessionConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        toml::from_str(DEFAULT_CONFIG).expect("bundled assets/config.toml must parse into Config")
+    }
+}
+
+impl Config {
+    /// Normalize a loaded config before use: drop trackers whose
+    /// names cannot be addressed from the CLI, clear non-positive tracker
+    /// intervals (they would divide by zero when computing replacement
+    /// slots), and fall back to the default badge palette when fewer than
+    /// three colors are configured in `tasks.colors`. Run automatically at
+    /// startup, before any command is handled.
+    ///
+    /// The bundled default config never needs this; a user-edited config
+    /// may. See [`is_valid_tracker_name`] for the exact tracker-name rules.
+    pub fn init(&mut self) {
+        self.tracker.retain(|name, setting| {
+            // Drop trackers whose names are unusable: a `:` prefix collides
+            // with the grid-view `:` command, `-`/whitespace can't be
+            // addressed as `-name value`, names made purely of the flag
+            // characters (`q`/`v`) would be swallowed by the leading
+            // `-q`/`-v` flags, and purely numeric names collide with numeric
+            // completion counts and negative completion deltas.
+            if !is_valid_tracker_name(name) {
+                cba::ebog!(
+                    "config";
+                    "Dropping unusable tracker '{}': names cannot begin with ':', contain '-' or whitespace, be purely numeric, or consist solely of flag characters '{}'",
+                    name, FLAG_CHARACTERS
+                );
+                return false;
+            }
+            // Null trackers store no value; without an interval there is no
+            // slot to mark or display, so drop them.
+            if setting.kind == TrackerKind::Null && setting.interval.is_none() {
+                wbog!(
+                    "config";
+                    "Dropping null Tracker '{}': null trackers require an interval",
+                    name
+                );
+                return false;
+            }
+            // A zero interval span would break the calendar slot math, so
+            // clear it and warn (parse_span already rejects non-positive
+            // input, so this only guards hand-constructed values).
+            if setting
+                .interval
+                .is_some_and(|iv| crate::date::span_to_db(&iv.span) == 0)
+            {
+                ebog!(
+                    "config";
+                    "Ignoring zero interval setting on Tracker '{name}'"
+                );
+                setting.interval = None;
+            }
+            true
+        });
+        // Resolve every tracker's `colors` field against `colors.toml`.
+        self.resolve_tracker_colors();
+        // tasks.colors drives the completion badge; when fewer than 3
+        // colors are configured it falls back to the default palette.
+        if self.tasks.colors.len() < 3 {
+            wbog!(
+                "Less than 3 colors defined for config.tasks.colors, overriding with the default."
+            );
+            self.tasks.colors = Default::default();
+        }
+    }
+
+    /// Resolve the tracker color palettes against `colors.toml`.
+    ///
+    /// Each tracker's `colors` field is either an explicit `Ok(ColorBins)`
+    /// or an `Err(theme_name)` naming a palette in the colors file. The
+    /// file is loaded with `load_type_or_default`, so a missing or
+    /// unparsable file falls back to the bundled `colors.toml` (`ColorsFile`
+    /// `Default`). The effective default palette is the file's `default` key
+    /// when present and non-empty, otherwise the code-defined
+    /// `DEFAULT_TRACKER_PALETTE`. An `Err` theme missing or empty in the
+    /// file resolves to that default palette (with a warning unless the
+    /// theme was the implicit `default`); an explicit `Ok` palette that is
+    /// empty resolves to `DEFAULT_TRACKER_PALETTE`. A `text` tracker without
+    /// a palette of its own instead gets the single-color palette
+    /// `badges.default_text_tracker_color` — its badge color — since the
+    /// default palette is a binning ramp whose first entry is its darkest
+    /// bin. After this runs every `colors` field is `Ok` and non-empty.
+    fn resolve_tracker_colors(&mut self) {
+        let colors_file: ColorsFile =
+            cba::bo::load_type_or_default(paths::colors_path(), None, |s| toml::from_str(s));
+        // The default palette is the colors file's `default` key when present
+        // and non-empty; otherwise the code-defined `DEFAULT_TRACKER_PALETTE`.
+        let default_palette = colors_file.default_palette();
+        let text_tracker_color = self.badges.default_text_tracker_color;
+
+        for setting in self.tracker.values_mut() {
+            // Whether the palette is the tracker's own (an explicit list or a
+            // theme it names) rather than a fallback to the default ramp. The
+            // implicit `Err("default")` is an unset `colors` key.
+            let own_palette = match &setting.colors {
+                Ok(palette) => !palette.is_empty(),
+                Err(theme) if theme == "default" => false,
+                Err(theme) => colors_file.theme(theme).is_some(),
+            };
+            if setting.kind == TrackerKind::Text && !own_palette {
+                setting.colors = Ok(ColorBins::from(vec![text_tracker_color]));
+                continue;
+            }
+            let resolved: ColorBins = match &setting.colors {
+                // An explicit but empty list uses the code palette.
+                Ok(palette) if palette.is_empty() => {
+                    ColorBins::from(DEFAULT_TRACKER_PALETTE.to_vec())
+                }
+                Ok(palette) => palette.clone(),
+                Err(theme) => match colors_file.theme(theme) {
+                    Some(palette) => ColorBins::from(palette.clone()),
+                    None => {
+                        if theme != "default" {
+                            wbog!(
+                                "config";
+                                "colors theme '{}' not found (or empty): using default palette",
+                                theme
+                            );
+                        }
+                        default_palette.clone()
+                    }
+                },
+            };
+            setting.colors = Ok(resolved);
+        }
+    }
+}
+
+// Tracker-name validity for `Config::init`. A name is usable only when it
+// is non-empty, does not begin with `:` (grid-view command syntax), contains
+// no `-` or whitespace, is not made purely of the leading flag
+// characters (`q` / `v`), and is not purely numeric — `-123` would
+// collide with numeric completion counts and negative completion deltas.
+fn is_valid_tracker_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    if name.starts_with(':') {
+        return false;
+    }
+    if name.contains('-') || name.chars().any(char::is_whitespace) {
+        return false;
+    }
+    if name.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    !name.chars().all(|c| FLAG_CHARACTERS.contains(c))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn test_tracker_name_validation() {
+        assert_eq!(FLAG_CHARACTERS, "qvF");
+        // Valid names
+        assert!(is_valid_tracker_name("sleep"));
+        assert!(is_valid_tracker_name("run_times"));
+        assert!(is_valid_tracker_name("mood_notes"));
+        assert!(is_valid_tracker_name("query")); // 'q' inside a longer name is fine
+        assert!(is_valid_tracker_name("vibe"));
+        assert!(is_valid_tracker_name("flag")); // 'F' inside a longer name is fine
+        // ':' prefix collides with grid view specifiers
+        assert!(!is_valid_tracker_name(":foo"));
+        // forbid '-' or whitespace
+        assert!(!is_valid_tracker_name("sleep-time"));
+        assert!(!is_valid_tracker_name("my sleep"));
+        assert!(!is_valid_tracker_name("my\tsleep"));
+        // Names made purely of flag characters (q / v / F) are reserved
+        assert!(!is_valid_tracker_name("qv"));
+        assert!(!is_valid_tracker_name("F"));
+        assert!(!is_valid_tracker_name("Fqv"));
+        // Purely numeric names collide with completion counts / deltas
+        assert!(!is_valid_tracker_name("123"));
+        assert!(!is_valid_tracker_name("0"));
+        assert!(!is_valid_tracker_name(""));
+    }
+
+    #[test]
+    fn test_init_clears_zero_intervals() {
+        let mut config = Config::default();
+        let zero = TrackerInterval {
+            anchor: jiff::civil::date(2020, 1, 1).at(0, 0, 0, 0),
+            span: jiff::Span::new(),
+            cumulative: false,
+        };
+        config.tracker.insert(
+            "zero".to_string(),
+            TrackerSetting::new(TrackerKind::Float).with_interval(zero),
+        );
+        let good = TrackerInterval {
+            anchor: jiff::civil::date(2020, 1, 1).at(0, 0, 0, 0),
+            span: jiff::Span::new().days(1),
+            cumulative: false,
+        };
+        config.tracker.insert(
+            "good".to_string(),
+            TrackerSetting::new(TrackerKind::Float).with_interval(good),
+        );
+        config.init();
+
+        assert_eq!(config.tracker["zero"].interval, None);
+        assert_eq!(config.tracker["good"].interval, Some(good));
+    }
+
+    #[test]
+    fn test_init_drops_invalid_trackers() {
+        let mut config = Config::default(); // debug: assets/dev.toml trackers
+        for bad in [
+            ":collide",
+            "sleep-time",
+            "two words",
+            "q",
+            "v",
+            "qv",
+            "123",
+            "",
+        ] {
+            config
+                .tracker
+                .insert(bad.to_string(), TrackerSetting::default());
+        }
+        config.init();
+
+        for bad in [
+            ":collide",
+            "sleep-time",
+            "two words",
+            "q",
+            "v",
+            "qv",
+            "123",
+            "",
+        ] {
+            assert!(
+                !config.tracker.contains_key(bad),
+                "tracker {:?} should have been dropped",
+                bad
+            );
+        }
+        // The bundled dev.toml trackers survive untouched.
+        for good in [
+            "sleep",
+            "run_times",
+            "water",
+            "notes",
+            "steps",
+            "mood_notes",
+            "temperature",
+        ] {
+            assert!(
+                config.tracker.contains_key(good),
+                "tracker {:?} should survive init",
+                good
+            );
+        }
+    }
+
+    #[test]
+    fn test_init_resolves_tracker_colors() {
+        let mut config = Config::default();
+
+        // An empty explicit palette is unusable, so init resolves it to the
+        // default theme palette.
+        config.tracker.insert(
+            "bad_colors".to_string(),
+            TrackerSetting {
+                kind: TrackerKind::Integer,
+                colors: Ok(ColorBins::from(vec![])),
+                ..Default::default()
+            },
+        );
+        // Single- and two-color palettes are kept verbatim.
+        config.tracker.insert(
+            "one_color".to_string(),
+            TrackerSetting {
+                kind: TrackerKind::Integer,
+                colors: Ok(ColorBins::from(vec![crossterm::style::Color::DarkRed])),
+                ..Default::default()
+            },
+        );
+        config.tracker.insert(
+            "two_colors".to_string(),
+            TrackerSetting {
+                kind: TrackerKind::Integer,
+                colors: Ok(ColorBins::from(vec![
+                    crossterm::style::Color::DarkRed,
+                    crossterm::style::Color::DarkGreen,
+                ])),
+                ..Default::default()
+            },
+        );
+        // A 3-color palette is kept verbatim.
+        config.tracker.insert(
+            "good_colors".to_string(),
+            TrackerSetting {
+                kind: TrackerKind::Integer,
+                colors: Ok(ColorBins::from(vec![
+                    crossterm::style::Color::DarkRed,
+                    crossterm::style::Color::DarkYellow,
+                    crossterm::style::Color::DarkGreen,
+                ])),
+                ..Default::default()
+            },
+        );
+        // A tracker with no colors defaults to the `default` theme.
+        config.tracker.insert(
+            "no_colors".to_string(),
+            TrackerSetting {
+                kind: TrackerKind::Integer,
+                ..Default::default()
+            },
+        );
+        // A theme name missing from colors.toml resolves to the default
+        // theme palette.
+        config.tracker.insert(
+            "missing_theme".to_string(),
+            TrackerSetting {
+                kind: TrackerKind::Integer,
+                colors: Err("nonexistent".to_string()),
+                ..Default::default()
+            },
+        );
+
+        config.init();
+
+        // The default theme in the bundled colors.toml has 10 colors.
+        assert_eq!(config.tracker["bad_colors"].colors().len(), 10);
+        assert_eq!(config.tracker["one_color"].colors().len(), 1);
+        assert_eq!(config.tracker["two_colors"].colors().len(), 2);
+        assert_eq!(config.tracker["good_colors"].colors().len(), 3);
+        assert_eq!(config.tracker["no_colors"].colors().len(), 10);
+        assert_eq!(config.tracker["missing_theme"].colors().len(), 10);
+    }
+
+    #[test]
+    fn test_init_resolves_text_tracker_colors() {
+        let mut config = Config::default();
+
+        // A text tracker with a 2-color palette keeps it; the first color is
+        // the entry-badge color.
+        config.tracker.insert(
+            "multi_text".to_string(),
+            TrackerSetting {
+                kind: TrackerKind::Text,
+                colors: Ok(ColorBins::from(vec![
+                    crossterm::style::Color::DarkRed,
+                    crossterm::style::Color::DarkGreen,
+                ])),
+                ..Default::default()
+            },
+        );
+        // A single-color text override is kept verbatim.
+        config.tracker.insert(
+            "good_text".to_string(),
+            TrackerSetting {
+                kind: TrackerKind::Text,
+                colors: Ok(ColorBins::from(vec![crossterm::style::Color::DarkRed])),
+                ..Default::default()
+            },
+        );
+        // Non-text trackers are unaffected by the text rule.
+        config.tracker.insert(
+            "integer_multi".to_string(),
+            TrackerSetting {
+                kind: TrackerKind::Integer,
+                colors: Ok(ColorBins::from(vec![
+                    crossterm::style::Color::DarkRed,
+                    crossterm::style::Color::DarkGreen,
+                ])),
+                ..Default::default()
+            },
+        );
+        // A text tracker with no palette of its own takes the configured
+        // badge color instead of the default binning ramp.
+        config.tracker.insert(
+            "bare_text".to_string(),
+            TrackerSetting::new(TrackerKind::Text),
+        );
+        config.badges.default_text_tracker_color = crossterm::style::Color::Yellow;
+
+        config.init();
+
+        assert_eq!(config.tracker["multi_text"].colors().len(), 2);
+        assert_eq!(config.tracker["good_text"].colors().len(), 1);
+        assert_eq!(config.tracker["integer_multi"].colors().len(), 2);
+        assert_eq!(
+            config.tracker["bare_text"].colors().as_slice(),
+            [crossterm::style::Color::Yellow]
+        );
+        // The bundled config leaves the key unset, so it defaults to dark grey.
+        assert_eq!(
+            Config::default().badges.default_text_tracker_color,
+            crossterm::style::Color::DarkGrey
+        );
+    }
+
+    #[test]
+    fn test_init_replaces_small_tasks_colors() {
+        // Fewer than 3 colors in tasks.colors — both the empty and the
+        // single-color case — are replaced with the default palette.
+        for small in [
+            Vec::<crossterm::style::Color>::new(),
+            vec![crossterm::style::Color::DarkRed],
+        ] {
+            let mut config = Config::default();
+            config.tasks.colors = ColorBins::from(small);
+            config.init();
+            assert_eq!(config.tasks.colors.len(), 3);
+        }
+    }
+
+    #[test]
+    fn test_bundled_config_tracker_themes_resolve() {
+        // Every tracker in the bundled config (dev.toml under debug,
+        // config.toml under release) names a theme; init must resolve each
+        // to a non-empty palette from the bundled colors.toml.
+        let mut config = Config::default();
+        config.init();
+        for (name, setting) in &config.tracker {
+            assert!(
+                !setting.colors().is_empty(),
+                "tracker '{name}' resolved to an empty color palette"
+            );
+        }
+        #[cfg(debug_assertions)]
+        {
+            // dev.toml references these themes by name.
+            assert_eq!(config.tracker["sleep"].colors().len(), 9);
+            assert_eq!(config.tracker["temperature"].colors().len(), 10);
+            assert_eq!(config.tracker["notes"].colors().len(), 1);
+            assert_eq!(config.tracker["water"].colors().len(), 6);
+        }
+    }
+
+    #[test]
+    fn test_moods_settings_through_flatten() {
+        // Explicit settings are honored through the flatten.
+        let cfg: Config = toml::from_str(
+            "[moods]\nblend_steepness = 3.5\ntop_k = 8\nsource = \"my-moods.toml\"\nbackfill = true\n",
+        )
+        .expect("[moods] with settings parses");
+        assert_eq!(cfg.moods.axes.blend_steepness, 3.5);
+        assert_eq!(cfg.moods.axes.top_k, 8);
+        assert_eq!(cfg.moods.source, PathBuf::from("my-moods.toml"));
+        assert!(cfg.moods.backfill);
+
+        // Unknown keys under [moods] are rejected: `deny_unknown_fields` still
+        // holds through the flattened settings.
+        assert!(
+            toml::from_str::<Config>("[moods]\nbogus_key = 1\n").is_err(),
+            "unknown [moods] key must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_tracker_interval_serde() {
+        // The interval deserializes from the table form { anchor = ...,
+        // span = ..., cumulative = ? }; anchors are unzoned civil datetimes.
+        let cfg: Config = toml::from_str(
+            r#"
+            [tracker.sleep]
+            interval = { anchor = "2020-01-01T00:00:00", span = "1 day" }
+            kind = "null"
+            "#,
+        )
+        .expect("interval table parses");
+        let iv = cfg.tracker["sleep"].interval.expect("interval set");
+        assert_eq!(iv.anchor, jiff::civil::date(2020, 1, 1).at(0, 0, 0, 0));
+        assert_eq!(iv.span.fieldwise(), jiff::Span::new().days(1).fieldwise());
+        assert_eq!(cfg.tracker["sleep"].kind, TrackerKind::Null);
+
+        // The legacy two-element array form binds positionally (anchor,
+        // span) with cumulative defaulting to false.
+        let cfg_arr: Config = toml::from_str(
+            "[tracker.sleep]\ninterval = [\"2020-01-01T00:00:00\", \"1 day\"]\nkind = \"null\"\n",
+        )
+        .expect("interval array parses");
+        assert_eq!(cfg_arr.tracker["sleep"].interval.as_ref(), Some(&iv));
+
+        // Non-table, non-array forms (e.g. a plain string) are rejected,
+        // and unknown table keys error.
+        let err =
+            toml::from_str::<Config>("[tracker.sleep]\ninterval = \"1 day\"\nkind = \"float\"\n")
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("invalid type"),
+            "unexpected error: {err}"
+        );
+        let err = toml::from_str::<Config>(
+            "[tracker.sleep]\ninterval = { anchor = \"2020-01-01T00:00:00\", span = \"1 day\", bogus = 1 }\nkind = \"null\"\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field `bogus`"),
+            "unexpected error: {err}"
+        );
+
+        // A zoned anchor (trailing Z or numeric offset) is a hard config
+        // error: the anchor is a civil wall clock, not an instant.
+        for anchor in ["2020-01-01T00:00:00Z", "2020-01-01T00:00:00-04:00"] {
+            let err = toml::from_str::<Config>(&format!(
+                "[tracker.sleep]\ninterval = {{ anchor = \"{anchor}\", span = \"1 day\" }}\nkind = \"null\"\n"
+            ))
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("unzoned civil datetime"),
+                "expected a civil-anchor parse error for {anchor}, got: {err}"
+            );
+        }
+
+        // Serialization roundtrip (anchors serialize without a zone).
+        let serialized = toml::to_string(&cfg).unwrap();
+        let reparsed: Config = toml::from_str(&serialized).expect("re-parses");
+        let iv2 = reparsed.tracker["sleep"]
+            .interval
+            .expect("interval survives");
+        assert_eq!(iv, iv2);
+
+        // A zero span is rejected at parse time.
+        assert!(toml::from_str::<Config>(
+            "[tracker.sleep]\ninterval = { anchor = \"2020-01-01T00:00:00\", span = \"0 days\" }\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_init_drops_null_trackers_without_interval() {
+        let mut config = Config::default();
+        config.tracker.insert(
+            "loose_null".to_string(),
+            TrackerSetting::new(TrackerKind::Null),
+        );
+        config.init();
+        assert!(
+            !config.tracker.contains_key("loose_null"),
+            "null trackers without an interval are dropped at init"
+        );
+        // Bundled null trackers (sleep, awake) all have intervals and survive.
+        assert!(config.tracker.contains_key("sleep"));
+    }
+
+    #[test]
+    fn test_tracker_bounds_strict_per_kind() {
+        // Bound forms are strict per kind/mode: float/integer take plain
+        // numbers (integer whole only), duration takes duration strings,
+        // null replace takes duration strings (seconds-from-interval-start
+        // offsets), null cumulative takes plain whole numbers (count
+        // thresholds). Invalid forms are dropped with a warning, not errors.
+        let cfg: Config = toml::from_str(
+            r#"
+            [tracker.sleep]
+            kind = "null"
+            interval = { anchor = "2026-01-01T00:00:00", span = "1 day" }
+            low = "20h"
+            high = "4h"
+            [tracker.awake_count]
+            kind = "null"
+            interval = { anchor = "2026-01-01T00:00:00", span = "1 day", cumulative = true }
+            low = 0
+            high = 5
+            [tracker.rating]
+            kind = "float"
+            low = 0
+            high = 9
+            [tracker.pushups]
+            kind = "integer"
+            low = 10
+            [tracker.mile]
+            kind = "duration"
+            low = "4m"
+            high = "10m"
+            "#,
+        )
+        .expect("trackers parse");
+        assert_eq!(cfg.tracker["sleep"].low, Some(72000.0));
+        assert_eq!(cfg.tracker["sleep"].high, Some(14400.0));
+        assert_eq!(cfg.tracker["awake_count"].low, Some(0.0));
+        assert_eq!(cfg.tracker["awake_count"].high, Some(5.0));
+        assert_eq!(cfg.tracker["rating"].low, Some(0.0));
+        assert_eq!(cfg.tracker["rating"].high, Some(9.0));
+        assert_eq!(cfg.tracker["pushups"].low, Some(10.0));
+        assert_eq!(cfg.tracker["pushups"].high, None);
+        assert_eq!(cfg.tracker["mile"].low, Some(240.0));
+        assert_eq!(cfg.tracker["mile"].high, Some(600.0));
+
+        // Invalid bound forms are dropped with a warning: float "4h",
+        // integer 4.5 / "4h", duration bare 390, null+replace bare number,
+        // null+cumulative "4h".
+        let cfg: Config = toml::from_str(
+            r#"
+            [tracker.floaty]
+            kind = "float"
+            low = "4h"
+            high = 9
+            [tracker.wholey]
+            kind = "integer"
+            low = 4.5
+            high = "4h"
+            [tracker.timed]
+            kind = "duration"
+            low = 390
+            high = "10m"
+            [tracker.mark]
+            kind = "null"
+            interval = { anchor = "2026-01-01T00:00:00", span = "1 day" }
+            low = 20
+            high = "4h"
+            [tracker.counted]
+            kind = "null"
+            interval = { anchor = "2026-01-01T00:00:00", span = "1 day", cumulative = true }
+            low = "4h"
+            high = 5
+            "#,
+        )
+        .expect("trackers parse");
+        assert_eq!(cfg.tracker["floaty"].low, None); // "4h" dropped
+        assert_eq!(cfg.tracker["floaty"].high, Some(9.0)); // plain number kept
+        assert_eq!(cfg.tracker["wholey"].low, None); // 4.5 not whole
+        assert_eq!(cfg.tracker["wholey"].high, None); // "4h" dropped
+        assert_eq!(cfg.tracker["timed"].low, None); // bare 390 dropped
+        assert_eq!(cfg.tracker["timed"].high, Some(600.0));
+        assert_eq!(cfg.tracker["mark"].low, None); // bare number dropped for null replace
+        assert_eq!(cfg.tracker["mark"].high, Some(14400.0));
+        assert_eq!(cfg.tracker["counted"].low, None); // "4h" dropped for null cumulative
+        assert_eq!(cfg.tracker["counted"].high, Some(5.0));
+
+        // Text bounds without strict are dropped (message-length thresholds
+        // apply only with strict).
+        let cfg: Config = toml::from_str(
+            r#"
+            [tracker.thought]
+            kind = "text"
+            low = 10
+            high = 80
+            "#,
+        )
+        .expect("trackers parse");
+        assert_eq!(cfg.tracker["thought"].low, None);
+        assert_eq!(cfg.tracker["thought"].high, None);
+
+        // strict on null+cumulative (bounds are counts, not time) is dropped.
+        let cfg: Config = toml::from_str(
+            r#"
+            [tracker.counted]
+            kind = "null"
+            interval = { anchor = "2026-01-01T00:00:00", span = "1 day", cumulative = true }
+            low = 0
+            high = 5
+            strict = true
+            "#,
+        )
+        .expect("trackers parse");
+        assert!(!cfg.tracker["counted"].strict);
+    }
+}
