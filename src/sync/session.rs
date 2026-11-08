@@ -14,6 +14,7 @@ use sqlx::{Connection, SqliteConnection, SqlitePool};
 
 use super::apply::{self, Pending, Skip};
 use super::client::{Client, run_blocking};
+use super::crypto::{self, EncryptionKey};
 use super::events;
 use super::schema;
 use super::state;
@@ -91,12 +92,31 @@ impl Pull {
     }
 }
 
+/// Resolve the encryption key to use: a config override if present, else the
+/// stored account key.
+pub async fn resolve_key(
+    pool: &SqlitePool,
+    config: &crate::config::Config,
+) -> Result<EncryptionKey> {
+    if let Some(key) = crypto::encryption_key(config) {
+        return Ok(key);
+    }
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("Failed to acquire a db connection")?;
+    state::encryption_key(&mut conn)
+        .await?
+        .context("missing encryption key — run `im :sync login` or set `[sync] encryption_key`")
+}
+
 /// Push the outbox and apply one pull.
 pub async fn sync_once(
     pool: &SqlitePool,
     server: &str,
     timeout: Duration,
     slots: &TrackerSlots,
+    key: &EncryptionKey,
     pull: &mut Pull,
 ) -> Result<SyncReport> {
     let mut conn = pool
@@ -109,15 +129,18 @@ pub async fn sync_once(
     let device = state::device_id(&mut conn).await?;
 
     let batch = events::outbox(&mut conn).await?;
+    let outgoing = crypto::encrypt_events(&batch, key)?;
     let request = SyncRequest {
         protocol: schema::SCHEMA.protocol,
         schema: schema::SCHEMA.version,
         device_id: device,
+        key_id: key.key_id(),
         cursor: pull.cursor.clone(),
-        events: batch.clone(),
+        events: outgoing,
     };
     let client = Client::with_timeout(server, Some(token), timeout);
     let response: SyncResponse = run_blocking(move || client.sync(&request)).await?;
+    let response = crypto::decrypt_response(response, key, device)?;
 
     // One verdict per pushed event is the protocol's contract: without it this
     // device cannot tell which of its own writes were accepted, and retiring

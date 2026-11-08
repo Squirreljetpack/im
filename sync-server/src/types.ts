@@ -73,6 +73,7 @@ export interface SyncRequest {
   protocol: number;
   schema: number;
   device_id: string;
+  key_id?: string;
   /** Where this device has read to, in the log it names; `null` until a sync
    * names one. */
   cursor: CellCursor | null;
@@ -162,7 +163,7 @@ export function error(message: string, status: number): Response {
  *
  * These are not verdicts: no cell crossed in either direction.
  */
-export type RefusalCode = "log_mismatch" | "cursor_ahead" | "version_mismatch";
+export type RefusalCode = "log_mismatch" | "cursor_ahead" | "version_mismatch" | "key_mismatch";
 
 /** A 409 carrying the facts the client needs to explain the refusal. */
 export function refusal(

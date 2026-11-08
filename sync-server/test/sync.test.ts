@@ -119,12 +119,13 @@ async function sync(
   version: number,
   events: CellEvent[] = [],
   page?: number,
+  keyId?: string,
 ): Promise<SyncResponse & { verdictFor: (index: number) => Verdict }> {
   const query = page === undefined ? "" : `?page=${page}`;
   const response = await call(`/api/sync${query}`, {
     method: "POST",
     token,
-    body: request(token, device, version, events),
+    body: request(token, device, version, events, keyId),
   });
   expect(response.status).toBe(200);
   const body = (await response.json()) as SyncResponse;
@@ -142,6 +143,20 @@ async function sync(
   };
 }
 
+async function trySync(
+  token: string,
+  device: string,
+  version: number,
+  events: CellEvent[] = [],
+  keyId?: string,
+): Promise<Response> {
+  return call("/api/sync", {
+    method: "POST",
+    token,
+    body: request(token, device, version, events, keyId),
+  });
+}
+
 /**
  * The log each token was last told it is reading. A version alone is not a
  * position, so the helper always sends the name it learned from the response —
@@ -154,12 +169,14 @@ function request(
   device: string,
   version: number,
   events: CellEvent[],
+  keyId?: string,
 ): SyncRequest {
   const log = logs.get(token);
   return {
     protocol: PROTOCOL,
     schema: SCHEMA_VERSION,
     device_id: device,
+    ...(keyId !== undefined ? { key_id: keyId } : {}),
     cursor: log === undefined ? null : { log, version },
     events,
   };
@@ -1015,5 +1032,61 @@ describe("compatibility", () => {
       "name",
       "start_time",
     ]);
+  });
+
+  it("enforces e2ee key fingerprint and rejects unencrypted non-link cells", async () => {
+    const account = await register("e2ee-cells@example.com");
+    const taskId = "0193f000-0000-7000-8000-000000000095";
+    const encVal = { text: "e2e:v1:YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkw" };
+
+    // 1. With key_id = "key-a", plaintext non-link value is rejected with "class"
+    const plainResult = await sync(
+      account.token,
+      "device-a",
+      0,
+      [
+        cell(taskId, "task", "", { text: "live" }, ago(5000)),
+        cell(taskId, "task", "name", { text: "unencrypted plaintext" }, ago(5000)),
+        cell(taskId, "task", "start_time", encVal, ago(5000)),
+      ],
+      undefined,
+      "key-a",
+    );
+    expect(plainResult.verdicts[1].outcome).toBe("rejected");
+    expect(plainResult.verdicts[1].reason).toBe("class");
+
+    // 2. Encrypted non-link values with key_id = "key-a" are accepted and store key_id
+    const result = await sync(
+      account.token,
+      "device-a",
+      0,
+      [
+        cell(taskId, "task", "", { text: "live" }, ago(5000)),
+        cell(taskId, "task", "name", encVal, ago(5000)),
+        cell(taskId, "task", "start_time", encVal, ago(5000)),
+        cell(taskId, "task", "priority", encVal, ago(5000)),
+      ],
+      undefined,
+      "key-a",
+    );
+    expect(result.verdicts.every((v) => v.outcome === "accepted")).toBe(true);
+
+    // 3. Encrypted link field is rejected with "class"
+    const linkResult = await sync(
+      account.token,
+      "device-a",
+      0,
+      [cell(taskId, "task", "parent_id", encVal, ago(4000))],
+      undefined,
+      "key-a",
+    );
+    expect(linkResult.verdicts[0].outcome).toBe("rejected");
+    expect(linkResult.verdicts[0].reason).toBe("class");
+
+    // 4. A subsequent sync with mismatched key_id = "key-b" is refused with 409 key_mismatch
+    const mismatchRes = await trySync(account.token, "device-b", 0, [], "key-b");
+    expect(mismatchRes.status).toBe(409);
+    const mismatchBody = (await mismatchRes.json()) as { code: string; error: string };
+    expect(mismatchBody.code).toBe("key_mismatch");
   });
 });

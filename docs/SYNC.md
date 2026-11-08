@@ -2,7 +2,11 @@
 
 `im` is offline-first: each device writes to its own SQLite database, and
 `im :sync` exchanges the changed cells with a per-user Durable Object on
-Cloudflare (`sync-server/`). This is the runbook for exercising that path end to
+Cloudflare (`sync-server/`). Non-link cell values are end-to-end encrypted
+with a key derived from the user's email and password (so losing the password
+means server data cannot be decrypted), while entity IDs, link edges, timestamps,
+and nullability remain visible to the server so it can maintain the LWW register
+and cascades. This is the runbook for exercising that path end to
 end — against a real deployment (§1) and entirely on one machine with Miniflare
 (§2).
 
@@ -15,9 +19,8 @@ end — against a real deployment (§1) and entirely on one machine with Minifla
   defaults to `http://127.0.0.1:8787`. It is **not** stored with the account:
   signing in does not remember it. `IM_SYNC_URL` overrides the config for one
   command, so a stale export wins over the config.
-- Sync ships from v0.2.6 on; v0.2.5 and earlier predate it. A client from
-  v0.2.9 or earlier sends no version of its own, so a server that speaks
-  protocol 1 refuses it with `this server speaks sync protocol 1 and schema 4`.
+- A client and server must agree on protocol and schema versions; a server that speaks
+  protocol 2 refuses mismatched clients with `this server speaks sync protocol 2 and schema 4`.
   Upgrade the client; there is no compatibility mode.
 - A pre-sync database (v0.2.5) has INTEGER ids and is not migrated. Do not point
   a sync build at an old state dir; move the file aside first (appendix A).

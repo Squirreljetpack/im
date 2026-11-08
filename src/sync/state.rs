@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use sqlx::{SqliteConnection, SqlitePool};
 
 use super::client::Account;
+use super::crypto::EncryptionKey;
 use super::types::Cursor;
 use crate::db::Id;
 
@@ -49,21 +50,36 @@ pub async fn token(conn: &mut SqliteConnection) -> Result<Option<String>> {
         .context("Failed to read the session token")
 }
 
-/// Remember the account. A `None` user id keeps the one already stored (a
-/// device can be signed in with nothing but a token).
+pub async fn encryption_key(conn: &mut SqliteConnection) -> Result<Option<EncryptionKey>> {
+    let raw: Option<String> =
+        sqlx::query_scalar("SELECT encryption_key FROM _sync_account WHERE id = 1")
+            .fetch_optional(&mut *conn)
+            .await
+            .context("Failed to read the encryption key")?;
+    match raw {
+        Some(encoded) => Ok(Some(EncryptionKey::from_base64(&encoded)?)),
+        None => Ok(None),
+    }
+}
+
+/// Remember the account.
 pub async fn set_account(
     conn: &mut SqliteConnection,
     user_id: Option<&str>,
     token: &str,
+    encryption_key: &EncryptionKey,
 ) -> Result<()> {
+    let enc_b64 = encryption_key.to_base64();
     sqlx::query(
-        "INSERT INTO _sync_account (id, user_id, token) VALUES (1, ?, ?)
+        "INSERT INTO _sync_account (id, user_id, token, encryption_key) VALUES (1, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
              user_id = COALESCE(excluded.user_id, _sync_account.user_id),
-             token = excluded.token",
+             token = excluded.token,
+             encryption_key = excluded.encryption_key",
     )
     .bind(user_id)
     .bind(token)
+    .bind(enc_b64)
     .execute(&mut *conn)
     .await
     .context("Failed to store the synced account")?;
@@ -162,13 +178,13 @@ pub async fn reset_clock(conn: &mut SqliteConnection, stamp: i64) -> Result<()> 
 /// two accounts' histories.
 pub async fn store_account(pool: &SqlitePool, account: &Account) -> Result<()> {
     let mut conn = pool.acquire().await.context("Failed to acquire a db connection")?;
-    set_account(&mut conn, Some(&account.user_id), &account.token).await
-}
-
-/// Store a raw session token in `_sync_account`.
-pub async fn store_token(pool: &SqlitePool, token: &str) -> Result<()> {
-    let mut conn = pool.acquire().await.context("Failed to acquire a db connection")?;
-    set_account(&mut conn, None, token).await
+    set_account(
+        &mut conn,
+        Some(&account.user_id),
+        &account.token,
+        &account.encryption_key,
+    )
+    .await
 }
 
 /// The signed-in account's token, if any.

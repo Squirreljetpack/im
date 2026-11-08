@@ -13,4 +13,8 @@ pub struct SyncConfig {
     /// Unset means the local development server (`http://127.0.0.1:8787`);
     /// `IM_SYNC_URL` overrides this (for every `:sync` subcommand) per command.
     pub server: Option<String>,
+    /// Optional end-to-end encryption key override.
+    /// When set, this overrides the key derived from user credentials during login.
+    /// Every device syncing the account must configure the exact same key.
+    pub encryption_key: Option<String>,
 }

@@ -314,15 +314,14 @@ pub async fn create_schema(pool: &SqlitePool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
-    // Sync engine: the account this database is signed in to. One row; the
-    // user id is only known once a register/login returned it, so a database
-    // seeded with a token alone leaves it NULL until the first account write.
+    // Sync engine: the account this database is signed in to.
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS _sync_account (
-            id      INTEGER PRIMARY KEY CHECK (id = 1),
-            user_id TEXT,
-            token   TEXT NOT NULL
+            id             INTEGER PRIMARY KEY CHECK (id = 1),
+            user_id        TEXT,
+            token          TEXT NOT NULL,
+            encryption_key TEXT NOT NULL
         )
         "#,
     )

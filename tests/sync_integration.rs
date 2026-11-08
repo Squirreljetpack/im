@@ -11,10 +11,12 @@ use std::time::Duration;
 use im::db::{
     EntryObject, TaskObject, TrackerObject, TrackerValue, create_entry, create_task, test_pool,
 };
-use im::sync::client::Client;
+use im::sync::client::{Account, Client};
+use im::sync::crypto::{E2E_PREFIX, EncryptionKey};
 use im::sync::session;
 use im::sync::state;
 use im::sync::sync_once;
+use im::sync::types::CellValue;
 use im::tracker::TrackerSlots;
 use sqlx::{Row, SqlitePool};
 use tokio::sync::OnceCell;
@@ -131,7 +133,7 @@ async fn wait_until_ready(base: &str) {
 }
 
 /// Register an account and sign a fresh device database in to it.
-async fn device(name: &str) -> (SqlitePool, String) {
+async fn device(name: &str) -> (SqlitePool, Account) {
     let server = server().await;
     let email = format!("{name}@example.com");
     let account = Client::new(&server.base, None)
@@ -141,17 +143,25 @@ async fn device(name: &str) -> (SqlitePool, String) {
     state::store_account(&pool, &account)
         .await
         .expect("store the account");
-    (pool, account.token)
+    (pool, account)
 }
 
 /// A second device on the same account (what `im auth login` on another
 /// machine produces).
-async fn second_device(token: &str) -> SqlitePool {
+async fn second_device(account: &Account) -> SqlitePool {
     let pool = test_pool().await.expect("in-memory db");
-    state::store_token(&pool, token)
+    state::store_account(&pool, account)
         .await
-        .expect("seed the token");
+        .expect("seed the account");
     pool
+}
+
+async fn key_of(pool: &SqlitePool) -> EncryptionKey {
+    let mut conn = pool.acquire().await.unwrap();
+    state::encryption_key(&mut conn)
+        .await
+        .unwrap()
+        .expect("account encryption key")
 }
 
 async fn sync(pool: &SqlitePool) -> session::SyncReport {
@@ -161,12 +171,14 @@ async fn sync(pool: &SqlitePool) -> session::SyncReport {
 /// One round trip that may fail, for the cases where failing is the answer.
 async fn try_sync(pool: &SqlitePool) -> anyhow::Result<session::SyncReport> {
     let server = server().await;
+    let key = key_of(pool).await;
     let mut pull = session::Pull::resume(pool).await?;
     sync_once(
         pool,
         &server.base,
         SYNC_TIMEOUT,
         &TrackerSlots::default(),
+        &key,
         &mut pull,
     )
     .await
@@ -174,8 +186,9 @@ async fn try_sync(pool: &SqlitePool) -> anyhow::Result<session::SyncReport> {
 
 async fn sync_with(pool: &SqlitePool, slots: &TrackerSlots) -> session::SyncReport {
     let server = server().await;
+    let key = key_of(pool).await;
     let mut pull = session::Pull::resume(pool).await.expect("resume the pull");
-    sync_once(pool, &server.base, SYNC_TIMEOUT, slots, &mut pull)
+    sync_once(pool, &server.base, SYNC_TIMEOUT, slots, &key, &mut pull)
         .await
         .expect("sync")
 }
@@ -316,7 +329,7 @@ async fn auth_registers_logs_in_and_reports_status() {
 
 #[tokio::test]
 async fn a_new_task_replicates_to_the_other_device() {
-    let (device_a, token) = device("replicate").await;
+    let (device_a, account) = device("replicate").await;
     let (task, _) = create_task(&device_a, &task_object("replicated", ""))
         .await
         .unwrap();
@@ -324,7 +337,7 @@ async fn a_new_task_replicates_to_the_other_device() {
     assert!(report.pushed > 0, "the cells are pushed");
     assert!(report.skipped.is_empty(), "{:?}", report.skipped);
 
-    let device_b = second_device(&token).await;
+    let device_b = second_device(&account).await;
     let report = sync(&device_b).await;
     assert_eq!(report.created, 1, "the task arrives as one row");
     let row = task_row(&device_b, "replicated")
@@ -341,8 +354,8 @@ async fn a_new_task_replicates_to_the_other_device() {
 
 #[tokio::test]
 async fn a_field_takes_the_newest_write() {
-    let (device_a, token) = device("converge").await;
-    let device_b = second_device(&token).await;
+    let (device_a, account) = device("converge").await;
+    let device_b = second_device(&account).await;
     create_task(&device_a, &task_object("shared", "one"))
         .await
         .unwrap();
@@ -367,8 +380,8 @@ async fn a_field_takes_the_newest_write() {
 
 #[tokio::test]
 async fn completions_from_two_devices_add_up() {
-    let (device_a, token) = device("completions").await;
-    let device_b = second_device(&token).await;
+    let (device_a, account) = device("completions").await;
+    let device_b = second_device(&account).await;
     let (task, _) = create_task(&device_a, &task_object("counted", ""))
         .await
         .unwrap();
@@ -393,8 +406,8 @@ async fn completions_from_two_devices_add_up() {
 
 #[tokio::test]
 async fn an_undo_is_a_negative_delta_that_also_replicates() {
-    let (device_a, token) = device("undo").await;
-    let device_b = second_device(&token).await;
+    let (device_a, account) = device("undo").await;
+    let device_b = second_device(&account).await;
     let (task, _) = create_task(&device_a, &task_object("undone", ""))
         .await
         .unwrap();
@@ -423,8 +436,8 @@ async fn an_undo_is_a_negative_delta_that_also_replicates() {
 
 #[tokio::test]
 async fn a_deletion_is_terminal_and_offers_a_copy() {
-    let (device_a, token) = device("terminal").await;
-    let device_b = second_device(&token).await;
+    let (device_a, account) = device("terminal").await;
+    let device_b = second_device(&account).await;
     create_task(&device_a, &task_object("doomed", "important text"))
         .await
         .unwrap();
@@ -476,8 +489,8 @@ async fn a_deletion_is_terminal_and_offers_a_copy() {
 
 #[tokio::test]
 async fn a_delete_strands_the_links_it_leaves() {
-    let (device_a, token) = device("cascade").await;
-    let device_b = second_device(&token).await;
+    let (device_a, account) = device("cascade").await;
+    let device_b = second_device(&account).await;
     let (parent, _) = create_task(&device_a, &task_object("parent", ""))
         .await
         .unwrap();
@@ -501,13 +514,13 @@ async fn a_delete_strands_the_links_it_leaves() {
 
 #[tokio::test]
 async fn a_fresh_database_rebuilds_itself_from_the_server() {
-    let (device_a, token) = device("rebuild").await;
+    let (device_a, account) = device("rebuild").await;
     let (task, _) = create_task(&device_a, &task_object("kept", "text"))
         .await
         .unwrap();
     sync(&device_a).await;
 
-    let rebuilt = second_device(&token).await;
+    let rebuilt = second_device(&account).await;
     sync(&rebuilt).await;
     assert_eq!(
         task_row(&rebuilt, "kept").await.unwrap().0,
@@ -526,8 +539,8 @@ async fn a_fresh_database_rebuilds_itself_from_the_server() {
 
 #[tokio::test]
 async fn a_scheduled_task_is_one_cell_across_devices() {
-    let (device_a, token) = device("scheduled").await;
-    let device_b = second_device(&token).await;
+    let (device_a, account) = device("scheduled").await;
+    let device_b = second_device(&account).await;
     let (task, _) = create_task(&device_a, &scheduled_task_object("meditate"))
         .await
         .unwrap();
@@ -576,8 +589,8 @@ async fn a_scheduled_task_is_one_cell_across_devices() {
 
 #[tokio::test]
 async fn a_replace_mode_slot_keeps_one_entry_across_devices() {
-    let (device_a, token) = device("slots").await;
-    let device_b = second_device(&token).await;
+    let (device_a, account) = device("slots").await;
+    let device_b = second_device(&account).await;
     let config: im::config::Config = toml::from_str(
         r#"
 [tracker.water]
@@ -611,8 +624,8 @@ interval = { anchor = "2026-01-01T00:00:00", span = "1 day" }
 
 #[tokio::test]
 async fn a_device_is_told_when_a_peer_replaces_its_cell() {
-    let (device_a, token) = device("notices").await;
-    let device_b = second_device(&token).await;
+    let (device_a, account) = device("notices").await;
+    let device_b = second_device(&account).await;
     let (task, _) = create_task(&device_a, &task_object("shared", "mine"))
         .await
         .unwrap();
@@ -722,8 +735,8 @@ async fn a_cursor_past_the_end_of_the_log_is_refused() {
 
 #[tokio::test]
 async fn clock_ahead_restamps_and_succeeds_on_retry() {
-    let (device_a, token) = device("clock-ahead").await;
-    let device_b = second_device(&token).await;
+    let (device_a, account) = device("clock-ahead").await;
+    let device_b = second_device(&account).await;
     create_task(&device_a, &task_object("fast-clock", "from future stamp"))
         .await
         .unwrap();
@@ -762,8 +775,8 @@ async fn clock_ahead_restamps_and_succeeds_on_retry() {
 
 #[tokio::test]
 async fn optional_dead_link_on_update_and_create_clears_link_without_losing_task() {
-    let (device_a, token) = device("dead-optional-link").await;
-    let device_b = second_device(&token).await;
+    let (device_a, account) = device("dead-optional-link").await;
+    let device_b = second_device(&account).await;
     let (parent_id, _) = create_task(&device_a, &task_object("parent", ""))
         .await
         .unwrap();
@@ -812,8 +825,8 @@ async fn optional_dead_link_on_update_and_create_clears_link_without_losing_task
 
 #[tokio::test]
 async fn required_dead_link_on_completion_create_rejects_and_forgets_completion() {
-    let (device_a, token) = device("dead-required-link").await;
-    let device_b = second_device(&token).await;
+    let (device_a, account) = device("dead-required-link").await;
+    let device_b = second_device(&account).await;
     let (task_id, _) = create_task(&device_a, &task_object("doomed-task", ""))
         .await
         .unwrap();
@@ -861,4 +874,210 @@ async fn switching_account_preserves_cursor_and_refuses_foreign_log() {
         .expect_err("syncing against a different account's log without reset is refused");
     let message = format!("{error:#}");
     assert!(message.contains("different server log"), "{message}");
+}
+
+#[tokio::test]
+async fn e2ee_encrypts_non_link_fields_on_wire_and_decrypts_across_devices() {
+    let server = server().await;
+    let (device_a, account) = device("e2ee").await;
+    let device_b = second_device(&account).await;
+
+    // 1. Create a parent task and child task (to test link field parent_id)
+    let (parent_task, _) =
+        create_task(&device_a, &task_object("parent task", "parent secret body"))
+            .await
+            .unwrap();
+    let mut child = task_object("child task", "child secret body");
+    child.parent = Some(parent_task);
+    let (_child_id, _) = create_task(&device_a, &child).await.unwrap();
+
+    // 2. Create a mood entry linked to parent_task, with a tracker
+    let entry = EntryObject {
+        mood: "hopeful".to_string(),
+        body: "confidential thoughts".to_string(),
+        time: im::date::LogTime::local(1_700_000_100),
+        location: "secret location".to_string(),
+        embedding: None,
+        score: Some(4.2),
+        trackers: vec![TrackerObject {
+            tracker_type: "water".to_string(),
+            value: TrackerValue::Integer(5),
+            replace_slot: None,
+        }],
+        duration: Some(1200),
+        todo_id: Some(parent_task),
+    };
+    create_entry(&device_a, &entry).await.expect("create mood and tracker");
+
+    // 3. Create a completion on parent_task
+    im::db::update_task(&device_a, parent_task, 3).await.unwrap();
+
+    // Push everything from device_a
+    let report_a = sync(&device_a).await;
+    assert!(report_a.pushed > 0, "device_a pushed its encrypted cells");
+
+    // 4. Raw server query: inspect the raw un-decrypted payload directly from the server
+    let raw_client = Client::new(&server.base, Some(account.token.clone()));
+    let raw_request = im::sync::types::SyncRequest {
+        protocol: im::sync::schema::SCHEMA.protocol,
+        schema: im::sync::schema::SCHEMA.version,
+        device_id: im::db::Id::new(),
+        key_id: account.encryption_key.key_id(),
+        cursor: None,
+        events: vec![],
+    };
+    let raw_response = raw_client.sync(&raw_request).expect("raw sync pull");
+    assert!(!raw_response.events.is_empty(), "server returned events");
+
+    let mut saw_encrypted_field = false;
+    let mut saw_existence = false;
+    let mut saw_link = false;
+
+    for row in &raw_response.events {
+        let field = &row.cell.field;
+        let kind = &row.cell.kind;
+        let is_link = im::sync::schema::link(kind, field).is_some();
+
+        if field == im::sync::types::EXISTENCE {
+            saw_existence = true;
+            assert!(
+                matches!(&row.cell.value, Some(CellValue::Text(t)) if t == "live" || t == "deleted"),
+                "existence cell must be plaintext 'live' or 'deleted', got {:?}",
+                row.cell.value
+            );
+        } else if is_link {
+            saw_link = true;
+            if let Some(CellValue::Text(ref text)) = row.cell.value {
+                assert!(
+                    !text.starts_with(E2E_PREFIX),
+                    "link field {kind}.{field} must be plaintext UUID, got {text}"
+                );
+            } else {
+                panic!(
+                    "link field {kind}.{field} must be plaintext text value, got {:?}",
+                    row.cell.value
+                );
+            }
+        } else if let Some(ref val) = row.cell.value {
+            saw_encrypted_field = true;
+            match val {
+                CellValue::Text(text) => {
+                    assert!(
+                        text.starts_with(E2E_PREFIX),
+                        "non-link field {kind}.{field} on the server must start with {E2E_PREFIX}, got: {text}"
+                    );
+                }
+                other => {
+                    panic!(
+                        "non-link field {kind}.{field} on the server must be encrypted CellValue::Text, got {other:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    assert!(saw_existence, "saw existence cells");
+    assert!(saw_link, "saw link cells");
+    assert!(saw_encrypted_field, "saw encrypted non-link fields");
+
+    // 5. Verify that syncing device_b with a wrong EncryptionKey is refused by the server with key_mismatch
+    let wrong_key = EncryptionKey::from_config_str("wrong-key");
+    let mut bad_pull = session::Pull::resume(&device_b).await.unwrap();
+    let err = sync_once(
+        &device_b,
+        &server.base,
+        SYNC_TIMEOUT,
+        &TrackerSlots::default(),
+        &wrong_key,
+        &mut bad_pull,
+    )
+    .await
+    .expect_err("syncing with wrong encryption key must be refused");
+    let err_str = format!("{err:#}");
+    assert!(
+        err_str.contains("key does not match the server log"),
+        "expected key_mismatch refusal, got: {err_str}"
+    );
+
+    // Verify device_b was left untouched
+    assert!(
+        task_row(&device_b, "parent task").await.is_none(),
+        "device_b was untouched after refusal"
+    );
+
+    // Also verify tamper/corrupted decryption fails with proper error context
+    let fake_event = im::sync::types::CellEvent {
+        event_id: im::db::EventId::new(),
+        device_id: im::db::Id::new(),
+        entity_id: im::db::Id::new(),
+        kind: "task".to_string(),
+        field: "name".to_string(),
+        value: Some(
+            im::sync::crypto::encrypt_value(
+                &wrong_key,
+                im::db::Id::new(),
+                "task",
+                "name",
+                im::db::Id::new(),
+                im::db::EventId::new(),
+                &CellValue::text("secret"),
+            )
+            .unwrap(),
+        ),
+        timestamp: 1000,
+    };
+    let tampered_resp = im::sync::types::SyncResponse {
+        cursor: im::sync::types::Cursor {
+            log: "test".to_string(),
+            version: 1,
+        },
+        now: 1000,
+        has_more: false,
+        events: vec![im::sync::types::LogRow {
+            version: 1,
+            cell: fake_event,
+        }],
+        verdicts: vec![],
+        superseded: vec![],
+    };
+    let dec_err = im::sync::crypto::decrypt_response(
+        tampered_resp,
+        &account.encryption_key,
+        im::db::Id::new(),
+    )
+    .expect_err("foreign ciphertext must fail to decrypt");
+    assert!(format!("{dec_err:#}").contains("failed to decrypt task.name"));
+
+    // 6. Now sync device_b normally (using the correct stored account key)
+    let report_b = sync(&device_b).await;
+    assert!(report_b.created >= 2, "device_b created the tasks");
+
+    let decrypted_parent = task_row(&device_b, "parent task")
+        .await
+        .expect("parent task replicated");
+    assert_eq!(decrypted_parent.1, "parent secret body");
+
+    let decrypted_child = task_row(&device_b, "child task")
+        .await
+        .expect("child task replicated");
+    assert_eq!(decrypted_child.1, "child secret body");
+
+    let child_parent: Option<String> =
+        sqlx::query_scalar("SELECT parent FROM todos WHERE name = 'child task'")
+            .fetch_one(&device_b)
+            .await
+            .unwrap();
+    assert_eq!(
+        child_parent.as_deref(),
+        Some(parent_task.to_string().as_str())
+    );
+
+    let total_completions: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(count), 0) FROM todo_completions WHERE todo_id = ?",
+    )
+    .bind(parent_task)
+    .fetch_one(&device_b)
+    .await
+    .unwrap();
+    assert_eq!(total_completions, 3);
 }

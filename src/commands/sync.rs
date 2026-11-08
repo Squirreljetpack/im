@@ -81,11 +81,12 @@ async fn run_sync(pool: &SqlitePool, config: &Config, reset: bool, force: bool) 
         }
     }
 
+    let key = session::resolve_key(pool, config).await?;
     let mut pull = session::Pull::resume(pool).await?;
     let mut totals = Totals::default();
     let mut clock_retried = false;
     loop {
-        let report = sync_once(pool, &server, TIMEOUT, &slots, &mut pull).await?;
+        let report = sync_once(pool, &server, TIMEOUT, &slots, &key, &mut pull).await?;
         totals.pushed += report.pushed;
         totals.created += report.created;
         totals.applied += report.applied;

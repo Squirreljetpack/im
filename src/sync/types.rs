@@ -192,6 +192,8 @@ pub struct SyncRequest {
     /// [`crate::sync::schema::SCHEMA`]'s `version`: the cell vocabulary.
     pub schema: u32,
     pub device_id: Id,
+    /// Key fingerprint identifying the encryption key used for this request.
+    pub key_id: String,
     /// Where this device has read to: a position in one named log, not in
     /// "the first log that answers". `None` until a sync names one.
     pub cursor: Option<Cursor>,

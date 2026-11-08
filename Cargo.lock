@@ -1960,6 +1960,7 @@ version = "0.3.1"
 dependencies = [
  "anyhow",
  "atty",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "cli_boilerplate_automation",
@@ -1979,6 +1980,7 @@ dependencies = [
  "oklab",
  "ort",
  "ratatui",
+ "ring",
  "serde",
  "serde_json",
  "sqlx",

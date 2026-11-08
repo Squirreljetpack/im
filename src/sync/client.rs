@@ -10,6 +10,7 @@ use serde::Deserialize;
 
 use crate::config::Config;
 
+use super::crypto::EncryptionKey;
 use super::types::{SyncRequest, SyncResponse};
 
 /// Where `wrangler dev` serves the backend locally.
@@ -33,11 +34,19 @@ pub fn server_url(config: &Config) -> String {
         .to_string()
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Account {
     pub user_id: String,
     pub email: String,
     pub token: String,
+    pub encryption_key: EncryptionKey,
+}
+
+#[derive(Deserialize)]
+struct AuthWire {
+    user_id: String,
+    email: String,
+    token: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -78,13 +87,33 @@ impl Client {
     }
 
     pub fn register(&self, email: &str, password: &str) -> Result<Account> {
-        let body = serde_json::json!({ "email": email, "password": password });
-        self.send("POST", "/api/v1/auth/register", Some(&body), false)
+        if password.len() < 8 {
+            bail!("password must be at least 8 characters");
+        }
+        let (auth_password, encryption_key) = super::crypto::derive_credentials(email, password);
+        let body = serde_json::json!({ "email": email, "password": auth_password });
+        let wire: AuthWire = self.send("POST", "/api/v1/auth/register", Some(&body), false)?;
+        Ok(Account {
+            user_id: wire.user_id,
+            email: wire.email,
+            token: wire.token,
+            encryption_key,
+        })
     }
 
     pub fn login(&self, email: &str, password: &str) -> Result<Account> {
-        let body = serde_json::json!({ "email": email, "password": password });
-        self.send("POST", "/api/v1/auth/login", Some(&body), false)
+        if password.is_empty() {
+            bail!("a password is required");
+        }
+        let (auth_password, encryption_key) = super::crypto::derive_credentials(email, password);
+        let body = serde_json::json!({ "email": email, "password": auth_password });
+        let wire: AuthWire = self.send("POST", "/api/v1/auth/login", Some(&body), false)?;
+        Ok(Account {
+            user_id: wire.user_id,
+            email: wire.email,
+            token: wire.token,
+            encryption_key,
+        })
     }
 
     pub fn status(&self) -> Result<AccountStatus> {
@@ -203,6 +232,11 @@ pub enum Refusal {
         server_protocol: u32,
         server_schema: u32,
     },
+    /// The encryption key does not match the server log's key fingerprint.
+    KeyMismatch {
+        base: String,
+        server_log: String,
+    },
 }
 
 impl Refusal {
@@ -251,6 +285,10 @@ impl Refusal {
                 schema: super::schema::SCHEMA.version,
                 server_protocol: number("protocol")?,
                 server_schema: number("schema")?,
+            }),
+            "key_mismatch" => Some(Self::KeyMismatch {
+                base: base.to_string(),
+                server_log: log()?,
             }),
             _ => None,
         }
@@ -305,6 +343,12 @@ impl std::fmt::Display for Refusal {
                 "The server speaks sync protocol {server_protocol}, schema {server_schema}; this build of \
                  im speaks protocol {protocol}, schema {schema}.\n\
                  Nothing was sent or applied. Upgrade im (or the server) until they agree.",
+            ),
+            Self::KeyMismatch { base, server_log } => write!(
+                f,
+                "This device's encryption key does not match the server log ({} on {base}).\n\
+                 Nothing was sent or applied. Check `[sync] encryption_key` or sign in again with `im :sync login`.",
+                short(server_log),
             ),
         }
     }

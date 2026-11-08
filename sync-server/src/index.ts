@@ -10,6 +10,11 @@ import { UserSyncDO } from "./user_sync_do";
 
 export { UserSyncDO };
 
+/**
+ * The client enforces an 8-character human password before deriving the 44-character
+ * base64 auth secret sent over the wire. The server rejects anything shorter than 8 chars
+ * as raw malformed credentials.
+ */
 const MIN_PASSWORD_LENGTH = 8;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 

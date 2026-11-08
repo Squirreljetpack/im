@@ -8,6 +8,7 @@
 
 pub mod apply;
 pub mod client;
+pub mod crypto;
 pub mod events;
 pub mod schema;
 pub mod session;
@@ -18,7 +19,8 @@ pub mod types;
 mod tests;
 
 pub use client::{Account, AccountStatus, Client, DEFAULT_SERVER, server_url};
-pub use session::{Pull, SyncReport, sync_once};
+pub use crypto::EncryptionKey;
+pub use session::{Pull, SyncReport, resolve_key, sync_once};
 pub use state::{KEY_DEVICE_ID, next_stamp, now_ms};
 pub use types::{
     CellEvent, CellValue, LogRow, MoodUpdate, Outcome, SyncRequest, SyncResponse, TaskUpdate,

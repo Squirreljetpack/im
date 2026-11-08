@@ -56,6 +56,15 @@ export const PROTOCOL = SCHEMA.protocol;
 /** The version of the cell vocabulary this worker enforces. */
 export const SCHEMA_VERSION = SCHEMA.version;
 
+export const E2E_PREFIX = "e2e:v1:";
+
+export function isEncryptedValue(value: CellValue): boolean {
+  return (
+    Object.hasOwn(value, "text") &&
+    (value as { text: string }).text.startsWith(E2E_PREFIX)
+  );
+}
+
 export function kindSpec(kind: string): KindSpec | undefined {
   return Object.hasOwn(SCHEMA.kinds, kind) ? SCHEMA.kinds[kind] : undefined;
 }
@@ -96,6 +105,9 @@ export function isCellValue(value: unknown): value is CellValue {
 }
 
 export function classMatches(cls: FieldClass, value: CellValue): boolean {
+  if (isEncryptedValue(value)) {
+    return true;
+  }
   switch (cls) {
     case "scalar":
       // A tracker's storage class depends on its configured kind, which the

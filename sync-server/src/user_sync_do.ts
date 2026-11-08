@@ -24,6 +24,7 @@ import {
   encode,
   fieldSpec,
   isCellValue,
+  isEncryptedValue,
   kindSpec,
   subkindFrom,
 } from "./schema";
@@ -156,6 +157,13 @@ export class UserSyncDO implements DurableObject {
     );
   }
 
+  private keyId(sql: Sql): string | undefined {
+    const rows = sql.exec("SELECT value FROM sync_meta WHERE key = 'key_id'").toArray() as {
+      value: string;
+    }[];
+    return rows.length > 0 ? rows[0].value : undefined;
+  }
+
   /**
    * The identity of this log: minted with the log and kept for as long as that
    * log exists, so a cursor issued here stays recognisable across restarts.
@@ -177,7 +185,7 @@ export class UserSyncDO implements DurableObject {
   }
 
   /** This log's identity and the last version it issued. */
-  private identity(): { log: string; head: number } {
+  private identity(): { log: string; head: number; storedKeyId: string | undefined } {
     return this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
       // SAFETY: the query selects one column, aliased `head`.
@@ -188,7 +196,7 @@ export class UserSyncDO implements DurableObject {
           }
         ).head,
       );
-      return { log: this.logId(sql), head };
+      return { log: this.logId(sql), head, storedKeyId: this.keyId(sql) };
     });
   }
 
@@ -212,6 +220,9 @@ export class UserSyncDO implements DurableObject {
     if (typeof body.device_id !== "string" || body.device_id === "") {
       return error("device_id is required", 400);
     }
+    if (body.key_id !== undefined && (typeof body.key_id !== "string" || body.key_id === "")) {
+      return error("key_id must be a non-empty string", 400);
+    }
     if (!Array.isArray(body.events)) {
       return error("events must be an array", 400);
     }
@@ -225,7 +236,13 @@ export class UserSyncDO implements DurableObject {
     const device = body.device_id;
     const now = Date.now();
 
-    const { log, head } = this.identity();
+    const { log, head, storedKeyId } = this.identity();
+    if (storedKeyId !== undefined && storedKeyId !== body.key_id) {
+      return refusal("key_mismatch", "the encryption key does not match this log", {
+        log_id: log,
+        head,
+      });
+    }
     // A cursor from another log would read the wrong history through this one,
     // and one past this log's end would read nothing at all — both silently,
     // and for good. A database that has read nowhere yet names no log, so it
@@ -275,10 +292,18 @@ export class UserSyncDO implements DurableObject {
           .exec("SELECT COALESCE(MAX(batch), 0) + 1 AS batch FROM sync_log")
           .one() as { batch: number }).batch,
       );
+      const requireEncrypted = body.key_id !== undefined || this.keyId(sql) !== undefined;
       const verdicts: (Verdict | null)[] = body.events.map(() => null);
       const pushed: { index: number; entity_id: string; field: string; event_id: string }[] = [];
       const creating = this.validateCreates(sql, body.events);
-      const rejectedCreates = this.prevalidateCreates(sql, body.events, creating, device, now);
+      const rejectedCreates = this.prevalidateCreates(
+        sql,
+        body.events,
+        creating,
+        device,
+        now,
+        requireEncrypted,
+      );
 
       body.events.forEach((raw, index) => {
         const candidate = raw as Partial<CellEvent> | null;
@@ -289,13 +314,19 @@ export class UserSyncDO implements DurableObject {
           verdicts[index] = { ...rejectedCreate, event_id: eventId };
           return;
         }
-        const result = this.push(sql, raw, device, now, creating, batch);
+        const result = this.push(sql, raw, device, now, creating, batch, requireEncrypted);
         if (result.verdict.outcome === "rejected") {
           verdicts[index] = result.verdict;
         } else {
           pushed.push({ index, ...result.cell });
         }
       });
+      if (body.key_id !== undefined && pushed.length > 0) {
+        sql.exec(
+          "INSERT OR IGNORE INTO sync_meta (key, value) VALUES ('key_id', ?)",
+          body.key_id,
+        );
+      }
       // A cell is only accepted or superseded once the whole batch has landed:
       // a later event of the same push can legitimately take the cell away
       // from an earlier one.
@@ -379,6 +410,7 @@ export class UserSyncDO implements DurableObject {
     creating: Set<string>,
     device: string,
     now: number,
+    requireEncrypted = false,
   ): Map<string, Verdict> {
     const acceptedCreates = new Map<string, string>();
     for (const raw of events) {
@@ -426,6 +458,7 @@ export class UserSyncDO implements DurableObject {
           now,
           creating,
           acceptedCreates,
+          requireEncrypted,
         );
         if (rejection !== null) {
           acceptedCreates.delete(entityId);
@@ -449,6 +482,7 @@ export class UserSyncDO implements DurableObject {
     now: number,
     creating: Set<string>,
     acceptedCreates?: Map<string, string>,
+    requireEncrypted = false,
   ): Verdict | null {
     const reject = (reason: RejectReason, withCells = true): Verdict => ({
       event_id: event.event_id,
@@ -511,11 +545,16 @@ export class UserSyncDO implements DurableObject {
       }
     } else if (!classMatches(field.class, event.value)) {
       return reject("class", false);
+    } else if (requireEncrypted && field.link === undefined && !isEncryptedValue(event.value)) {
+      return reject("class", false);
     }
     if (field.immutable === true && this.cell(sql, event.entity_id, event.field) !== undefined) {
       return reject("immutable");
     }
     if (field.link !== undefined && event.value !== null) {
+      if (isEncryptedValue(event.value)) {
+        return reject("class", false);
+      }
       const referent = "text" in event.value ? event.value.text : null;
       if (referent === null) {
         return reject("class", false);
@@ -560,6 +599,7 @@ export class UserSyncDO implements DurableObject {
     now: number,
     creating: Set<string>,
     batch: number,
+    requireEncrypted = false,
   ): {
     verdict: Verdict;
     cell: { entity_id: string; field: string; event_id: string };
@@ -579,7 +619,7 @@ export class UserSyncDO implements DurableObject {
         cell: { entity_id: event.entity_id, field: event.field, event_id: event.event_id },
       };
     }
-    const rejection = this.validateCell(sql, event, device, now, creating);
+    const rejection = this.validateCell(sql, event, device, now, creating, undefined, requireEncrypted);
     if (rejection !== null) {
       return {
         verdict: rejection,
