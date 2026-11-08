@@ -463,7 +463,7 @@ pub(crate) fn repopulate(state: &mut MMState<'_, TaskRow, ()>, ctx: &TaskCtx) {
     for task in &tasks {
         let _ = injector.push(task.clone());
     }
-    state.ui.config.border.title = title;
+    state.ui.config.frame.title = title;
     if !state.picker_ui.results.cursor_disabled() {
         let pos = cursor.min(tasks.len().saturating_sub(1) as u32);
         state.picker_ui.results.cursor_jump(pos);

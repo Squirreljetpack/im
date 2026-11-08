@@ -623,7 +623,7 @@ fn repopulate(state: &mut MMState<'_, TodayEntry, ()>, ctx: &TodayCtx) {
     for entry in &entries {
         let _ = injector.push(entry.clone());
     }
-    state.ui.config.border.title = title;
+    state.ui.config.frame.title = title;
     if !state.picker_ui.results.cursor_disabled() {
         let pos = cursor.min(entries.len().saturating_sub(1) as u32);
         state.picker_ui.results.cursor_jump(pos);

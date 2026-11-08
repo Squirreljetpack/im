@@ -5,7 +5,7 @@ max = 25
 
 [ui]
 mouse_events = true
-border = { type = "Plain" }
+frame = { type = "Plain" }
 
 # The status row is reserved by default (`show = true`) with an empty
 # template, rendering as a blank line between the input and the header.
@@ -32,10 +32,10 @@ max = 30
 wrap = true
 scroll_wrap = true
 show = true
-border = { type = "Plain" }
+frame = { type = "Plain" }
 
 [overlay]
-border = { type = "Rounded", color = "darkGrey", padding = 1 }
+frame = { type = "Rounded", fg = "darkGrey", padding = 1 }
 
 [binds]
 "ctrl-." = "NextColumn"

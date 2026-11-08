@@ -215,13 +215,13 @@ The default locations are in order:
 
 ##### Moods
 
-The most basic use of `im` for a kind of offhand journaling where you logging any moods that come to you throughout the day, such as `im happy` or `im cold`, or thoughts such as `im . maybe i should put on some pants`. They are collected in the [Today view](#views) together with other task and tracker entries from the day, and im collates them into a interactive daily journal.
+The most basic use of `im` for a kind of offhand journaling where you logging any moods that come to you throughout the day, such as `im happy` or `im cold`, or thoughts such as `im . maybe i should put on some pants`. They are collected in the [Today view](#views) together with other task and tracker entries from the day, and `im` collates them into a interactive daily journal.
 
-Also, every mood is assigned a color, by determining its weighted semantic alignment to a set of configured _mood anchors_ (color, mood pairs), yielding pretty, meaningful dots on the interface and in the grid view[^4] that provide users with a sense of pride and accomplishment.
+Each mood is also, assigned a color, determined by its semantic alignment to a set of configured _mood anchors_[^4]. This results in _pretty and meaningful_ dots on the interface that provide users with a sense of pride and accomplishment.
 
 Finally, `im %<duration>` starts a Pomodoro session -- idk why. Personally, I find the Pomodoro method a depressing concept. Anyways, start a session, link it to a tracker or task if you want, and when time is up it will prompt you about how it went; don't answer if you don't feel like it. If you just want to create timed notifications, that's available through `im :tool notify`.
 
-[^4]: `im :[week|month|year]`
+[^4]: (mood, color) pairs, see `im :c moods`
 
 ##### Trackers
 
@@ -264,7 +264,7 @@ For a comprehensive SPEC of the rules which determine which entities make it int
 
 `im` stores your data in a local sqlite db. But it also supports cross-device sync by way of a central server that maintains an event log. Updates are per-field conflicts are resolved via LWW, meaning if two edits are made on the same field and afterwards synced, the one whose recorded time *as measured on-device* is later is agreed upon as the field's value. Such conflicts are surfaced in the output when running `im: sync` but *never prompt and thus erase data*. The one exception is *deletes*: deletes are final, meaning that *any* edit to a field made after a deletion of the source has been recorded in the log is ignored. For this reason, when a client contains a field update which would be dropped by pulling this event, they are prompted with the option to *resurrect* the entity as it currently exists in their local database as a safeguard.
 
-To enable syncing, run `im :sync register` on Device A, `im :sync login` on Device B, then `im :sync` on one or both devices. Syncing does not run automatically.
+To enable syncing, create an account with `im :sync register`. Then run `im :sync login` followed by `im :sync` on all devices you wish to connect. Syncing does not run automatically.
 
 
 
