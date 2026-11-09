@@ -14,7 +14,11 @@ pub struct SyncConfig {
     /// `IM_SYNC_URL` overrides this (for every `:sync` subcommand) per command.
     pub server: Option<String>,
     /// Optional end-to-end encryption key override.
-    /// When set, this overrides the key derived from user credentials during login.
-    /// Every device syncing the account must configure the exact same key.
+    ///
+    /// `b64:<base64-encoded 32 bytes>` for a raw key, or `pass:<passphrase>`
+    /// for a key derived with PBKDF2. When set, it replaces the key derived
+    /// from the account credentials; every device syncing the account must
+    /// configure the same value. `im :sync status` prints the key id (a
+    /// fingerprint, not the key) that the server pins with the log.
     pub encryption_key: Option<String>,
 }

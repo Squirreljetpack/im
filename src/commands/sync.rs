@@ -18,6 +18,7 @@ use sqlx::SqlitePool;
 use crate::cli::SyncSubcommand;
 use crate::config::Config;
 use crate::sync::client::{self, server_url};
+use crate::sync::crypto;
 use crate::sync::events;
 use crate::sync::session::{self, Resurrect, sync_once};
 use crate::sync::state;
@@ -71,6 +72,7 @@ async fn run_sync(pool: &SqlitePool, config: &Config, reset: bool, force: bool) 
     let server = server_url(config);
     let slots = TrackerSlots::from_config(config);
     let interactive = atty::is(atty::Stream::Stdin);
+    let key = session::resolve_key(pool, config).await?;
 
     if reset {
         confirm_reset(pool, interactive, force).await?;
@@ -81,7 +83,6 @@ async fn run_sync(pool: &SqlitePool, config: &Config, reset: bool, force: bool) 
         }
     }
 
-    let key = session::resolve_key(pool, config).await?;
     let mut pull = session::Pull::resume(pool).await?;
     let mut totals = Totals::default();
     let mut clock_retried = false;
@@ -202,8 +203,10 @@ async fn maybe_resurrect(pool: &SqlitePool, offer: &Resurrect, interactive: bool
 async fn register(pool: &SqlitePool, config: &Config) -> Result<()> {
     let (email, password) = prompt_credentials()?;
     let server = server_url(config);
+    let override_key = crypto::encryption_key(config)?;
     let account = client::register(&server, &email, &password).await?;
-    state::store_account(pool, &account).await?;
+    let key = override_key.unwrap_or_else(|| account.encryption_key.clone());
+    state::store_account(pool, &account, &key).await?;
     println!(
         "Registered {} on {server}; this device is signed in.",
         account.email
@@ -216,8 +219,10 @@ async fn register(pool: &SqlitePool, config: &Config) -> Result<()> {
 async fn login(pool: &SqlitePool, config: &Config) -> Result<()> {
     let (email, password) = prompt_credentials()?;
     let server = server_url(config);
+    let override_key = crypto::encryption_key(config)?;
     let account = client::login(&server, &email, &password).await?;
-    state::store_account(pool, &account).await?;
+    let key = override_key.unwrap_or_else(|| account.encryption_key.clone());
+    state::store_account(pool, &account, &key).await?;
     println!("Signed in as {} on {server}.", account.email);
     println!("Run `im :sync` to exchange events with the other devices.");
     Ok(())
@@ -230,6 +235,10 @@ async fn status(pool: &SqlitePool, config: &Config) -> Result<()> {
         return Ok(());
     };
     let server = server_url(config);
+    match session::resolve_key(pool, config).await {
+        Ok(key) => println!("Encryption key: {}.", key.key_id()),
+        Err(error) => println!("Encryption key unavailable: {error}"),
+    }
     match client::account_status(&server, &token).await {
         Ok(status) => {
             let queued = events::unsynced_count(pool).await?;

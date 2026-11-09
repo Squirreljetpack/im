@@ -1052,8 +1052,8 @@ describe("compatibility", () => {
       undefined,
       "key-a",
     );
-    expect(plainResult.verdicts[1].outcome).toBe("rejected");
-    expect(plainResult.verdicts[1].reason).toBe("class");
+    expect(plainResult.verdicts[1]?.outcome).toBe("rejected");
+    expect(plainResult.verdicts[1]?.reason).toBe("class");
 
     // 2. Encrypted non-link values with key_id = "key-a" are accepted and store key_id
     const result = await sync(
@@ -1080,13 +1080,18 @@ describe("compatibility", () => {
       undefined,
       "key-a",
     );
-    expect(linkResult.verdicts[0].outcome).toBe("rejected");
-    expect(linkResult.verdicts[0].reason).toBe("class");
+    expect(linkResult.verdicts[0]?.outcome).toBe("rejected");
+    expect(linkResult.verdicts[0]?.reason).toBe("class");
 
     // 4. A subsequent sync with mismatched key_id = "key-b" is refused with 409 key_mismatch
     const mismatchRes = await trySync(account.token, "device-b", 0, [], "key-b");
     expect(mismatchRes.status).toBe(409);
-    const mismatchBody = (await mismatchRes.json()) as { code: string; error: string };
+    const mismatchBody = (await mismatchRes.json()) as {
+      code: string;
+      error: string;
+      key_id?: string;
+    };
     expect(mismatchBody.code).toBe("key_mismatch");
+    expect(mismatchBody.key_id).toBe("key-a");
   });
 });

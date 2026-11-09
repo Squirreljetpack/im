@@ -98,7 +98,7 @@ pub async fn resolve_key(
     pool: &SqlitePool,
     config: &crate::config::Config,
 ) -> Result<EncryptionKey> {
-    if let Some(key) = crypto::encryption_key(config) {
+    if let Some(key) = crypto::encryption_key(config)? {
         return Ok(key);
     }
     let mut conn = pool

@@ -161,7 +161,7 @@ export class UserSyncDO implements DurableObject {
     const rows = sql.exec("SELECT value FROM sync_meta WHERE key = 'key_id'").toArray() as {
       value: string;
     }[];
-    return rows.length > 0 ? rows[0].value : undefined;
+    return rows[0]?.value;
   }
 
   /**
@@ -241,6 +241,7 @@ export class UserSyncDO implements DurableObject {
       return refusal("key_mismatch", "the encryption key does not match this log", {
         log_id: log,
         head,
+        key_id: storedKeyId,
       });
     }
     // A cursor from another log would read the wrong history through this one,

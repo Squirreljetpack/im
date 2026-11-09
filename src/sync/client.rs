@@ -236,6 +236,10 @@ pub enum Refusal {
     KeyMismatch {
         base: String,
         server_log: String,
+        /// The key id the server log is pinned to.
+        server_key: String,
+        /// The key id this device tried to use.
+        local_key: String,
     },
 }
 
@@ -289,6 +293,11 @@ impl Refusal {
             "key_mismatch" => Some(Self::KeyMismatch {
                 base: base.to_string(),
                 server_log: log()?,
+                server_key: value
+                    .get("key_id")
+                    .and_then(serde_json::Value::as_str)?
+                    .to_string(),
+                local_key: request.key_id.clone(),
             }),
             _ => None,
         }
@@ -344,10 +353,17 @@ impl std::fmt::Display for Refusal {
                  im speaks protocol {protocol}, schema {schema}.\n\
                  Nothing was sent or applied. Upgrade im (or the server) until they agree.",
             ),
-            Self::KeyMismatch { base, server_log } => write!(
+            Self::KeyMismatch {
+                base,
+                server_log,
+                server_key,
+                local_key,
+            } => write!(
                 f,
-                "This device's encryption key does not match the server log ({} on {base}).\n\
-                 Nothing was sent or applied. Check `[sync] encryption_key` or sign in again with `im :sync login`.",
+                "This device's encryption key does not match the server log ({} on {base}).\n  \
+                 this device: {local_key}\n  server log: {server_key}\n\
+                 Nothing was sent or applied. Signing in again derives the same key; restore the \
+                 `[sync] encryption_key` (or the credentials) the log was created with.",
                 short(server_log),
             ),
         }

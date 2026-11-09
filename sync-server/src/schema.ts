@@ -106,6 +106,8 @@ export function isCellValue(value: unknown): value is CellValue {
 
 export function classMatches(cls: FieldClass, value: CellValue): boolean {
   if (isEncryptedValue(value)) {
+    // The server cannot inspect ciphertext; the client validates the plaintext
+    // after decrypting it, so any field may carry an encrypted envelope.
     return true;
   }
   switch (cls) {

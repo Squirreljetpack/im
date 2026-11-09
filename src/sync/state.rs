@@ -170,19 +170,23 @@ pub async fn reset_clock(conn: &mut SqliteConnection, stamp: i64) -> Result<()> 
     set(conn, KEY_LAST_STAMP, &stamp.to_string()).await
 }
 
-/// Store the authenticated account credentials in `_sync_account`.
+/// Store the authenticated account and the encryption key this device will use.
 ///
 /// An existing pull cursor is intentionally preserved: if the database was
 /// previously synced against another account's log, the next sync will detect
 /// `LogMismatch` and require an explicit `--reset` rather than silently merging
 /// two accounts' histories.
-pub async fn store_account(pool: &SqlitePool, account: &Account) -> Result<()> {
+pub async fn store_account(
+    pool: &SqlitePool,
+    account: &Account,
+    encryption_key: &EncryptionKey,
+) -> Result<()> {
     let mut conn = pool.acquire().await.context("Failed to acquire a db connection")?;
     set_account(
         &mut conn,
         Some(&account.user_id),
         &account.token,
-        &account.encryption_key,
+        encryption_key,
     )
     .await
 }

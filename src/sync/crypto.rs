@@ -48,20 +48,34 @@ impl EncryptionKey {
         Ok(Self(arr))
     }
 
-    pub fn from_config_str(raw: &str) -> Self {
+    /// Parse the `[sync] encryption_key` override.
+    ///
+    /// The prefix is explicit so a mistyped base64 key is an error instead of
+    /// silently becoming a passphrase: `b64:<base64>` names a raw 32-byte key,
+    /// `pass:<text>` runs the text through PBKDF2.
+    pub fn from_config_str(raw: &str) -> Result<Self> {
         let trimmed = raw.trim();
-        if let Ok(key) = Self::from_base64(trimmed) {
-            return key;
+        if let Some(encoded) = trimmed.strip_prefix("b64:") {
+            return Self::from_base64(encoded);
         }
-        let mut bytes = [0u8; 32];
-        ring::pbkdf2::derive(
-            ring::pbkdf2::PBKDF2_HMAC_SHA256,
-            NonZeroU32::new(100_000).unwrap(),
-            b"im-sync-config-key-v1",
-            trimmed.as_bytes(),
-            &mut bytes,
-        );
-        Self(bytes)
+        if let Some(passphrase) = trimmed.strip_prefix("pass:") {
+            if passphrase.is_empty() {
+                bail!("`[sync] encryption_key` passphrase after `pass:` is empty");
+            }
+            let mut bytes = [0u8; 32];
+            ring::pbkdf2::derive(
+                ring::pbkdf2::PBKDF2_HMAC_SHA256,
+                NonZeroU32::new(100_000).unwrap(),
+                b"im-sync-config-key-v1",
+                passphrase.as_bytes(),
+                &mut bytes,
+            );
+            return Ok(Self(bytes));
+        }
+        bail!(
+            "`[sync] encryption_key` must start with `b64:` (base64-encoded 32 bytes) \
+             or `pass:` (passphrase)"
+        )
     }
 
     /// A 32-hex-character fingerprint sent with sync requests to identify the key.
@@ -107,7 +121,7 @@ pub fn should_encrypt(kind: &str, field: &str) -> bool {
 }
 
 /// Look up the configured encryption key override in `[sync] encryption_key`.
-pub fn encryption_key(config: &Config) -> Option<EncryptionKey> {
+pub fn encryption_key(config: &Config) -> Result<Option<EncryptionKey>> {
     config
         .sync
         .encryption_key
@@ -115,6 +129,7 @@ pub fn encryption_key(config: &Config) -> Option<EncryptionKey> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(EncryptionKey::from_config_str)
+        .transpose()
 }
 
 /// Encrypt a single cell value.
@@ -447,13 +462,37 @@ mod tests {
 
     #[test]
     fn test_from_config_str() {
-        let raw = "custom-passphrase";
-        let k1 = EncryptionKey::from_config_str(raw);
-        let k2 = EncryptionKey::from_config_str(" custom-passphrase ");
+        let k1 = EncryptionKey::from_config_str("pass:custom-passphrase").unwrap();
+        let k2 = EncryptionKey::from_config_str(" pass:custom-passphrase ").unwrap();
         assert_eq!(k1, k2);
 
         let b64 = k1.to_base64();
-        let k3 = EncryptionKey::from_config_str(&b64);
+        let k3 = EncryptionKey::from_config_str(&format!("b64:{b64}")).unwrap();
         assert_eq!(k1, k3);
+
+        // A bare string is ambiguous, so it is refused instead of silently
+        // becoming a passphrase (or a truncated base64 key).
+        assert!(EncryptionKey::from_config_str("custom-passphrase").is_err());
+        assert!(EncryptionKey::from_config_str(&b64).is_err());
+        assert!(EncryptionKey::from_config_str("b64:not-base64!").is_err());
+        assert!(EncryptionKey::from_config_str("pass:").is_err());
+    }
+
+    #[test]
+    fn test_config_key_override() {
+        let mut config = Config::default();
+        assert_eq!(encryption_key(&config).unwrap(), None);
+
+        config.sync.encryption_key = Some("pass:hello".to_string());
+        assert_eq!(
+            encryption_key(&config).unwrap(),
+            Some(EncryptionKey::from_config_str("pass:hello").unwrap())
+        );
+
+        config.sync.encryption_key = Some("   ".to_string());
+        assert_eq!(encryption_key(&config).unwrap(), None);
+
+        config.sync.encryption_key = Some("b64:not-base64!".to_string());
+        assert!(encryption_key(&config).is_err());
     }
 }

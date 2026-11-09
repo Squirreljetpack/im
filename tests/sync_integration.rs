@@ -140,7 +140,7 @@ async fn device(name: &str) -> (SqlitePool, Account) {
         .register(&email, "correct horse battery")
         .expect("register");
     let pool = test_pool().await.expect("in-memory db");
-    state::store_account(&pool, &account)
+    state::store_account(&pool, &account, &account.encryption_key)
         .await
         .expect("store the account");
     (pool, account)
@@ -150,7 +150,7 @@ async fn device(name: &str) -> (SqlitePool, Account) {
 /// machine produces).
 async fn second_device(account: &Account) -> SqlitePool {
     let pool = test_pool().await.expect("in-memory db");
-    state::store_account(&pool, account)
+    state::store_account(&pool, account, &account.encryption_key)
         .await
         .expect("seed the account");
     pool
@@ -865,7 +865,7 @@ async fn switching_account_preserves_cursor_and_refuses_foreign_log() {
     let account_two = Client::new(&server.base, None)
         .register("account-two@example.com", "correct horse battery")
         .expect("register second account");
-    state::store_account(&pool, &account_two)
+    state::store_account(&pool, &account_two, &account_two.encryption_key)
         .await
         .expect("store second account");
 
@@ -981,7 +981,7 @@ async fn e2ee_encrypts_non_link_fields_on_wire_and_decrypts_across_devices() {
     assert!(saw_encrypted_field, "saw encrypted non-link fields");
 
     // 5. Verify that syncing device_b with a wrong EncryptionKey is refused by the server with key_mismatch
-    let wrong_key = EncryptionKey::from_config_str("wrong-key");
+    let wrong_key = EncryptionKey::from_bytes([9u8; 32]);
     let mut bad_pull = session::Pull::resume(&device_b).await.unwrap();
     let err = sync_once(
         &device_b,
@@ -997,6 +997,14 @@ async fn e2ee_encrypts_non_link_fields_on_wire_and_decrypts_across_devices() {
     assert!(
         err_str.contains("key does not match the server log"),
         "expected key_mismatch refusal, got: {err_str}"
+    );
+    assert!(
+        err_str.contains(&wrong_key.key_id()),
+        "refusal names this device's key id: {err_str}"
+    );
+    assert!(
+        err_str.contains(&account.encryption_key.key_id()),
+        "refusal names the log's key id: {err_str}"
     );
 
     // Verify device_b was left untouched
