@@ -220,8 +220,8 @@ export class UserSyncDO implements DurableObject {
     if (typeof body.device_id !== "string" || body.device_id === "") {
       return error("device_id is required", 400);
     }
-    if (body.key_id !== undefined && (typeof body.key_id !== "string" || body.key_id === "")) {
-      return error("key_id must be a non-empty string", 400);
+    if (typeof body.key_id !== "string" || body.key_id === "") {
+      return error("key_id is required", 400);
     }
     if (!Array.isArray(body.events)) {
       return error("events must be an array", 400);
@@ -293,7 +293,6 @@ export class UserSyncDO implements DurableObject {
           .exec("SELECT COALESCE(MAX(batch), 0) + 1 AS batch FROM sync_log")
           .one() as { batch: number }).batch,
       );
-      const requireEncrypted = body.key_id !== undefined || this.keyId(sql) !== undefined;
       const verdicts: (Verdict | null)[] = body.events.map(() => null);
       const pushed: { index: number; entity_id: string; field: string; event_id: string }[] = [];
       const creating = this.validateCreates(sql, body.events);
@@ -303,7 +302,6 @@ export class UserSyncDO implements DurableObject {
         creating,
         device,
         now,
-        requireEncrypted,
       );
 
       body.events.forEach((raw, index) => {
@@ -315,14 +313,14 @@ export class UserSyncDO implements DurableObject {
           verdicts[index] = { ...rejectedCreate, event_id: eventId };
           return;
         }
-        const result = this.push(sql, raw, device, now, creating, batch, requireEncrypted);
+        const result = this.push(sql, raw, device, now, creating, batch);
         if (result.verdict.outcome === "rejected") {
           verdicts[index] = result.verdict;
         } else {
           pushed.push({ index, ...result.cell });
         }
       });
-      if (body.key_id !== undefined && pushed.length > 0) {
+      if (pushed.length > 0) {
         sql.exec(
           "INSERT OR IGNORE INTO sync_meta (key, value) VALUES ('key_id', ?)",
           body.key_id,
@@ -411,7 +409,6 @@ export class UserSyncDO implements DurableObject {
     creating: Set<string>,
     device: string,
     now: number,
-    requireEncrypted = false,
   ): Map<string, Verdict> {
     const acceptedCreates = new Map<string, string>();
     for (const raw of events) {
@@ -459,7 +456,6 @@ export class UserSyncDO implements DurableObject {
           now,
           creating,
           acceptedCreates,
-          requireEncrypted,
         );
         if (rejection !== null) {
           acceptedCreates.delete(entityId);
@@ -483,7 +479,6 @@ export class UserSyncDO implements DurableObject {
     now: number,
     creating: Set<string>,
     acceptedCreates?: Map<string, string>,
-    requireEncrypted = false,
   ): Verdict | null {
     const reject = (reason: RejectReason, withCells = true): Verdict => ({
       event_id: event.event_id,
@@ -546,7 +541,7 @@ export class UserSyncDO implements DurableObject {
       }
     } else if (!classMatches(field.class, event.value)) {
       return reject("class", false);
-    } else if (requireEncrypted && field.link === undefined && !isEncryptedValue(event.value)) {
+    } else if (field.link === undefined && !isEncryptedValue(event.value)) {
       return reject("class", false);
     }
     if (field.immutable === true && this.cell(sql, event.entity_id, event.field) !== undefined) {
@@ -600,7 +595,6 @@ export class UserSyncDO implements DurableObject {
     now: number,
     creating: Set<string>,
     batch: number,
-    requireEncrypted = false,
   ): {
     verdict: Verdict;
     cell: { entity_id: string; field: string; event_id: string };
@@ -620,7 +614,7 @@ export class UserSyncDO implements DurableObject {
         cell: { entity_id: event.entity_id, field: event.field, event_id: event.event_id },
       };
     }
-    const rejection = this.validateCell(sql, event, device, now, creating, undefined, requireEncrypted);
+    const rejection = this.validateCell(sql, event, device, now, creating);
     if (rejection !== null) {
       return {
         verdict: rejection,

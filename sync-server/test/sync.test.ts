@@ -1,7 +1,7 @@
 import { exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 
-import { PROTOCOL, SCHEMA_VERSION } from "../src/schema";
+import { E2E_PREFIX, PROTOCOL, SCHEMA_VERSION, fieldSpec, isEncryptedValue } from "../src/schema";
 import type {
   AuthResponse,
   CellEvent,
@@ -50,14 +50,35 @@ function ago(ms: number): number {
 
 let sequence = 0;
 
-function cell(
+/** The key id every request uses unless the test is exercising a mismatch. */
+const TEST_KEY = "test-key";
+
+/** The envelope the client sends; these tests never open it. */
+function sealed(value: CellValue): CellValue {
+  return { text: `${E2E_PREFIX}${JSON.stringify(value)}` };
+}
+
+/** Seal a value the way the client does; existence and links stay plaintext. */
+function seal(kind: string, field: string, value: CellValue | null): CellValue | null {
+  if (
+    value === null ||
+    field === "" ||
+    fieldSpec(kind, field)?.link !== undefined ||
+    isEncryptedValue(value)
+  ) {
+    return value;
+  }
+  return sealed(value);
+}
+
+function event(
   entityId: string,
   kind: string,
   field: string,
   value: CellValue | null,
   timestamp: number,
-  device = "device-a",
-  eventId = `evt-${++sequence}`,
+  device: string,
+  eventId: string,
 ): CellEvent {
   return {
     event_id: eventId,
@@ -68,6 +89,30 @@ function cell(
     value,
     timestamp,
   };
+}
+
+function cell(
+  entityId: string,
+  kind: string,
+  field: string,
+  value: CellValue | null,
+  timestamp: number,
+  device = "device-a",
+  eventId = `evt-${++sequence}`,
+): CellEvent {
+  return event(entityId, kind, field, seal(kind, field, value), timestamp, device, eventId);
+}
+
+/** A value left in plaintext on purpose, for the validation tests. */
+function plainCell(
+  entityId: string,
+  kind: string,
+  field: string,
+  value: CellValue | null,
+  timestamp: number,
+  device = "device-a",
+): CellEvent {
+  return event(entityId, kind, field, value, timestamp, device, `evt-${++sequence}`);
 }
 
 /**
@@ -119,7 +164,7 @@ async function sync(
   version: number,
   events: CellEvent[] = [],
   page?: number,
-  keyId?: string,
+  keyId = TEST_KEY,
 ): Promise<SyncResponse & { verdictFor: (index: number) => Verdict }> {
   const query = page === undefined ? "" : `?page=${page}`;
   const response = await call(`/api/sync${query}`, {
@@ -148,7 +193,7 @@ async function trySync(
   device: string,
   version: number,
   events: CellEvent[] = [],
-  keyId?: string,
+  keyId = TEST_KEY,
 ): Promise<Response> {
   return call("/api/sync", {
     method: "POST",
@@ -169,14 +214,14 @@ function request(
   device: string,
   version: number,
   events: CellEvent[],
-  keyId?: string,
+  keyId = TEST_KEY,
 ): SyncRequest {
   const log = logs.get(token);
   return {
     protocol: PROTOCOL,
     schema: SCHEMA_VERSION,
     device_id: device,
-    ...(keyId !== undefined ? { key_id: keyId } : {}),
+    key_id: keyId,
     cursor: log === undefined ? null : { log, version },
     events,
   };
@@ -306,10 +351,10 @@ describe("push validation", () => {
       cell(task, "task", "name", { text: "older" }, ago(4500), "device-c"),
     ]);
     expect(older.verdicts[0]).toMatchObject({ outcome: "superseded" });
-    expect(older.verdicts[0]?.winner?.value).toEqual({ text: "newer" });
+    expect(older.verdicts[0]?.winner?.value).toEqual(sealed({ text: "newer" }));
 
     const pulled = await sync(account.token, "device-d", 0);
-    expect(valueOf(pulled.events, task, "name")).toEqual({ text: "newer" });
+    expect(valueOf(pulled.events, task, "name")).toEqual(sealed({ text: "newer" }));
   });
 
   it("lets devices own different fields of one row", async () => {
@@ -324,8 +369,8 @@ describe("push validation", () => {
     ]);
 
     const pulled = await sync(account.token, "device-c", 0);
-    expect(valueOf(pulled.events, task, "name")).toEqual({ text: "n" });
-    expect(valueOf(pulled.events, task, "body")).toEqual({ text: "from b" });
+    expect(valueOf(pulled.events, task, "name")).toEqual(sealed({ text: "n" }));
+    expect(valueOf(pulled.events, task, "body")).toEqual(sealed({ text: "from b" }));
   });
 
   it("refuses a value write for an entity it has never seen", async () => {
@@ -484,7 +529,7 @@ describe("push validation", () => {
     );
 
     const pulled = await sync(account.token, "device-b", 0);
-    expect(valueOf(pulled.events, tracker, "score")).toEqual({ real: 70 });
+    expect(valueOf(pulled.events, tracker, "score")).toEqual(sealed({ real: 70 }));
   });
 
   it("rejects shapes it cannot fold", async () => {
@@ -609,7 +654,7 @@ describe("deletes and links", () => {
     const pulled = await sync(account.token, "device-c", 0);
     // The child keeps its name and loses its parent link.
     expect(valueOf(pulled.events, child, "parent_id")).toBeNull();
-    expect(valueOf(pulled.events, child, "name")).toEqual({ text: "child" });
+    expect(valueOf(pulled.events, child, "name")).toEqual(sealed({ text: "child" }));
     expect(valueOf(pulled.events, mood, "todo_id")).toBeNull();
     expect(valueOf(pulled.events, done, "")).toEqual({ text: "deleted" });
     // The mood still exists, so the tracker keeps its mood.
@@ -741,15 +786,15 @@ describe("superseded notices", () => {
       event_id: myBody?.event_id,
       entity_id: task,
       field: "body",
-      lost: { text: "mine" },
+      lost: sealed({ text: "mine" }),
     });
     expect(firstRead.superseded[0]?.winner).toMatchObject({
       device_id: "device-b",
-      value: { text: "theirs" },
+      value: sealed({ text: "theirs" }),
     });
     // The winner is in the same response, so the client can apply and report
     // in one pass.
-    expect(valueOf(firstRead.events, task, "body")).toEqual({ text: "theirs" });
+    expect(valueOf(firstRead.events, task, "body")).toEqual(sealed({ text: "theirs" }));
 
     // A lost response must not lose the explanation: the cursor did not move.
     const reread = await sync(account.token, "device-a", 0, []);
@@ -978,7 +1023,7 @@ describe("compatibility", () => {
     ]);
     expect(childCreated.verdicts[2]?.reason).toBe("target_deleted");
     const pulledChild = await sync(account.token, "device-c", 0);
-    expect(valueOf(pulledChild.events, childTask, "name")).toEqual({ text: "surviving-child" });
+    expect(valueOf(pulledChild.events, childTask, "name")).toEqual(sealed({ text: "surviving-child" }));
     expect(
       pulledChild.events.some((row) => row.entity_id === childTask && row.field === "parent_id"),
     ).toBe(false);
@@ -1039,14 +1084,14 @@ describe("compatibility", () => {
     const taskId = "0193f000-0000-7000-8000-000000000095";
     const encVal = { text: "e2e:v1:YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkw" };
 
-    // 1. With key_id = "key-a", plaintext non-link value is rejected with "class"
+    // 1. Plaintext non-link values are rejected even on the log's first push
     const plainResult = await sync(
       account.token,
       "device-a",
       0,
       [
         cell(taskId, "task", "", { text: "live" }, ago(5000)),
-        cell(taskId, "task", "name", { text: "unencrypted plaintext" }, ago(5000)),
+        plainCell(taskId, "task", "name", { text: "unencrypted plaintext" }, ago(5000)),
         cell(taskId, "task", "start_time", encVal, ago(5000)),
       ],
       undefined,
@@ -1093,5 +1138,13 @@ describe("compatibility", () => {
     };
     expect(mismatchBody.code).toBe("key_mismatch");
     expect(mismatchBody.key_id).toBe("key-a");
+  });
+
+  it("requires a key id from every protocol-2 sync", async () => {
+    const account = await register("keyless@example.com");
+    const { key_id: _omitted, ...body } = request(account.token, "device-a", 0, []);
+    const response = await call("/api/sync", { method: "POST", token: account.token, body });
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as { error: string }).error).toContain("key_id is required");
   });
 });

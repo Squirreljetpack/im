@@ -22,10 +22,10 @@ deployment (§1) and entirely on one machine with Miniflare (§2).
   command, so a stale export wins over the config.
 - `[sync] encryption_key` overrides the credential-derived key. Use
   `b64:<base64-encoded 32 bytes>` or `pass:<passphrase>`; every device on the
-  account must set the same value. `im :sync status` prints the key id, and the
-  first push pins it in the log. A round whose key id differs is refused before
-  anything is sent or applied; signing in again derives the same key, so restore
-  the key the log was created with.
+  account must set the same value. Every push carries the key id, and the first
+  push pins it in the log. `im :sync status` prints it. A round whose key id
+  differs is refused before anything is sent or applied; signing in again
+  derives the same key, so restore the key the log was created with.
 - A client and server must agree on protocol and schema versions; a server that speaks
   protocol 2 refuses mismatched clients with `this server speaks sync protocol 2 and schema 4`.
   Upgrade the client; there is no compatibility mode.

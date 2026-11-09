@@ -73,7 +73,7 @@ export interface SyncRequest {
   protocol: number;
   schema: number;
   device_id: string;
-  key_id?: string;
+  key_id: string;
   /** Where this device has read to, in the log it names; `null` until a sync
    * names one. */
   cursor: CellCursor | null;
