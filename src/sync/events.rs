@@ -100,14 +100,70 @@ pub async fn completion_time(conn: &mut SqliteConnection, id: Id) -> Result<()> 
     .await
 }
 
-/// Emit a delete, dropping any pending field cells for the entity first.
+/// Emit a delete, dropping the pending cells it makes unpushable first.
+///
+/// The entity's own field cells go, but its existence cell stays as the
+/// tombstone. Cells of entities the delete cascades must go too: the cascade
+/// runs through the local foreign keys, while the outbox is an intent log
+/// that outlives the rows, so a pending create there would reach the server
+/// linked to an entity it never saw. [`retire_cascade`] walks the same rules
+/// the server uses.
 pub async fn delete(conn: &mut SqliteConnection, id: Id, kind: &str) -> Result<()> {
+    retire_cascade(conn, kind, id).await?;
     sqlx::query("DELETE FROM _sync_events WHERE entity_id = ? AND field != ''")
         .bind(id)
         .execute(&mut *conn)
         .await
         .context("Failed to clear pending field events for a deleted entity")?;
     append(conn, id, kind, EXISTENCE, deleted()).await?;
+    Ok(())
+}
+
+/// Drop the pending cells a delete of `kind` makes unpushable.
+///
+/// A cascade edge either deletes the linked entity or clears the link. The
+/// linked rows follow their foreign keys, but their queued cells do not, so
+/// walk `sync_schema.json`'s cascade rules: a `delete` edge retires every
+/// pending cell of the linked entities (a completion whose task is gone must
+/// never be pushed); a `set_null` edge retires just the link cell, leaving the
+/// entity's other cells to be pushed without it.
+pub(super) async fn retire_cascade(conn: &mut SqliteConnection, kind: &str, id: Id) -> Result<()> {
+    let Some(spec) = schema::kind(kind) else {
+        return Ok(());
+    };
+    let link = serde_json::to_string(&CellValue::Text(id.to_string()))
+        .context("Failed to serialize a link value")?;
+    for edge in &spec.cascade {
+        match edge.action {
+            schema::Action::Delete => {
+                sqlx::query(
+                    "DELETE FROM _sync_events
+                      WHERE entity_id IN (
+                              SELECT entity_id FROM _sync_events
+                               WHERE kind = ? AND field = ? AND value = ?
+                            )",
+                )
+                .bind(&edge.kind)
+                .bind(&edge.field)
+                .bind(&link)
+                .execute(&mut *conn)
+                .await
+                .context("Failed to retire a cascaded entity's cells")?;
+            }
+            schema::Action::SetNull => {
+                sqlx::query(
+                    "DELETE FROM _sync_events
+                      WHERE kind = ? AND field = ? AND value = ?",
+                )
+                .bind(&edge.kind)
+                .bind(&edge.field)
+                .bind(&link)
+                .execute(&mut *conn)
+                .await
+                .context("Failed to retire a cascaded link cell")?;
+            }
+        }
+    }
     Ok(())
 }
 

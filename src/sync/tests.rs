@@ -133,6 +133,84 @@ async fn a_delete_drops_pending_field_edits_and_queues_its_marker() {
 }
 
 #[tokio::test]
+async fn deleting_a_task_retires_cells_for_its_cascade() {
+    let pool = test_pool().await.expect("in-memory db");
+    let (task_id, _) = create_task(&pool, &task("parent")).await.expect("create");
+
+    let mut child = task("child");
+    child.parent = Some(task_id);
+    let (child_id, _) = create_task(&pool, &child).await.expect("create");
+
+    let mood_id = crate::db::create_entry(
+        &pool,
+        &crate::db::EntryObject {
+            mood: "calm".to_string(),
+            body: String::new(),
+            time: crate::date::LogTime {
+                epoch: 1_700_000_000,
+                offset: 0,
+            },
+            location: "home".to_string(),
+            embedding: None,
+            score: None,
+            trackers: Vec::new(),
+            duration: None,
+            todo_id: Some(task_id),
+        },
+    )
+    .await
+    .expect("create entry")
+    .expect("mood id");
+
+    crate::db::set_scheduled_completion(&pool, task_id, Some(1))
+        .await
+        .expect("complete");
+    let completion_id: crate::db::Id =
+        sqlx::query_scalar("SELECT id FROM todo_completions WHERE todo_id = ?")
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .expect("completion row");
+
+    delete_task(&pool, task_id).await.expect("delete");
+
+    let rows = queued(&pool).await;
+    assert!(
+        !rows.iter().any(|row| row.cell.entity_id == completion_id),
+        "the cascaded completion has no cells left"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.cell.entity_id == mood_id && row.cell.field == "todo_id"),
+        "the cleared mood link is not pushed"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.cell.entity_id == child_id && row.cell.field == "parent_id"),
+        "the cleared child link is not pushed"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.cell.entity_id == mood_id && row.cell.field == EXISTENCE),
+        "the mood itself survives"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.cell.entity_id == child_id && row.cell.field == EXISTENCE),
+        "the child itself survives"
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.cell.entity_id == task_id)
+            .count(),
+        1,
+        "the task is left with just its tombstone"
+    );
+}
+
+#[tokio::test]
 async fn repeated_edits_to_one_field_coalesce_in_the_outbox() {
     let pool = test_pool().await.expect("in-memory db");
     let (id, _) = create_task(&pool, &task("draft")).await.expect("create");
@@ -333,6 +411,47 @@ async fn a_served_delete_takes_the_dependants_with_it() {
         .await
         .expect("the child survives");
     assert_eq!(link, None, "and is promoted to a root");
+}
+
+#[tokio::test]
+async fn a_served_task_delete_retires_pending_dependants() {
+    let pool = test_pool().await.expect("in-memory db");
+    let (task_id, _) = create_task(&pool, &task("parent")).await.expect("create");
+    crate::db::set_scheduled_completion(&pool, task_id, Some(1))
+        .await
+        .expect("complete");
+    let completion_id: crate::db::Id =
+        sqlx::query_scalar("SELECT id FROM todo_completions WHERE todo_id = ?")
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .expect("completion row");
+
+    let delete = LogRow {
+        version: 99,
+        cell: CellEvent {
+            event_id: crate::db::EventId::new(),
+            device_id: crate::db::Id::new(),
+            entity_id: task_id,
+            kind: "task".to_string(),
+            field: EXISTENCE.to_string(),
+            value: super::types::deleted(),
+            timestamp: 99,
+        },
+    };
+    apply::apply_rows(
+        &mut pool.acquire().await.unwrap(),
+        &[delete],
+        &mut apply::Pending::default(),
+    )
+    .await
+    .expect("apply the delete");
+
+    let rows = queued(&pool).await;
+    assert!(
+        !rows.iter().any(|row| row.cell.entity_id == completion_id),
+        "a served task delete retires the completion it cascaded"
+    );
 }
 
 #[tokio::test]

@@ -403,6 +403,7 @@ async fn apply_cell(
 ) -> Result<()> {
     let kind = row.cell.kind.as_str();
     let entity = row.cell.entity_id;
+    let deleting = row.cell.field == EXISTENCE && is_dead(&row.cell);
     let Some(table) = schema::table(kind) else {
         applied.skipped.push(Skip {
             entity_id: entity,
@@ -465,12 +466,17 @@ async fn apply_cell(
                 }
             })
     };
-    if let Err(error) = outcome {
-        applied.skipped.push(Skip {
+    match outcome {
+        Err(error) => applied.skipped.push(Skip {
             entity_id: entity,
             field: row.cell.field.clone(),
             reason: error.to_string(),
-        });
+        }),
+        Ok(()) => {
+            if deleting {
+                super::events::retire_cascade(&mut *conn, kind, entity).await?;
+            }
+        }
     }
     Ok(())
 }
