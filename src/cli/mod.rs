@@ -364,11 +364,20 @@ pub enum TrackerPeriod {
 
 /// One item in a `im :` display list. `Mood` is a positional marker
 /// (a bare `:` token in the args) that renders the mood grid at that spot;
-/// `Tracker(name)` renders that tracker's grid (`@name` for recurring).
+/// `Tracker(name)` (`-name`) renders that tracker's dot grid;
+/// `Recurring(name)` (`@name`) the recurring task's completion dots; the
+/// remaining three are per-day heatmaps — `TaskHeatmap(query)` (`+query`)
+/// over task completions, `EntryHeatmap(query)` (`%query`) over entry
+/// counts, and `Anchor(query)` (any bare word) over the day's semantic
+/// similarity to the query as a mood anchor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrackerItem {
     Mood,
     Tracker(String),
+    Recurring(String),
+    TaskHeatmap(String),
+    EntryHeatmap(String),
+    Anchor(String),
 }
 
 mod parse;

@@ -20,17 +20,22 @@ Entry creation full grammar:
   - (a string of) one or more words that uniquely queries a task name (+groceries)
   - or nothing (+): pick interactively (in entry task linking).
 
-  At most one task reference can be specified per entry. A task reference and
-  trackers can freely mix after the mood or session purpose. Pure numeric
-  tracker names (`-5`) are rejected: negative numbers are tracker values or
-  completion deltas.
-
-  With an attached `+<ref>`, the next word decides between an entry and child
-  creation: a number, `.`, `+`, or `-` starts an entry (completion, body,
-  another reference, or a tracker); anything else is the child task's name.
+  At most one task can be referenced per entry.
 
   Entry creation (`im <mood>`, tracker-only entries, and `im %<duration>`)
   accepts a trailing [<dots> [body]].
   - <dots> is some number of `.`'s.
   - If without a body, `$EDITOR` will open: the number of dots then chooses
     which template (defined in your config file) the `$EDITOR` opens.
+
+Grid display list (`im :[week|month|year] <items>`):
+  Each item renders its own grid section, in order:
+  - `-<tracker>`: that tracker's dot grid (the leading `-` is required).
+  - `@<recurring>`: a recurring task's completion dots. The name must match
+    exactly one recurring task.
+  - `+<query>`: per-day heatmap of task completions over every task whose name contains the query.
+  - `%<query>`: per-day heatmap of entry counts over mood and tracker entries whose name
+    contains the query.
+  - any bare word: per-day heatmap of the day's moods' semantic
+    similarity to the query, treated as a mood anchor.
+  - `:`: the mood grid itself, at this position.

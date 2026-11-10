@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crossterm::style::Color;
 use serde::{Deserialize, Serialize};
 
-use crate::config::BadgeSetting;
+use crate::config::{BadgeSetting, ColorBins};
 
 /// The day each week starts on, as configured in `[grid]` (`"Monday"` …
 /// `"Sunday"`, case-insensitive on parse). jiff-english's serde-friendly
@@ -12,7 +12,9 @@ use crate::config::BadgeSetting;
 pub use jiff_english::serde::Weekday;
 
 /// `[grid]` section — how far back the tracker grids (`:`, `:week`, `:month`,
-/// `:year`) reach, and which day each week starts on.
+/// `:year`) reach, which day each week starts on, and the palettes of the
+/// per-day heatmaps (`+query` task completions, `%query` entry counts, and
+/// mood-anchor alignment queries).
 ///
 /// Each period has two modes. "Rolling" grids always end today and keep a
 /// fixed number of cells, so today is always the last one. Calendar grids
@@ -39,6 +41,27 @@ pub struct GridViewConfig {
     /// The day each week starts on for the grids, and the alignment day for
     /// the rolling month and year windows.
     pub week_start: Weekday,
+
+    /// Palette of the `+query` task-completion heatmap (first color = the
+    /// fewest completions observed, last = the most).
+    #[serde(default = "default_heatmap_palette")]
+    pub task_color_range: ColorBins,
+
+    /// Palette of the `%query` entry-count heatmap (first color = the fewest
+    /// matching entries observed, last = the most).
+    #[serde(default = "default_heatmap_palette")]
+    pub entry_color_range: ColorBins,
+
+    /// Palette of the mood-anchor alignment heatmap (first color = the least
+    /// similar day, last = the most similar).
+    #[serde(default = "default_heatmap_palette")]
+    pub mood_color_range: ColorBins,
+}
+
+/// The default heatmap palette: the same grayscale ramp trackers fall back
+/// to ([`crate::config::DEFAULT_TRACKER_PALETTE`]).
+fn default_heatmap_palette() -> ColorBins {
+    crate::config::DEFAULT_TRACKER_PALETTE.to_vec().into()
 }
 
 impl Default for GridViewConfig {
@@ -48,6 +71,9 @@ impl Default for GridViewConfig {
             year_rolling: true,
             month_rolling: true,
             week_start: Weekday::Monday,
+            task_color_range: default_heatmap_palette(),
+            entry_color_range: default_heatmap_palette(),
+            mood_color_range: default_heatmap_palette(),
         }
     }
 }
@@ -105,10 +131,11 @@ impl Default for TasksViewConfig {
 pub struct EditorConfig {
     /// Body templates for mood-entry bodies: a bare body delimiter of `n`
     /// dots opens the editor seeded with the `(n-1)`th entry (1 dot = first
-    /// template). Out-of-range dot counts fall back to the legacy hint
-    /// line; an empty entry opens a blank document; a non-empty path that
-    /// can't be read warns and opens blank. `%%` comment blocks are
-    /// always stripped from the saved body (markers included).
+    /// template). Relative paths resolve against the config directory.
+    /// Out-of-range dot counts fall back to the legacy hint line; an empty
+    /// entry opens a blank document; a non-empty path that can't be read
+    /// warns and opens blank. `%%` comment blocks are always stripped from
+    /// the saved body (markers included).
     pub mood_template: Vec<PathBuf>,
     /// Body templates for oneshot-task bodies (same semantics as
     /// `mood_template`).

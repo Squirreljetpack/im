@@ -38,6 +38,12 @@ week_rolling = false
 month_rolling = true
 year_rolling = true
 week_start = "Monday"
+# Palettes of the per-day heatmaps in `im :` display lists (first color =
+# the lowest observed day value, last = the highest; days without data
+# render empty). Default: the tracker grayscale.
+# task_color_range = ["#2E3038", "#434A58", "#5E6779", "#7F869A", "#A7ACC2"]
+# entry_color_range = ["#2E3038", "#434A58", "#5E6779", "#7F869A", "#A7ACC2"]
+# mood_color_range = ["#2E3038", "#434A58", "#5E6779", "#7F869A", "#A7ACC2"]
 
 [preview]
 # Show a `last:` field for done tasks in the preview pane.
@@ -115,10 +121,11 @@ colors = "rating"
 [editor]
 # Body-editor templates per entry kind (arrays): a bare `.` opens the
 # editor seeded with the first template, `..` with the second, and so on;
-# out-of-range dot counts fall back to the legacy hint line. An empty
-# entry opens a blank document; a non-empty path that can't be read warns
-# and opens blank. Lines between two `%%` markers are stripped from the
-# saved body (markers included).
+# out-of-range dot counts fall back to the legacy hint line. Relative paths
+# resolve against this file's directory. An empty entry opens a blank
+# document; a non-empty path that can't be read warns and opens blank.
+# Lines between two `%%` markers are stripped from the saved body (markers
+# included).
 # mood_template = ["templates/mood.txt"]
 # task_template = []
 # recurring_template = []
@@ -126,7 +133,8 @@ colors = "rating"
 
 [session]
 # title = "im"
-# sound = "chime"
+# play_sound = false # play without -v (default: false; -v enables it per run)
+# sound = "chime" # or a path relative to this file's directory (unset = no sound)
 # sound_duration = "5s"
 # delay = 0
 # kind = "bell"

@@ -313,30 +313,43 @@ pub async fn fetch_tracker_entries(
 }
 
 /// Recurring task metadata for the completion-dots tracker; accepts either a
-/// numeric short id or the unique task name.
+/// numeric short id or a task name, which must match exactly one recurring
+/// task (the grid item cannot pick between homonyms).
 pub async fn fetch_recurring_task_meta(
     pool: &SqlitePool,
     name_or_id: &str,
 ) -> Result<Option<RecurringTaskMeta>> {
-    let row = if let Ok(short_id) = name_or_id.parse::<i64>() {
-        sqlx::query(
+    if let Ok(short_id) = name_or_id.parse::<i64>() {
+        let row = sqlx::query(
             "SELECT id, start_time, interval_secs, target_count FROM todos WHERE short_id = ? AND interval_secs IS NOT NULL",
         )
         .bind(short_id)
         .fetch_optional(pool)
         .await
-        .context("Failed to fetch recurring task")?
-    } else {
-        sqlx::query(
-            "SELECT id, start_time, interval_secs, target_count FROM todos WHERE name = ? AND interval_secs IS NOT NULL",
-        )
-        .bind(name_or_id)
-        .fetch_optional(pool)
-        .await
-        .context("Failed to fetch recurring task")?
-    };
+        .context("Failed to fetch recurring task")?;
+        return Ok(row.map(|r| RecurringTaskMeta {
+            id: r.get("id"),
+            start_time: r.get("start_time"),
+            interval_secs: r.get("interval_secs"),
+            target_count: r.get("target_count"),
+        }));
+    }
 
-    Ok(row.map(|r| RecurringTaskMeta {
+    let rows = sqlx::query(
+        "SELECT id, start_time, interval_secs, target_count FROM todos WHERE name = ? AND interval_secs IS NOT NULL",
+    )
+    .bind(name_or_id)
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch recurring task")?;
+
+    if rows.len() > 1 {
+        anyhow::bail!(
+            "Recurring task name '{name_or_id}' matches {} tasks; the grid needs a unique match",
+            rows.len()
+        );
+    }
+    Ok(rows.into_iter().next().map(|r| RecurringTaskMeta {
         id: r.get("id"),
         start_time: r.get("start_time"),
         interval_secs: r.get("interval_secs"),
@@ -370,6 +383,33 @@ pub async fn fetch_completions_between(
             location: row.get("location"),
             count: row.get("count"),
         })
+        .collect())
+}
+
+/// Completion events (time, net count, task name) whose recorded civil time
+/// falls in `range`, oldest first — the raw deltas behind the grid's `+query`
+/// task-completion heatmap. Unlike [`fetch_completions_between`] this spans
+/// every task and keeps each event separate (no interval grouping).
+pub async fn fetch_completion_deltas_civil(
+    pool: &SqlitePool,
+    range: CivilRange,
+) -> Result<Vec<(crate::date::LogTime, i32, String)>> {
+    let rows = sqlx::query(
+        "SELECT c.time AS time, c.tz_offset AS tz_offset, c.count AS count, \
+         t.name AS task_name FROM todo_completions c \
+         JOIN todos t ON t.id = c.todo_id \
+         WHERE c.time + c.tz_offset BETWEEN ? AND ? \
+         ORDER BY c.time ASC, c.id ASC",
+    )
+    .bind(range.start)
+    .bind(range.end)
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch completion deltas")?;
+
+    Ok(rows
+        .iter()
+        .map(|row| (log_time(row), row.get("count"), row.get("task_name")))
         .collect())
 }
 

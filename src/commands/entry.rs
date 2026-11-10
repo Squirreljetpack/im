@@ -132,11 +132,7 @@ pub(super) async fn record_entry(
                     cliclack::log::info("Session ended")?;
                 } else {
                     let purpose = entry.purpose.as_deref().unwrap_or("");
-                    let notif_title = if config.session.title.is_empty() {
-                        "im"
-                    } else {
-                        &config.session.title
-                    };
+                    let notif_title = &config.session.title;
                     let notif_body = if purpose.is_empty() {
                         "Session complete!"
                     } else {
@@ -148,12 +144,14 @@ pub(super) async fn record_entry(
                     if config.session.delay > 0 {
                         notif = notif.delay(config.session.delay);
                     }
-                    if let Some(ref sound_path) = config.session.sound {
-                        if let Ok(mut sound) = notify::Sound::from_name_or_path(sound_path) {
-                            if let Some(duration) = config.session.sound_duration {
-                                sound.duration = Some(duration);
+                    if config.session.play_sound || opts.verbose() {
+                        if !config.session.sound.as_os_str().is_empty() {
+                            if let Ok(mut sound) = notify::Sound::from_name_or_path(&config.session.sound) {
+                                if let Some(duration) = config.session.sound_duration {
+                                    sound.duration = Some(duration);
+                                }
+                                notif = notif.sound(sound);
                             }
-                            notif = notif.sound(sound);
                         }
                     }
                     let _ = notif.send();

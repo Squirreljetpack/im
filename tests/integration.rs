@@ -3811,8 +3811,8 @@ async fn test_tracker_dots() {
     .await
     .unwrap();
 
-    // : sleep should show a filled dot
-    let cmd = parse_from(vec![":".to_string(), "sleep".to_string()]).unwrap();
+    // : -sleep should show a filled dot
+    let cmd = parse_from(vec![":".to_string(), "-sleep".to_string()]).unwrap();
     let mut out = Vec::new();
     execute_command(cmd, &pool, &config, &CliOpts::default(), &mut out, false)
         .await
@@ -3823,7 +3823,7 @@ async fn test_tracker_dots() {
     assert!(!output.contains("Tracker 'sleep'"), "output: {output:?}");
     assert!(output.contains('●'), "expected a filled dot: {output:?}");
 
-    let vv_cmd = parse_from(vec![":".to_string(), "sleep".to_string()]).unwrap();
+    let vv_cmd = parse_from(vec![":".to_string(), "-sleep".to_string()]).unwrap();
     let mut out = Vec::new();
     execute_command(
         vv_cmd,
@@ -3967,6 +3967,126 @@ async fn test_tracker_recurring_year_uses_middle_dot() {
         output.contains(&format!("@{name} (Year)")),
         "output: {output:?}"
     );
+}
+
+#[tokio::test]
+async fn test_tracker_grid_heatmap_items() {
+    use im::config::{TrackerKind, TrackerSetting};
+
+    let pool = test_pool().await.unwrap();
+    let mut config = Config::default();
+    config.tracker.insert(
+        "sleep".to_string(),
+        TrackerSetting {
+            interval: None,
+            low: None,
+            high: None,
+            kind: TrackerKind::Float,
+            strict: false,
+            colors: Err("default".to_string()),
+        },
+    );
+
+    // A recurring task with one completion today (created directly: the CLI
+    // only creates recurring tasks interactively).
+    sqlx::query(
+        "INSERT INTO todos (id, name, body, priority, interval_secs, available_duration_secs, target_count, optional, start_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).bind(im::db::Id::new())
+    .bind("exercise")
+    .bind("")
+    .bind(5)
+    .bind(pack_interval(86_400))
+    .bind::<Option<i64>>(None)
+    .bind(0)
+    .bind(0)
+    .bind(0)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let task_id: im::db::Id = sqlx::query_scalar("SELECT id FROM todos WHERE name = 'exercise'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    im::db::update_task(&pool, task_id, 1).await.unwrap();
+
+    // Today's data: one mood entry (anchor heatmap) and one tracker entry
+    // (entry heatmap), plus the completion above (task heatmap).
+    for args in [vec!["happy"], vec!["-sleep", "8"]] {
+        let cmd = parse_from(args.iter().map(|a| a.to_string()).collect::<Vec<_>>()).unwrap();
+        execute_command(
+            cmd,
+            &pool,
+            &config,
+            &CliOpts::default(),
+            &mut Vec::new(),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+
+    let pool2 = pool.clone();
+    let cfg = &config;
+    let run_grid = move |items: Vec<String>| {
+        let pool = pool.clone();
+        async move {
+            let cmd = parse_from(
+                std::iter::once(":".to_string())
+                    .chain(items.into_iter())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let mut out = Vec::new();
+            execute_command(cmd, &pool, cfg, &CliOpts::default(), &mut out, false)
+                .await
+                .unwrap();
+            String::from_utf8(out).unwrap()
+        }
+    };
+
+    // +query: today's completion sums to one colored dot.
+    let output = run_grid(vec!["+exercise".to_string()]).await;
+    assert!(output.contains('●'), "expected a filled dot: {output:?}");
+
+    // +query filters by task-name substring: an unrelated query matches
+    // nothing and says so.
+    let output = run_grid(vec!["+nomatch".to_string()]).await;
+    assert!(
+        output.contains("No task completions matching 'nomatch'"),
+        "output: {output:?}"
+    );
+
+    // %query: today's tracker entry counts, by category name.
+    let output = run_grid(vec!["%sleep".to_string()]).await;
+    assert!(output.contains('●'), "expected a filled dot: {output:?}");
+    let output = run_grid(vec!["%nomatch".to_string()]).await;
+    assert!(
+        output.contains("No entries matching 'nomatch'"),
+        "output: {output:?}"
+    );
+
+    // A bare word: mood-anchor similarity heatmap over today's mood.
+    let output = run_grid(vec!["happy".to_string()]).await;
+    assert!(output.contains('●'), "expected a filled dot: {output:?}");
+
+    // -vv titles spell each item with its sigil and period.
+    let cmd = parse_from(vec![":".to_string(), "+exercise".to_string()]).unwrap();
+    let mut out = Vec::new();
+    execute_command(
+        cmd,
+        &pool2,
+        &config,
+        &CliOpts {
+            qv: [0, 2],
+            fullscreen: false,
+        },
+        &mut out,
+        false,
+    )
+    .await
+    .unwrap();
+    let output = String::from_utf8(out).unwrap();
+    assert!(output.contains("+exercise (Week)"), "output: {output:?}");
 }
 
 #[tokio::test]
@@ -4200,8 +4320,8 @@ async fn test_text_tracker_entry_today_badge_and_listing() {
         "text tracker entries must use the ◆ badge: {output:?}"
     );
 
-    // : accomplishment lists entries as dark-gray '> text' lines
-    let cmd = parse_from(vec![":".to_string(), "accomplishment".to_string()]).unwrap();
+    // : -accomplishment lists entries as dark-gray '> text' lines
+    let cmd = parse_from(vec![":".to_string(), "-accomplishment".to_string()]).unwrap();
     let mut out = Vec::new();
     execute_command(cmd, &pool, &config, &CliOpts::default(), &mut out, false)
         .await
@@ -4245,7 +4365,7 @@ async fn test_text_tracker_lists_all_entries_in_range() {
         .unwrap();
     }
 
-    let cmd = parse_from(vec![":".to_string(), "accomplishment".to_string()]).unwrap();
+    let cmd = parse_from(vec![":".to_string(), "-accomplishment".to_string()]).unwrap();
     let mut out = Vec::new();
     execute_command(cmd, &pool, &config, &CliOpts::default(), &mut out, false)
         .await

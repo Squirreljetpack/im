@@ -79,9 +79,10 @@ pub struct MoodConfig {
     #[serde(flatten)]
     pub axes: ColorAxesSettings,
 
-    /// Path of the moods file holding the `[[pairs]]` anchors, relative to
-    /// the config directory. Empty (the default) uses the bundled moods
-    /// file; a missing or unparsable file falls back to it as well.
+    /// Path of the moods file holding the `[[pairs]]` anchors. Relative
+    /// paths resolve against the config directory. Empty (the default) uses
+    /// the bundled moods file; a missing or unparsable file falls back to it
+    /// as well.
     #[serde(default)]
     pub source: PathBuf,
 
@@ -93,17 +94,19 @@ pub struct MoodConfig {
 
 impl MoodConfig {
     /// Resolve the anchor pairs. An empty `source` skips deserialization
-    /// and uses the bundled default directly. Otherwise the `source` file
-    /// (relative to the config directory) is deserialized, falling back to
-    /// the bundled default when it can't be read or parsed, or when it
-    /// yields no pairs (the same load-or-default pattern as the config
-    /// itself, see `cba::bo::load_type_or_default`).
+    /// and uses the bundled default directly. Otherwise `source` is used as
+    /// given — [`super::Config::init`] resolves relative paths against the
+    /// config directory — falling back to the bundled default when the file
+    /// can't be read or parsed, or when it yields no pairs (the same
+    /// load-or-default pattern as the config itself, see
+    /// `cba::bo::load_type_or_default`).
     pub fn load_pairs(&self) -> Vec<MoodEndpoint> {
         if self.source.as_os_str().is_empty() {
             return MoodsFile::default().pairs;
         }
-        let path = crate::paths::config_dir().join(&self.source);
-        let file = cba::bo::load_type_or_default(path, None, |s| toml::from_str::<MoodsFile>(s));
+        let file = cba::bo::load_type_or_default(&self.source, None, |s| {
+            toml::from_str::<MoodsFile>(s)
+        });
         if file.pairs.is_empty() {
             return MoodsFile::default().pairs;
         }

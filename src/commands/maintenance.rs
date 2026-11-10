@@ -344,8 +344,8 @@ pub(super) async fn edit_config() -> Result<()> {
     open_editor_at(path)
 }
 
-/// `im :tool config moods` — open the moods file (`[moods] source`, relative to
-/// the config directory) in $VISUAL/$EDITOR.
+/// `im :tool config moods` — open the moods file (`[moods] source`, resolved
+/// against the config directory by [`Config::init`]) in $VISUAL/$EDITOR.
 ///
 /// Like [`edit_config`], a missing file is created from the bundled moods
 /// defaults first, announced with `ibog!`. When `[moods] source` is empty
@@ -359,14 +359,14 @@ pub(super) async fn edit_moods(config: &Config) -> Result<()> {
         );
         return Ok(());
     }
-    let path = crate::paths::config_dir().join(&config.moods.source);
+    let path = &config.moods.source;
     let mut created = false;
     if !path.exists() {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create config dir {:?}", parent))?;
         }
-        std::fs::write(&path, DEFAULT_MOODS.as_bytes())
+        std::fs::write(path, DEFAULT_MOODS.as_bytes())
             .with_context(|| format!("Failed to write default moods file to {:?}", path))?;
         created = true;
     }

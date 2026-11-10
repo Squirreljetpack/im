@@ -25,10 +25,11 @@ pub(crate) fn parse_special_command(args: &[String]) -> anyhow::Result<Command> 
 
     // Tracker view: dispatches on two syntaxes:
     //   `:`                — default period (Week), then an ordered display
-    //                        list of trackers and `:` mood-grid markers
+    //                        list of grid items (`-tracker`, `@recurring`,
+    //                        `+`/`%` heatmaps, anchor queries, `:` markers)
     //   `:week|month|year` — period as a bare suffix on the first token
     // A stray `:<unknown>` token (e.g. `:foo`) is rejected: if the user
-    // meant an id filter, they need to type `im : foo` with a space.
+    // meant an anchor query, they need to type `im : foo` with a space.
     if is_bare_tracker_form(first) {
         return parse_tracker_command(args);
     }
@@ -52,8 +53,8 @@ fn clap_argv(args: &[String]) -> impl Iterator<Item = String> + '_ {
 }
 
 /// `im :` and its period variants — the tracker grids, whose arguments are
-/// all tracker ids. Kept apart from the named subcommands because these take
-/// no `--help` token (an id may legitimately look like a flag).
+/// all display-list items. Kept apart from the named subcommands because
+/// these take no `--help` token (an item may legitimately look like a flag).
 fn is_bare_tracker_form(first: &str) -> bool {
     matches!(first, ":" | ":week" | ":month" | ":year")
 }

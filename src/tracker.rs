@@ -240,52 +240,90 @@ pub async fn write_tracker_grid<W: Write>(
         if i > 0 && !opts.verbose() {
             writeln!(out)?;
         }
+        // The -v section title of each item kind, spelled like the item
+        // itself.
+        let title: String = match item {
+            TrackerItem::Mood => "Moods".to_string(),
+            TrackerItem::Tracker(name) => name.clone(),
+            TrackerItem::Recurring(name) => format!("@{name}"),
+            TrackerItem::TaskHeatmap(query) => format!("+{query}"),
+            TrackerItem::EntryHeatmap(query) => format!("%{query}"),
+            TrackerItem::Anchor(query) => query.clone(),
+        };
+        if opts.verbose() {
+            writeln!(out, "{}", grid_title(&title, period, opts.verbose_level()))?;
+        }
         match item {
             TrackerItem::Mood => {
                 // Positional mood-grid marker: render the mood dots grid here.
-                if opts.verbose() {
-                    writeln!(out, "{}", grid_title("Moods", period, opts.verbose_level()))?;
-                }
                 display_mood_tracker(pool, config, axes, start_epoch, end_epoch, period, out)
                     .await?;
             }
-            TrackerItem::Tracker(id_str) => {
-                if let Some(name) = id_str.strip_prefix('@') {
-                    // Recurring task: display completion dots
-                    if opts.verbose() {
-                        writeln!(
-                            out,
-                            "{}",
-                            grid_title(&format!("@{name}"), period, opts.verbose_level())
-                        )?;
-                    }
-                    display_recurring_tracker(
-                        pool,
-                        config,
-                        name,
-                        start_epoch,
-                        end_epoch,
-                        period,
-                        out,
-                    )
-                    .await?;
-                } else {
-                    // Tracker: display score dots
-                    if opts.verbose() {
-                        writeln!(out, "{}", grid_title(id_str, period, opts.verbose_level()))?;
-                    }
-                    display_tracker(
-                        pool,
-                        config,
-                        id_str,
-                        start_epoch,
-                        end_epoch,
-                        period,
-                        opts,
-                        out,
-                    )
-                    .await?;
-                }
+            TrackerItem::Tracker(name) => {
+                display_tracker(
+                    pool,
+                    config,
+                    name,
+                    start_epoch,
+                    end_epoch,
+                    period,
+                    opts,
+                    out,
+                )
+                .await?;
+            }
+            TrackerItem::Recurring(name) => {
+                // Recurring task: display completion dots
+                display_recurring_tracker(
+                    pool,
+                    config,
+                    name,
+                    start_epoch,
+                    end_epoch,
+                    period,
+                    out,
+                )
+                .await?;
+            }
+            TrackerItem::TaskHeatmap(query) => {
+                // Completions of every task whose name contains the query.
+                display_task_heatmap(
+                    pool,
+                    config,
+                    query,
+                    start_epoch,
+                    end_epoch,
+                    period,
+                    out,
+                )
+                .await?;
+            }
+            TrackerItem::EntryHeatmap(query) => {
+                // Mood and tracker entries whose name contains the query.
+                display_entry_heatmap(
+                    pool,
+                    config,
+                    query,
+                    start_epoch,
+                    end_epoch,
+                    period,
+                    out,
+                )
+                .await?;
+            }
+            TrackerItem::Anchor(query) => {
+                // Alignment of each day's moods with the query as an anchor.
+                display_anchor_heatmap(
+                    pool,
+                    config,
+                    axes,
+                    query,
+                    start_epoch,
+                    end_epoch,
+                    period,
+                    out,
+                )
+                .await?;
             }
         }
     }
@@ -344,23 +382,13 @@ async fn display_mood_tracker<W: Write>(
 
     let embedder = global::embedder();
 
-    let mut day_dates = Vec::new();
-    let mut day = start_date;
-    while day <= end_date {
-        day_dates.push(day);
-        day = day
-            .checked_add(jiff::Span::new().days(1))
-            .context("mood grid: day overflow")?;
-    }
+    let day_dates = civil_day_dates(start_date, end_date)?;
     let num_days = day_dates.len();
     let mut day_moods: Vec<Vec<&crate::db::MoodRow>> = vec![Vec::new(); num_days];
     let mut day_has_entry: Vec<bool> = vec![false; num_days];
 
     for f in &moods {
-        let Some(civil_date) = f.time.civil().ok().map(|civil| civil.date()) else {
-            continue;
-        };
-        let Ok(day_idx) = day_dates.binary_search(&civil_date) else {
+        let Some(day_idx) = day_index(&day_dates, f.time) else {
             continue;
         };
         day_has_entry[day_idx] = true;
@@ -448,6 +476,10 @@ async fn display_mood_tracker<W: Write>(
     // Year grids always use the heatmap layout: one column per week, one
     // row per weekday (rows start at grid.week_start), dots from the
     // window start through today.
+    let day_colors: Vec<Option<CtColor>> = day_colors
+        .iter()
+        .map(|oklab_opt| oklab_opt.map(crate::color::conversion::oklab_to_crossterm))
+        .collect();
     if period == TrackerPeriod::Year {
         render_year_heatmap(out, &day_colors, &day_has_entry, start_epoch, config)?;
         return Ok(());
@@ -457,13 +489,49 @@ async fn display_mood_tracker<W: Write>(
     // available, otherwise a plain filled dot for days with an entry and ◯
     // for empty days. Dots are separated by two spaces and wrap at 7 per
     // row (the last row may be short, e.g. a month that ends mid-week).
-    for (i, &oklab_opt) in day_colors.iter().enumerate() {
-        let d = if !day_has_entry[i] {
+    render_day_dots(out, &day_colors, &day_has_entry)?;
+
+    Ok(())
+}
+
+/// The civil dates of a grid window, oldest first (`start_date ..=
+/// end_date`).
+fn civil_day_dates(
+    start_date: jiff::civil::Date,
+    end_date: jiff::civil::Date,
+) -> Result<Vec<jiff::civil::Date>> {
+    let mut day_dates = Vec::new();
+    let mut day = start_date;
+    while day <= end_date {
+        day_dates.push(day);
+        day = day
+            .checked_add(jiff::Span::new().days(1))
+            .context("grid: day overflow")?;
+    }
+    Ok(day_dates)
+}
+
+/// The index of a stamp's civil day inside `day_dates`, or `None` when the
+/// stamp falls outside the window or its civil time is unresolvable.
+fn day_index(day_dates: &[jiff::civil::Date], stamp: crate::date::LogTime) -> Option<usize> {
+    let civil_date = stamp.civil().ok().map(|civil| civil.date())?;
+    day_dates.binary_search(&civil_date).ok()
+}
+
+/// Print dots: one per day, colored when its color is known, a plain filled
+/// dot for days with data but no color, and `◯` for days without. Dots are
+/// separated by two spaces and wrap at 7 per row.
+fn render_day_dots<W: Write>(
+    out: &mut W,
+    day_colors: &[Option<CtColor>],
+    day_has_data: &[bool],
+) -> Result<()> {
+    let num_days = day_colors.len();
+    for (i, &color) in day_colors.iter().enumerate() {
+        let d = if !day_has_data[i] {
             "◯".to_string()
-        } else if let Some(oklab) = oklab_opt {
-            "●"
-                .with(crate::color::conversion::oklab_to_crossterm(oklab))
-                .to_string()
+        } else if let Some(color) = color {
+            "●".with(color).to_string()
         } else {
             "●".to_string()
         };
@@ -474,8 +542,42 @@ async fn display_mood_tracker<W: Write>(
             write!(out, "  ")?;
         }
     }
-
     Ok(())
+}
+
+/// Render a per-day value heatmap: `day_values[i]` is binned onto `colors`
+/// across the observed range of days with data (tracker-grid semantics —
+/// a missing or degenerate range falls to the middle color), days without
+/// data render empty dots. Week/month periods print wrapped dot rows; the
+/// Year period uses the year-heatmap layout.
+fn render_value_heatmap<W: Write>(
+    out: &mut W,
+    day_values: &[f64],
+    day_has_data: &[bool],
+    colors: &[CtColor],
+    period: TrackerPeriod,
+    start_epoch: i64,
+    config: &Config,
+) -> Result<()> {
+    let observed: Vec<f64> = day_values
+        .iter()
+        .zip(day_has_data.iter())
+        .filter(|(_, has)| **has)
+        .map(|(&value, _)| value)
+        .collect();
+    let (eff_low, eff_high) = effective_range(None, None, &observed);
+    let day_colors: Vec<Option<CtColor>> = day_values
+        .iter()
+        .zip(day_has_data.iter())
+        .map(|(&value, &has)| {
+            has.then(|| crate::badge::tracker_color(colors, value, eff_low, eff_high))
+        })
+        .collect();
+    if period == TrackerPeriod::Year {
+        render_year_heatmap(out, &day_colors, day_has_data, start_epoch, config)
+    } else {
+        render_day_dots(out, &day_colors, day_has_data)
+    }
 }
 
 /// Year heatmap: one column per week, one row per weekday (rows start at
@@ -489,7 +591,7 @@ async fn display_mood_tracker<W: Write>(
 /// between columns.
 fn render_year_heatmap<W: Write>(
     out: &mut W,
-    day_colors: &[Option<oklab::Oklab>],
+    day_colors: &[Option<CtColor>],
     day_has_entry: &[bool],
     start_epoch: i64,
     config: &Config,
@@ -545,12 +647,8 @@ fn render_year_heatmap<W: Write>(
                         write!(out, " ")?;
                     } else if !day_has_entry[day] {
                         write!(out, "·")?;
-                    } else if let Some(oklab) = day_colors[day] {
-                        write!(
-                            out,
-                            "{}",
-                            "●".with(crate::color::conversion::oklab_to_crossterm(oklab))
-                        )?;
+                    } else if let Some(color) = day_colors[day] {
+                        write!(out, "{}", "●".with(color))?;
                     } else {
                         write!(out, "●")?;
                     }
@@ -875,6 +973,217 @@ async fn display_recurring_tracker<W: Write>(
     }
 
     Ok(())
+}
+
+/// The civil dates and civil-seconds range of a grid window (the shared
+/// fetch/bucket geometry of the heatmap items).
+fn heatmap_window(start_epoch: i64, end_epoch: i64) -> Result<(Vec<jiff::civil::Date>, crate::date::CivilRange)> {
+    let start_date = crate::date::zoned_from_unix_secs(start_epoch)
+        .context("heatmap: start is a valid epoch")?
+        .date();
+    let end_date = crate::date::zoned_from_unix_secs(end_epoch)
+        .context("heatmap: end is a valid epoch")?
+        .date();
+    let civil_range =
+        crate::date::CivilRange::from_dates(start_date, end_date).context("heatmap: civil range")?;
+    Ok((civil_day_dates(start_date, end_date)?, civil_range))
+}
+
+/// `+query` heatmap: one value per civil day — the sum of the completion
+/// deltas of every task whose name contains `query` (case-insensitive;
+/// empty matches all). Days without events render empty dots.
+async fn display_task_heatmap<W: Write>(
+    pool: &SqlitePool,
+    config: &Config,
+    query: &str,
+    start_epoch: i64,
+    end_epoch: i64,
+    period: TrackerPeriod,
+    out: &mut W,
+) -> Result<()> {
+    let (day_dates, civil_range) = heatmap_window(start_epoch, end_epoch)?;
+    let events = crate::db::fetch_completion_deltas_civil(pool, civil_range).await?;
+
+    let needle = query.to_lowercase();
+    let mut day_sums: Vec<f64> = vec![0.0; day_dates.len()];
+    let mut day_has_data: Vec<bool> = vec![false; day_dates.len()];
+    for (time, count, task_name) in events {
+        if !task_name.to_lowercase().contains(&needle) {
+            continue;
+        }
+        let Some(idx) = day_index(&day_dates, time) else {
+            continue;
+        };
+        day_sums[idx] += f64::from(count);
+        day_has_data[idx] = true;
+    }
+
+    if !day_has_data.iter().any(|&has| has) {
+        writeln!(
+            out,
+            "No task completions matching '{query}' in this period."
+        )?;
+        return Ok(());
+    }
+    render_value_heatmap(
+        out,
+        &day_sums,
+        &day_has_data,
+        &config.grid.task_color_range,
+        period,
+        start_epoch,
+        config,
+    )
+}
+
+/// `%query` heatmap: one value per civil day — the count of that day's
+/// entries whose name contains `query` (case-insensitive; empty matches
+/// all). An entry's name is the full mood field for mood rows and the
+/// tracker name for tracker rows; task completions are not entries.
+async fn display_entry_heatmap<W: Write>(
+    pool: &SqlitePool,
+    config: &Config,
+    query: &str,
+    start_epoch: i64,
+    end_epoch: i64,
+    period: TrackerPeriod,
+    out: &mut W,
+) -> Result<()> {
+    let (day_dates, civil_range) = heatmap_window(start_epoch, end_epoch)?;
+    let moods = crate::db::fetch_moods_civil(pool, civil_range).await?;
+    let trackers = crate::db::fetch_tracker_entries_today_civil(pool, civil_range).await?;
+
+    let needle = query.to_lowercase();
+    let mut day_counts: Vec<f64> = vec![0.0; day_dates.len()];
+    for (time, name) in moods
+        .into_iter()
+        .map(|m| (m.time, m.mood))
+        .chain(trackers.into_iter().map(|t| (t.time, t.tracker_type)))
+    {
+        if !name.to_lowercase().contains(&needle) {
+            continue;
+        }
+        if let Some(idx) = day_index(&day_dates, time) {
+            day_counts[idx] += 1.0;
+        }
+    }
+    let day_has_data: Vec<bool> = day_counts.iter().map(|&count| count > 0.0).collect();
+
+    if !day_has_data.iter().any(|&has| has) {
+        writeln!(out, "No entries matching '{query}' in this period.")?;
+        return Ok(());
+    }
+    render_value_heatmap(
+        out,
+        &day_counts,
+        &day_has_data,
+        &config.grid.entry_color_range,
+        period,
+        start_epoch,
+        config,
+    )
+}
+
+/// A bare-word grid query: the alignment heatmap. The query is treated as a
+/// mood anchor (embedded with the moods prefix). Each day's value is the
+/// average cosine similarity between the anchor and the day's mood
+/// embeddings, power-weighted according to both emotional saliency and
+/// positive similarity: `w_i = (s_i * max(0, sim_i))^k`, with `k =
+/// grid_blend_steepness`. Days without mood embeddings render empty dots;
+/// days where all weights are zero fall back to an unweighted average.
+async fn display_anchor_heatmap<W: Write>(
+    pool: &SqlitePool,
+    config: &Config,
+    axes: &crate::color::ColorAxes,
+    query: &str,
+    start_epoch: i64,
+    end_epoch: i64,
+    period: TrackerPeriod,
+    out: &mut W,
+) -> Result<()> {
+    let (day_dates, civil_range) = heatmap_window(start_epoch, end_epoch)?;
+    // Journal-only entries (empty mood → no embedding) cannot align.
+    let moods: Vec<crate::db::MoodRow> = crate::db::fetch_moods_civil(pool, civil_range)
+        .await?
+        .into_iter()
+        .filter(|f| !f.mood.is_empty())
+        .collect();
+    if moods.is_empty() {
+        writeln!(out, "No mood entries in this period.")?;
+        return Ok(());
+    }
+
+    // Unified helper: backfill missing embeddings/scores when moods.backfill is enabled
+    let pool_opt = if config.moods.backfill { Some(pool) } else { None };
+    crate::color::compute_mood_colors_and_backfill(pool_opt, &moods, axes).await;
+
+    let embedder = global::embedder();
+    let anchor = global::get_or_embed_cached(pool, embedder, query, &axes.prefix_string).await?;
+
+    let steepness = config.moods.axes.grid_blend_steepness;
+    let mut day_wsums: Vec<f64> = vec![0.0; day_dates.len()];
+    let mut day_weights: Vec<f64> = vec![0.0; day_dates.len()];
+    let mut day_plain_sums: Vec<f64> = vec![0.0; day_dates.len()];
+    let mut day_counts: Vec<usize> = vec![0; day_dates.len()];
+
+    for f in &moods {
+        let Some(idx) = day_index(&day_dates, f.time) else {
+            continue;
+        };
+        let mood_text = crate::color::mood_text_for_embedding(&f.mood);
+        if mood_text.is_empty() {
+            continue;
+        }
+        let emb = match f.embedding.as_deref().and_then(global::blob_to_embedding) {
+            Some(e) => Some(e),
+            None => embedder.embed(mood_text, &axes.prefix_string).ok(),
+        };
+        let Some(emb) = emb else { continue };
+        let Some(sim) = global::cosine_similarity(&anchor, &emb) else {
+            continue;
+        };
+        let score = match f.score {
+            Some(s) => s,
+            None => crate::color::predict_saliency(embedder, mood_text),
+        };
+
+        let sim_f64 = f64::from(sim);
+        let weight = (f64::from(score) * sim_f64.max(0.0)).powf(f64::from(steepness));
+        day_wsums[idx] += sim_f64 * weight;
+        day_weights[idx] += weight;
+        day_plain_sums[idx] += sim_f64;
+        day_counts[idx] += 1;
+    }
+
+    let day_values: Vec<f64> = (0..day_dates.len())
+        .map(|i| {
+            if day_weights[i] > 0.0 {
+                day_wsums[i] / day_weights[i]
+            } else if day_counts[i] > 0 {
+                day_plain_sums[i] / day_counts[i] as f64
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let day_has_data: Vec<bool> = day_counts.iter().map(|&count| count > 0).collect();
+
+    if !day_has_data.iter().any(|&has| has) {
+        writeln!(
+            out,
+            "No mood similarities computable against '{query}' in this period."
+        )?;
+        return Ok(());
+    }
+    render_value_heatmap(
+        out,
+        &day_values,
+        &day_has_data,
+        &config.grid.mood_color_range,
+        period,
+        start_epoch,
+        config,
+    )
 }
 
 /// The `[start, end)` replacement slot containing `time_epoch` for a calendar

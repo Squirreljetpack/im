@@ -20,6 +20,20 @@ pub const BUNDLED_CHIME: &[u8] = include_bytes!("../sounds/chime.wav");
 pub const BUNDLED_BELL: &[u8] = include_bytes!("../sounds/bell.wav");
 pub const BUNDLED_BOWL: &[u8] = include_bytes!("../sounds/bowl.wav");
 
+fn bundled_sound(name_or_path: &Path) -> Option<&'static [u8]> {
+    match name_or_path.to_str()?.trim().to_ascii_lowercase().as_str() {
+        "chime" => Some(BUNDLED_CHIME),
+        "bell" => Some(BUNDLED_BELL),
+        "bowl" => Some(BUNDLED_BOWL),
+        _ => None,
+    }
+}
+
+/// True when `name_or_path` names a bundled sound ("chime", "bell", or "bowl").
+pub fn is_bundled_sound_name(name_or_path: impl AsRef<Path>) -> bool {
+    bundled_sound(name_or_path.as_ref()).is_some()
+}
+
 /// Errors produced when dispatching a notification or playing its audio.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -40,6 +54,9 @@ pub enum Error {
 
     #[error("failed to display toast notification: {0}")]
     Toast(#[from] notify_rust::error::Error),
+
+    #[error("unknown sound '{0}' (expected 'chime', 'bell', 'bowl', or path to audio file)")]
+    UnknownSound(String),
 
     #[error("{0}")]
     Dialogue(String),
@@ -123,13 +140,11 @@ impl Sound {
     /// Resolve sound by bundled name ("chime", "bell", "bowl") or file path.
     pub fn from_name_or_path(name_or_path: impl AsRef<Path>) -> Result<Self, Error> {
         let path = name_or_path.as_ref();
-        if let Some(s) = path.to_str() {
-            match s.trim().to_ascii_lowercase().as_str() {
-                "chime" => return Ok(Self::from_bytes(BUNDLED_CHIME)),
-                "bell" => return Ok(Self::from_bytes(BUNDLED_BELL)),
-                "bowl" => return Ok(Self::from_bytes(BUNDLED_BOWL)),
-                _ => {}
-            }
+        if let Some(bytes) = bundled_sound(path) {
+            return Ok(Self::from_bytes(bytes));
+        }
+        if path.is_relative() && path.extension().is_none() {
+            return Err(Error::UnknownSound(path.display().to_string()));
         }
         if !path.exists() {
             return Err(Error::Io(std::io::Error::new(
@@ -366,8 +381,8 @@ impl Notification {
     /// For [`NotificationType::Toast`], waits for any attached sound to finish playing.
     /// For [`NotificationType::Dialogue`], blocks until the user dismisses the dialogue (or
     /// auto-dismiss timeout expires) and stops any playing sound immediately upon dismissal.
-    /// For [`NotificationType::Bell`], emits terminal OSC notification sequences and waits
-    /// for any attached sound to finish playing.
+    /// For [`NotificationType::Bell`], emits terminal OSC notification sequences and waits for
+    /// any attached sound to finish playing.
     pub fn send(self) -> Result<(), Error> {
         if self.delay > 0 {
             thread::sleep(Duration::from_secs(u64::from(self.delay)));
@@ -431,7 +446,7 @@ pub struct NotifyCli {
     pub message: Vec<String>,
 
     /// Notification title.
-    #[arg(short, long, default_value = "im")]
+    #[arg(short, long, default_value = "")]
     pub title: String,
 
     /// Sound to play (-s enables default chime; or specify chime, bell, bowl, or audio file path).
@@ -460,7 +475,13 @@ impl NotifyCli {
     pub fn run(self) -> Result<(), Error> {
         let sound = match self.sound {
             Some(None) => Some(Sound::from_name_or_path("chime")?),
-            Some(Some(path)) => Some(Sound::from_name_or_path(path)?),
+            Some(Some(path)) => {
+                if path.as_os_str().is_empty() {
+                    None
+                } else {
+                    Some(Sound::from_name_or_path(path)?)
+                }
+            }
             None => None,
         };
 
@@ -557,6 +578,7 @@ fn show_dialogue(title: &str, message: &str, dismiss: Option<Duration>) -> Resul
         .arg("--")
         .arg(title)
         .arg(message)
+        .stdout(std::process::Stdio::null())
         .spawn()
         .map_err(|e| Error::Dialogue(format!("failed to execute osascript: {e}")))?;
 
@@ -586,7 +608,11 @@ fn show_dialogue(title: &str, message: &str, dismiss: Option<Duration>) -> Resul
     ];
 
     for (bin, args) in candidates {
-        match Command::new(bin).args(*args).spawn() {
+        match Command::new(bin)
+            .args(*args)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+        {
             Ok(child) => return wait_with_dismiss(child, dismiss, bin),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
@@ -613,6 +639,7 @@ fn show_dialogue(title: &str, message: &str, dismiss: Option<Duration>) -> Resul
         ])
         .env("NOTIFY_TITLE", title)
         .env("NOTIFY_MESSAGE", message)
+        .stdout(std::process::Stdio::null())
         .spawn()
         .map_err(|e| Error::Dialogue(format!("failed to execute powershell: {e}")))?;
 
@@ -628,6 +655,22 @@ mod tests {
         assert!(Sound::from_name_or_path("chime").is_ok());
         assert!(Sound::from_name_or_path("bell").is_ok());
         assert!(Sound::from_name_or_path("bowl").is_ok());
+    }
+
+    #[test]
+    fn test_sound_from_name_or_path_unknown_relative_no_ext_errors() {
+        assert!(matches!(
+            Sound::from_name_or_path("nonexistent"),
+            Err(Error::UnknownSound(_))
+        ));
+    }
+
+    #[test]
+    fn test_is_bundled_sound_name() {
+        assert!(is_bundled_sound_name("chime"));
+        assert!(is_bundled_sound_name(" Bell "));
+        assert!(!is_bundled_sound_name("sounds/chime.wav"));
+        assert!(!is_bundled_sound_name(""));
     }
 
     #[test]

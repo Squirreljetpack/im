@@ -58,11 +58,11 @@ cargo run --release --bin im -- :
 
 echo ""
 echo "=== Tracker view (specific trackers: @recurring_1, sleep, run_times, water, notes, steps, mood_notes) ==="
-cargo run --release --bin im -- : @recurring_1 sleep run_times water notes steps mood_notes
+cargo run --release --bin im -- : @recurring_1 -sleep -run_times -water -notes -steps -mood_notes
 
 echo ""
 echo "=== Tracker view (mood grid between trackers: sleep : run_times) ==="
-cargo run --release --bin im -- : sleep : run_times
+cargo run --release --bin im -- : -sleep : -run_times
 
 echo ""
 echo "=== Tracker view (Week) ==="
@@ -74,7 +74,7 @@ cargo run --release --bin im -- :month @recurring_1
 
 echo ""
 echo "=== Tracker view (Year, tracker combo: steps mood_notes) ==="
-cargo run --release --bin im -- :year steps mood_notes
+cargo run --release --bin im -- :year -steps -mood_notes
 
 echo ""
 echo "=== Scheduled task creation (immediate: ! '@10pm; meeting; @2 hours') ==="

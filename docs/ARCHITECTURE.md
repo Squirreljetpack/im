@@ -247,7 +247,7 @@ before any database or config work; only successful parses become a `Command`. T
 `ToolSubcommand`, `DbSubcommand`, `SyncSubcommand`, and `ConfigTarget` are the
 user-facing help text. `:c` is rewritten to `:tool config` before clap sees it.
 The bare tracker grids (`im :`, `im :week`) take no clap flags because their
-arguments are all tracker ids.
+arguments are all display-list items.
 
 `parse_from` dispatches on `args[0]`:
 
@@ -261,7 +261,7 @@ arguments are all tracker ids.
 | `..` (bare, at the end) | opens the body editor |
 | `+` (bare) | `Task { Oneshot, name: None }` — interactive oneshot creation |
 | `+ <name> [@time] [.. [body]]` | `Task { Oneshot, .. }` — `@time` is the **due** time (`end_time`); a second `@`-word is rejected |
-| `+<ref> <name> [@time] [.. [body]]` | `Task { Oneshot, parent }` — child of the referenced task; routed here only when the next word is not a count, `.`, `+`, or `-` |
+| `+<ref> <name> [@time] [.. [body]]` | `Task { Oneshot, parent }` — child of the referenced task; routed here only when the next word is not a count, `.`, or `-` (a `+` word is ordinary name text) |
 | `+ %[interval] [:<name>]` | `Task { Recurring, .. }` — recurring creation; a parent is rejected |
 | `+ @[time] [:<name>] [%<duration>]` | `Task { Scheduled, .. }` — scheduled creation; immediate when all fields came from the CLI, else interactive; a parent is rejected |
 | `+<ref>` | `TaskEdit { task }` — edit the referenced task |
@@ -271,7 +271,7 @@ arguments are all tracker ids.
 | `@due[:t\|:w]` | `Today { date: None, show: B, horizon: Today\|Tomorrow\|Week }` — today view, tasks only |
 | `-` alone | `Matchmaker` — tracker browser |
 | `-<tracker> [value]` | `Entry` — tracker-only entry; pure numeric tracker names are rejected |
-| `:` / `:week\|month\|year` / `:` + ids | `Tracker { period, items }` — dot-sequence tracker views (`:g` bails "not yet implemented") |
+| `:` / `:week\|month\|year` / `:` + items | `Tracker { period, items }` — grid views; items: `-<tracker>`, `@<recurring>`, `+<query>` / `%<query>` heatmaps, bare words (mood-anchor heatmaps), `:` (positional mood grid) (`:g` bails "not yet implemented") |
 | `:tool embed` | `Tool(Embed)` — stdin lines → one 768-dim vector per line |
 | `:tool score "start" "end"` | `Tool(Score)` — stub (`todo!()`) |
 | `:tool datetime [expr] --format <fmt>` | `Tool(Datetime)` — parses an expression and prints it in the selected preset, zone, or strftime pattern |

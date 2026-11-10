@@ -139,7 +139,6 @@ pub fn parse_from(args: Vec<String>) -> anyhow::Result<Command> {
         if parse_count_token(second).is_some()
             || is_numeric_token(second)
             || is_body_delimiter(second)
-            || second.starts_with('+')
             || (second.starts_with('-') && second != "-")
         {
             return parse_entry_command(&args);
@@ -288,6 +287,21 @@ mod tests {
                 assert_eq!(task.task_type, TaskKind::Oneshot);
                 assert_eq!(task.name, Some("+".to_string()));
                 assert_eq!(task.parent, None);
+            }
+            _ => panic!("Expected Task command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_task_oneshot_plus_word_after_ref_is_name() {
+        // `im +1 +2` creates a child of task 1 named "+2": a '+' word after
+        // `+<ref>` is name text, never a second entry task reference.
+        let cmd = parse_from(args(&["+1", "+2"])).unwrap();
+        match cmd {
+            Command::Task(task) => {
+                assert_eq!(task.task_type, TaskKind::Oneshot);
+                assert_eq!(task.name, Some("+2".to_string()));
+                assert_eq!(task.parent, Some(TaskRef::Id(1)));
             }
             _ => panic!("Expected Task command"),
         }
@@ -960,14 +974,15 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_tracker_colon_second_arg_is_tracker() {
-        // `: month` is a tracker named "month", not a period: only the
-        // first-token suffix sets the period.
+    fn test_parse_tracker_colon_second_arg_is_anchor() {
+        // `: month` is an anchor query for "month", not a period or a
+        // tracker: only the first-token suffix sets the period, and bare
+        // words are mood-anchor queries now.
         let cmd = parse_from(args(&[":", "month"])).unwrap();
         match cmd {
             Command::Tracker { period, items } => {
                 assert_eq!(period, TrackerPeriod::Week);
-                assert_eq!(items, vec![TrackerItem::Tracker("month".to_string())]);
+                assert_eq!(items, vec![TrackerItem::Anchor("month".to_string())]);
             }
             _ => panic!("Expected Tracker command"),
         }
@@ -975,15 +990,17 @@ mod tests {
 
     #[test]
     fn test_parse_tracker_with_ids() {
-        let cmd = parse_from(args(&[":", "@1", "@2", "sleep"])).unwrap();
+        // Trackers require the leading `-`; `@name` is recurring, and bare
+        // words are anchor queries.
+        let cmd = parse_from(args(&[":", "@1", "@2", "-sleep"])).unwrap();
         match cmd {
             Command::Tracker { period, items } => {
                 assert_eq!(period, TrackerPeriod::Week);
                 assert_eq!(
                     items,
                     vec![
-                        TrackerItem::Tracker("@1".to_string()),
-                        TrackerItem::Tracker("@2".to_string()),
+                        TrackerItem::Recurring("1".to_string()),
+                        TrackerItem::Recurring("2".to_string()),
                         TrackerItem::Tracker("sleep".to_string())
                     ]
                 );
@@ -994,14 +1011,14 @@ mod tests {
 
     #[test]
     fn test_parse_tracker_period_with_ids() {
-        let cmd = parse_from(args(&[":month", "@1", "sleep"])).unwrap();
+        let cmd = parse_from(args(&[":month", "@1", "-sleep"])).unwrap();
         match cmd {
             Command::Tracker { period, items } => {
                 assert_eq!(period, TrackerPeriod::Month);
                 assert_eq!(
                     items,
                     vec![
-                        TrackerItem::Tracker("@1".to_string()),
+                        TrackerItem::Recurring("1".to_string()),
                         TrackerItem::Tracker("sleep".to_string())
                     ]
                 );
@@ -1018,7 +1035,7 @@ mod tests {
         match cmd {
             Command::Tracker { period, items } => {
                 assert_eq!(period, TrackerPeriod::Week);
-                assert_eq!(items, vec![TrackerItem::Tracker("foo".to_string())]);
+                assert_eq!(items, vec![TrackerItem::Anchor("foo".to_string())]);
             }
             _ => panic!("Expected Tracker command"),
         }
@@ -1026,15 +1043,15 @@ mod tests {
 
     #[test]
     fn test_parse_tracker_mood_marker_positional() {
-        // `: @1 : sleep` renders @1 grid, mood grid, sleep grid, in order.
-        let cmd = parse_from(args(&[":", "@1", ":", "sleep"])).unwrap();
+        // `: @1 : -sleep` renders @1 grid, mood grid, sleep grid, in order.
+        let cmd = parse_from(args(&[":", "@1", ":", "-sleep"])).unwrap();
         match cmd {
             Command::Tracker { period, items } => {
                 assert_eq!(period, TrackerPeriod::Week);
                 assert_eq!(
                     items,
                     vec![
-                        TrackerItem::Tracker("@1".to_string()),
+                        TrackerItem::Recurring("1".to_string()),
                         TrackerItem::Mood,
                         TrackerItem::Tracker("sleep".to_string())
                     ]
@@ -1059,8 +1076,8 @@ mod tests {
 
     #[test]
     fn test_parse_tracker_suffix_period_with_mood_marker() {
-        // `:week : sleep` → Week period, mood grid then sleep grid.
-        let cmd = parse_from(args(&[":week", ":", "sleep"])).unwrap();
+        // `:week : -sleep` → Week period, mood grid then sleep grid.
+        let cmd = parse_from(args(&[":week", ":", "-sleep"])).unwrap();
         match cmd {
             Command::Tracker { period, items } => {
                 assert_eq!(period, TrackerPeriod::Week);
@@ -1068,6 +1085,55 @@ mod tests {
                     items,
                     vec![TrackerItem::Mood, TrackerItem::Tracker("sleep".to_string())]
                 );
+            }
+            _ => panic!("Expected Tracker command"),
+        }
+    }
+
+    /// The heatmap item sigils: `+query` (task completions), `%query`
+    /// (entries). A bare `+` / `%` is the empty query, matching every
+    /// task / entry name.
+    #[test]
+    fn test_parse_tracker_heatmap_items() {
+        let cmd = parse_from(args(&[":", "+deepwork", "%", "+", "%sleep"])).unwrap();
+        match cmd {
+            Command::Tracker { period, items } => {
+                assert_eq!(period, TrackerPeriod::Week);
+                assert_eq!(
+                    items,
+                    vec![
+                        TrackerItem::TaskHeatmap("deepwork".to_string()),
+                        TrackerItem::EntryHeatmap(String::new()),
+                        TrackerItem::TaskHeatmap(String::new()),
+                        TrackerItem::EntryHeatmap("sleep".to_string())
+                    ]
+                );
+            }
+            _ => panic!("Expected Tracker command"),
+        }
+    }
+
+    /// A lone `-` has no tracker name; every other `-name` token is one.
+    #[test]
+    fn test_parse_tracker_dash_requires_name() {
+        assert!(parse_from(args(&[":", "-"])).is_err());
+        let cmd = parse_from(args(&[":", "-run_times"])).unwrap();
+        match cmd {
+            Command::Tracker { items, .. } => {
+                assert_eq!(items, vec![TrackerItem::Tracker("run_times".to_string())]);
+            }
+            _ => panic!("Expected Tracker command"),
+        }
+    }
+
+    /// A bare `@` keeps the recurring-item shape; the empty name is handled
+    /// by the recurring lookup's not-found path.
+    #[test]
+    fn test_parse_tracker_bare_at() {
+        let cmd = parse_from(args(&[":", "@"])).unwrap();
+        match cmd {
+            Command::Tracker { items, .. } => {
+                assert_eq!(items, vec![TrackerItem::Recurring(String::new())]);
             }
             _ => panic!("Expected Tracker command"),
         }
@@ -1242,9 +1308,10 @@ mod tests {
         assert_eq!(e.duration, Some(1500));
         assert_eq!(e.task_ref, Some(TaskRef::Id(7)));
 
-        // At most one ref per entry.
+        // At most one ref per entry. (A second '+' word directly after a
+        // leading '+<ref>' is child-creation name text instead — see the
+        // task tests.)
         assert!(parse_from(args(&["good", "+1", "+2"])).is_err());
-        assert!(parse_from(args(&["+1", "+2"])).is_err());
         assert!(parse_from(args(&["good", "+", "+2"])).is_err());
 
         // Invalid completion counts (fractional or overflowing) error cleanly.

@@ -4,31 +4,33 @@ Usage:
   im <mood> [. [body]]                           log a mood (with an optional body)
   im [-<tracker> [value]]..                      add one or more custom tracker records
   im <mood> [+task] [-trackers..]                log a mood linked with an existing task
-                                                        or new tracker records
+                                                    or new tracker records
   im %<duration> [purpose..]                     start a timed session
-                                                        (trackers, task & body supported)
+                                                    (trackers, task & body supported)
 
   im +                                           create a task
   im +[parent] <name> [@<time>]                  create a task (non-interactive)
   im + %[interval] [:<name>]                     create a recurring task (interactive)
   im + @[time] [:<name>] [%<duration>]           schedule a task (interactive if partial)
   im +[task] [count]                             edit or update a task by its reference
-                                                        (see `im -vh` for reference)
+                                                    (see `im -vh` for reference)
+
+  im -                                           select tracker
+
 
 Views:
   im @[date]                                     today view
   im @due[:t|:w]                                 due view
-                                                        (today / tomorrow / this week)
+                                                    (today / tomorrow / this week)
   im @[:o|:O]                                    pending tasks
-                                                        (all / oneshot / recurring&scheduled)
+                                                    (all / oneshot / recurring&scheduled)
   im @done[:o|:O]                                completed tasks
-                                                        (all / oneshot / recurring&scheduled)
+                                                    (all / oneshot / recurring&scheduled)
 
-Trackers and grids:
-  im -                                           browse trackers
-  im :[week|month|year] [ids]                    dot-sequence tracker grid
-                                                        ids: <tracker> or @<recurring name>
-                                                        period defaults to "week"
+  im :[week|month|year] [items]                  show progress
+                                                    items: -<tracker> | @<recurring> |
+                                                    +<query> | %<query> | <anchor>
+                                                    period defaults to "week"
 
 Other:
   im :c [moods|colors|mm]                        open the config in $VISUAL / $EDITOR

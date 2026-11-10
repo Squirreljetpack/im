@@ -95,9 +95,11 @@ impl Config {
     /// Normalize a loaded config before use: drop trackers whose
     /// names cannot be addressed from the CLI, clear non-positive tracker
     /// intervals (they would divide by zero when computing replacement
-    /// slots), and fall back to the default badge palette when fewer than
-    /// three colors are configured in `tasks.colors`. Run automatically at
-    /// startup, before any command is handled.
+    /// slots), resolve relative session sound, editor-template, and
+    /// moods-source paths against the config directory, and fall back to the
+    /// default badge palette when fewer than three colors are configured in
+    /// `tasks.colors`. Run automatically at startup, before any command is
+    /// handled.
     ///
     /// The bundled default config never needs this; a user-edited config
     /// may. See [`is_valid_tracker_name`] for the exact tracker-name rules.
@@ -144,6 +146,10 @@ impl Config {
         });
         // Resolve every tracker's `colors` field against `colors.toml`.
         self.resolve_tracker_colors();
+        // File paths in the config are relative to the config file, not the cwd.
+        self.resolve_session_sound();
+        self.resolve_editor_templates();
+        self.resolve_moods_source();
         // tasks.colors drives the completion badge; when fewer than 3
         // colors are configured it falls back to the default palette.
         if self.tasks.colors.len() < 3 {
@@ -151,6 +157,71 @@ impl Config {
                 "Less than 3 colors defined for config.tasks.colors, overriding with the default."
             );
             self.tasks.colors = Default::default();
+        }
+        // The grid heatmap palettes bin via index, so an empty one falls
+        // back to the default grayscale.
+        for palette in [
+            &mut self.grid.task_color_range,
+            &mut self.grid.entry_color_range,
+            &mut self.grid.mood_color_range,
+        ] {
+            if palette.is_empty() {
+                *palette = ColorBins::from(DEFAULT_TRACKER_PALETTE.to_vec());
+            }
+        }
+    }
+
+    /// Resolve a relative `[session] sound` path against the config
+    /// directory. Bundled sound names ("chime", "bell", "bowl") and absolute
+    /// paths are left untouched. An empty path disables the sound. Relative
+    /// paths with no extension that do not match a bundled sound warn and
+    /// clear the sound setting.
+    fn resolve_session_sound(&mut self) {
+        let path = &mut self.session.sound;
+        if path.as_os_str().is_empty() {
+            return;
+        }
+        if notify::is_bundled_sound_name(&*path) {
+            return;
+        }
+        if path.is_relative() {
+            if path.extension().is_none() {
+                cba::ebog!(
+                    "config";
+                    "Unknown session sound '{}': expected 'chime', 'bell', 'bowl', or path to audio file with extension",
+                    path.display()
+                );
+                *path = std::path::PathBuf::new();
+                return;
+            }
+            *path = paths::config_dir().join(&*path);
+        }
+    }
+
+    /// Resolve relative `[editor]` body-template paths against the config
+    /// directory. Empty entries (blank documents) and absolute paths are left
+    /// untouched.
+    fn resolve_editor_templates(&mut self) {
+        for template in self
+            .editor
+            .mood_template
+            .iter_mut()
+            .chain(self.editor.task_template.iter_mut())
+            .chain(self.editor.recurring_template.iter_mut())
+            .chain(self.editor.scheduled_template.iter_mut())
+        {
+            if template.is_relative() && !template.as_os_str().is_empty() {
+                *template = paths::config_dir().join(&*template);
+            }
+        }
+    }
+
+    /// Resolve a relative `[moods] source` path against the config
+    /// directory. Empty (the default) and absolute paths are left untouched.
+    fn resolve_moods_source(&mut self) {
+        let source = &mut self.moods.source;
+        if source.is_relative() && !source.as_os_str().is_empty() {
+            *source = paths::config_dir().join(&*source);
         }
     }
 
@@ -347,6 +418,85 @@ mod tests {
                 good
             );
         }
+    }
+
+    #[test]
+    fn test_init_resolves_relative_session_sound() {
+        let mut config = Config::default();
+
+        config.session.sound = PathBuf::from("sounds/chime.wav");
+        config.init();
+        assert_eq!(
+            config.session.sound,
+            paths::config_dir().join("sounds/chime.wav")
+        );
+
+        // Bundled names stay names, not config-dir paths.
+        config.session.sound = PathBuf::from(" Chime ");
+        config.init();
+        assert_eq!(config.session.sound, PathBuf::from(" Chime "));
+
+        // Absolute paths are already resolved.
+        let absolute = PathBuf::from("/tmp/im-sound.wav");
+        config.session.sound = absolute.clone();
+        config.init();
+        assert_eq!(config.session.sound, absolute);
+
+        // An empty sound path stays empty (no sound).
+        config.session.sound = PathBuf::new();
+        config.init();
+        assert!(config.session.sound.as_os_str().is_empty());
+
+        // Relative path with no extension that doesn't match builtins errors and clears.
+        config.session.sound = PathBuf::from("unknown_sound");
+        config.init();
+        assert!(config.session.sound.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn test_init_resolves_relative_editor_templates() {
+        let mut config = Config::default();
+        config.editor.mood_template = vec![
+            PathBuf::from("templates/mood.txt"),
+            PathBuf::new(),
+            PathBuf::from("/tmp/task.txt"),
+        ];
+        config.editor.task_template = vec![PathBuf::from("templates/task.txt")];
+
+        config.init();
+
+        assert_eq!(
+            config.editor.mood_template,
+            vec![
+                paths::config_dir().join("templates/mood.txt"),
+                PathBuf::new(),
+                PathBuf::from("/tmp/task.txt"),
+            ]
+        );
+        assert_eq!(
+            config.editor.task_template,
+            vec![paths::config_dir().join("templates/task.txt")]
+        );
+    }
+
+    #[test]
+    fn test_init_resolves_relative_moods_source() {
+        let mut config = Config::default();
+
+        config.moods.source = PathBuf::from("moods.toml");
+        config.init();
+        assert_eq!(config.moods.source, paths::config_dir().join("moods.toml"));
+
+        // An empty source means the bundled moods file, so it stays empty.
+        config.moods.source = PathBuf::new();
+        config.init();
+        assert!(config.moods.source.as_os_str().is_empty());
+
+        // Absolute paths are already resolved.
+        let absolute = PathBuf::from("/tmp/moods.toml");
+        config.moods.source = absolute.clone();
+        config.init();
+        assert_eq!(config.moods.source, absolute);
     }
 
     #[test]

@@ -10,10 +10,14 @@ pub struct SessionConfig {
     /// Notification title for session completion. Defaults to "im".
     pub title: String,
 
-    /// Default sound to play on completion ("chime", "bell", "bowl", or path to audio file).
-    /// When unset, no sound is played by default.
+    /// Whether to play the configured completion sound without `-v`. `-v`
+    /// enables it per run.
+    pub play_sound: bool,
+
+    /// Sound to play on completion ("chime", "bell", "bowl", or path to audio file).
+    /// Relative paths resolve against the config directory. Empty = no sound.
     #[serde(default)]
-    pub sound: Option<PathBuf>,
+    pub sound: PathBuf,
 
     /// Optional audio playback duration cap (None = full length of audio file).
     #[serde(
@@ -54,7 +58,8 @@ impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             title: "im".to_string(),
-            sound: None,
+            play_sound: false,
+            sound: PathBuf::new(),
             sound_duration: None,
             delay: 0,
             kind: notify::NotificationKind::Bell,
@@ -108,7 +113,8 @@ mod tests {
     fn test_session_config_defaults() {
         let default_cfg = SessionConfig::default();
         assert_eq!(default_cfg.title, "im");
-        assert!(default_cfg.sound.is_none());
+        assert!(!default_cfg.play_sound);
+        assert!(default_cfg.sound.as_os_str().is_empty());
         assert!(default_cfg.sound_duration.is_none());
         assert_eq!(default_cfg.delay, 0);
         assert_eq!(default_cfg.kind, notify::NotificationKind::Bell);
@@ -125,6 +131,7 @@ mod tests {
     fn test_session_config_deserialize() {
         let toml_str = r#"
             title = "Focus"
+            play_sound = true
             sound = "chime"
             sound_duration = "3s"
             delay = 2
@@ -136,7 +143,8 @@ mod tests {
         "#;
         let cfg: SessionConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.title, "Focus");
-        assert_eq!(cfg.sound.unwrap().to_str().unwrap(), "chime");
+        assert!(cfg.play_sound);
+        assert_eq!(cfg.sound.to_str().unwrap(), "chime");
         assert_eq!(cfg.sound_duration, Some(Duration::from_secs(3)));
         assert_eq!(cfg.delay, 2);
         assert_eq!(cfg.kind, notify::NotificationKind::Dialogue);
@@ -148,5 +156,9 @@ mod tests {
             Some(ratatui::style::Color::Cyan)
         );
         assert!(cfg.countdown_style.modifier.contains(ratatui::style::Modifier::BOLD));
+
+        let cfg: SessionConfig = toml::from_str("").unwrap();
+        assert!(!cfg.play_sound);
+        assert!(cfg.sound.as_os_str().is_empty());
     }
 }
