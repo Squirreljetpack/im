@@ -1,6 +1,6 @@
 use super::super::{Command, is_body_delimiter};
 use super::{is_numeric_token, parse_count_token, parse_task_ref};
-use crate::types::{Entry, TaskRef};
+use crate::types::{Entry, TaskKind, TaskRef};
 
 pub(crate) fn parse_entry_command(args: &[String]) -> anyhow::Result<Command> {
     let (head, body_parts, delimiter_dots) = match args.iter().position(|a| is_body_delimiter(a)) {
@@ -211,7 +211,7 @@ fn parse_task_ref_and_count(slice: &[String]) -> anyhow::Result<(TaskRef, Option
     let mut count = None;
     let mut consumed = 1;
 
-    if r != TaskRef::Pick && slice.len() > 1 {
+    if !matches!(r, TaskRef::Pick) && slice.len() > 1 {
         let second = &slice[1];
         if is_numeric_token(second) {
             match parse_count_token(second) {
@@ -233,6 +233,13 @@ fn task_ref_summary(r: &TaskRef) -> String {
     match r {
         TaskRef::Pick => "+".to_string(),
         TaskRef::Id(id) => format!("+{id}"),
-        TaskRef::Words(w) => format!("+{}", w.join(" ")),
+        TaskRef::Words { words, kind } => {
+            let prefix = match kind {
+                TaskKind::Oneshot => "",
+                TaskKind::Recurring => "@",
+                TaskKind::Scheduled => "%",
+            };
+            format!("+{prefix}{}", words.join(" "))
+        }
     }
 }

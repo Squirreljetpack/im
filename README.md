@@ -51,8 +51,8 @@
 > im @due | cat                            # give the cat its due (displays tasks due today)
 23:59   ○       defeat cat
 
-> im alive but in pain +cat                # log mood + complete task
-> im become +bones .. destroyer of cat     # update task
+> im alive but in pain +cat                # log + complete task
+> im become +bones .. destroyer of cat     # log + bump task
 > im +bones 9                              # collect bones (complete task)
 
 > im happy I found all of my bones :)
@@ -81,8 +81,30 @@ and just like that Im on a roll,
 
 # --- set goals ---
 
-> im + %1 day :regrow bones =1             # Create a recurring task with a (exceedable) target
-> im @186 days from now :return to school  # Schedule future events
+> im + %1 day :regrow bones                # Create a recurring task with a (exceedable) target
+┌  Create recurring task
+│
+●  Name: regrow bones
+│
+◇  Start time:
+│  tomorrow
+│
+●  Interval: 1 day
+│
+◇  Available duration:
+│  1 day
+│
+◇  Edit fields:
+│  Times to complete
+│
+◇  Times to complete:
+│  1
+│
+◇  Edit fields:
+│  Finish
+│
+└  Created task #2: regrow bones
+> im + @186 days from now :return to school  %0s  # Schedule future events
 > im + shop: bone meal, bonebons, Skele-Gro, 99% milk # Shopping list
 
 > im                                       # Check today's journal

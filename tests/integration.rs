@@ -42,6 +42,53 @@ async fn short_id_of(pool: &SqlitePool, name: &str) -> i64 {
         .unwrap()
 }
 
+/// Helper: run one CLI command line built from `args`.
+async fn exec(pool: &SqlitePool, config: &Config, args: &[&str]) -> anyhow::Result<()> {
+    let cmd = parse_from(args.iter().map(|a| a.to_string()).collect()).unwrap();
+    execute_command(
+        cmd,
+        pool,
+        config,
+        &CliOpts::default(),
+        &mut Vec::new(),
+        false,
+    )
+    .await
+}
+
+/// Helper: total completion count of a task.
+async fn completion_sum(pool: &SqlitePool, task: im::db::Id) -> i64 {
+    sqlx::query_scalar("SELECT COALESCE(SUM(count), 0) FROM todo_completions WHERE todo_id = ?")
+        .bind(task)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Helper: a target-less task row at `start_time` — oneshot unless `interval`
+/// or `available` makes it recurring or scheduled.
+fn task_spec(
+    name: &str,
+    start_time: i64,
+    available: Option<i64>,
+    interval: Option<i64>,
+) -> TaskObject {
+    TaskObject {
+        id: None,
+        short_id: None,
+        name: name.into(),
+        body: String::new(),
+        priority: 5,
+        start_time,
+        available_duration_secs: available,
+        interval_secs: interval,
+        target_count: 0,
+        optional: false,
+        end_time: None,
+        parent: None,
+    }
+}
+
 /// Helper: insert a completion entry with an explicit time and count.
 /// Unlike `im::db::update_task` (which stamps `now()` and applies
 /// interval logic), this writes the row directly.
@@ -1546,12 +1593,16 @@ async fn test_today_view_linked_trackers_and_tasks() {
         .unwrap();
 
     // Mood with an attached tracker value and a task link (`-<short id>`).
+    // The explicit `0` keeps it a link: a bare ref would complete the task
+    // (`tasks.increment_cli_ref_by_default`), and the badge assertion below
+    // checks the not-done state.
     execute_command(
         parse_from(vec![
             "good".to_string(),
             "-sleep".to_string(),
             "8".to_string(),
             format!("+{short_id}"),
+            "0".to_string(),
         ])
         .unwrap(),
         &pool,
@@ -2269,9 +2320,10 @@ async fn test_completion_records_location() {
     assert_eq!(row.last_location, im::date::current_location());
 }
 
-/// Task↔mood links: `im <mood> -<short id>` records a link between
-/// the new mood entry and the task (no completion). The task preview
-/// then shows the linked moods.
+/// Task↔mood links: `im <mood> +<short id>` records a link between the new
+/// mood entry and the task, and a ref without a count also adds one completion
+/// (see `test_ref_without_count_completes_by_default`) — the recurring target
+/// included, so its count lands in the current interval.
 #[tokio::test]
 async fn test_task_mood_links() {
     let pool = test_pool().await.unwrap();
@@ -2386,6 +2438,394 @@ async fn test_task_mood_links() {
     let moods = im::db::fetch_linked_moods(&pool, oneshot_id).await.unwrap();
     assert_eq!(moods.len(), 1);
     assert_eq!(moods[0].mood, "felt good");
+}
+
+/// `tasks.increment_cli_ref_by_default`: a `+<ref>` without a count adds one
+/// completion, an explicit count always wins (`+<ref> 0` adds none), and with
+/// the option off the ref only links the entry to the task.
+#[tokio::test]
+async fn test_ref_without_count_completes_by_default() {
+    let pool = test_pool().await.unwrap();
+    let config = Config::default();
+
+    let task = create_oneshot_task(&pool, "shorthand").await;
+    // Keep the short id alive across the first completion (a done task drops
+    // it), so the same ref addresses the task in every step.
+    sqlx::query("UPDATE todos SET target_count = 5 WHERE id = ?")
+        .bind(task)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let short_id = short_id_of(&pool, "shorthand").await;
+
+    let cmd = parse_from(vec!["good".to_string(), format!("+{short_id}")]).unwrap();
+    execute_command(
+        cmd,
+        &pool,
+        &config,
+        &CliOpts::default(),
+        &mut Vec::new(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        completion_sum(&pool, task).await,
+        1,
+        "a bare ref adds one"
+    );
+    // An explicit count wins over the shorthand.
+    let cmd = parse_from(vec![
+        "fine".to_string(),
+        format!("+{short_id}"),
+        "0".to_string(),
+    ])
+    .unwrap();
+    execute_command(
+        cmd,
+        &pool,
+        &config,
+        &CliOpts::default(),
+        &mut Vec::new(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        completion_sum(&pool, task).await,
+        1,
+        "explicit 0 adds none"
+    );
+
+    // Off, the ref still links but completes nothing.
+    let mut config = Config::default();
+    config.tasks.increment_cli_ref_by_default = false;
+    let cmd = parse_from(vec!["tired".to_string(), format!("+{short_id}")]).unwrap();
+    execute_command(
+        cmd,
+        &pool,
+        &config,
+        &CliOpts::default(),
+        &mut Vec::new(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        completion_sum(&pool, task).await,
+        1,
+        "off leaves the count alone"
+    );
+    let links: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mood WHERE todo_id = ?")
+        .bind(task)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(links, 3, "every entry links to the task");
+}
+
+/// An entry's `+<ref>` reaches any oneshot, all scheduled tasks and recurring
+/// tasks inside their current availability window. The count keeps its kind's
+/// meaning: a delta for oneshot/recurring rows, the state for scheduled ones
+/// (`1` done, `2` failed, `-1` unmarked, `0` untouched).
+#[tokio::test]
+async fn test_entry_ref_reaches_recurring_and_scheduled_tasks() {
+    let pool = test_pool().await.unwrap();
+    let config = Config::default();
+    let now = im::date::now();
+    let day = im::date::span_to_db(&jiff::Span::new().days(1));
+
+    let (recurring, recurring_id) = create_task(&pool, &task_spec("tidy", now, None, Some(day)))
+        .await
+        .unwrap();
+    let recurring_id = recurring_id.expect("recurring tasks keep a short id");
+    let (scheduled, scheduled_number) = create_task(&pool, &task_spec("walk", now, Some(3600), None))
+        .await
+        .unwrap();
+    assert_eq!(
+        scheduled_number, None,
+        "a scheduled task carries no short id"
+    );
+
+    async fn state(pool: &SqlitePool, task: im::db::Id) -> Vec<i32> {
+        sqlx::query_scalar("SELECT count FROM todo_completions WHERE todo_id = ?")
+            .bind(task)
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    // A recurring target takes the count as a completion in this interval.
+    exec(&pool, &config, &["good", &format!("+{recurring_id}")])
+        .await
+        .unwrap();
+    assert_eq!(
+        completion_sum(&pool, recurring).await,
+        1,
+        "a recurring target completes for this interval"
+    );
+    let linked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mood WHERE todo_id = ?")
+        .bind(recurring)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(linked, 1, "the mood links to the recurring task");
+
+    // A scheduled target holds its state in one row, re-marked in place. It
+    // has no short id, so the `%` word ref is its handle.
+    exec(&pool, &config, &["fine", "+%walk", "1"]).await.unwrap();
+    assert_eq!(state(&pool, scheduled).await, vec![1], "1 marks it done");
+    assert_eq!(
+        im::db::fetch_task_short_id(&pool, scheduled).await.unwrap(),
+        None,
+        "a done mark leaves it without a number"
+    );
+
+    exec(&pool, &config, &["ok", "+%walk", "2"]).await.unwrap();
+    assert_eq!(state(&pool, scheduled).await, vec![0], "2 marks it failed");
+
+    exec(&pool, &config, &["tired", "+%walk", "-1"])
+        .await
+        .unwrap();
+    assert_eq!(
+        state(&pool, scheduled).await,
+        vec![im::db::SCHEDULED_UNMARKED],
+        "-1 unmarks it"
+    );
+
+    // `0` leaves the mark alone, like the other kinds' no-op zero.
+    exec(&pool, &config, &["ok", "+%walk", "2"]).await.unwrap();
+    exec(&pool, &config, &["fine", "+%walk", "0"])
+        .await
+        .unwrap();
+    assert_eq!(state(&pool, scheduled).await, vec![0], "0 changes nothing");
+
+    // Any other count is refused before it can write a second row.
+    assert!(
+        exec(&pool, &config, &["happy", "+%walk", "3"])
+            .await
+            .is_err(),
+        "a scheduled state takes only 1, 2, -1 or 0"
+    );
+    assert_eq!(state(&pool, scheduled).await, vec![0]);
+    let refused: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mood WHERE mood = 'happy'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(refused, 0, "a refused count records no entry");
+
+    // The word form resolves the same tasks as the id form.
+    exec(&pool, &config, &["great", "+@tidy"]).await.unwrap();
+    assert_eq!(
+        completion_sum(&pool, recurring).await,
+        2,
+        "a word ref adds another completion"
+    );
+}
+
+/// A completed oneshot stays a valid entry ref; `0` keeps the link from
+/// adding another completion, and the bare update form still undoes one.
+#[tokio::test]
+async fn test_entry_ref_links_a_completed_oneshot() {
+    let pool = test_pool().await.unwrap();
+    let config = Config::default();
+    let now = im::date::now();
+
+    let (task, short_id) = create_task(&pool, &task_spec("water", now, None, None))
+        .await
+        .unwrap();
+    let short_id = short_id.expect("an open oneshot has a short id");
+
+    // Complete it through the bare update form.
+    exec(&pool, &config, &["+water", "1"]).await.unwrap();
+    assert_eq!(completion_sum(&pool, task).await, 1);
+    assert_eq!(
+        im::db::fetch_task_short_id(&pool, task).await.unwrap(),
+        None,
+        "a done oneshot frees its id"
+    );
+
+    // The link lands and, with an explicit 0, adds no completion.
+    exec(&pool, &config, &["good", "+water", "0"])
+        .await
+        .unwrap();
+    assert_eq!(completion_sum(&pool, task).await, 1);
+    let links: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mood WHERE todo_id = ?")
+        .bind(task)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(links, 1, "the mood is linked to the completed oneshot");
+
+    // The bare update form still reaches it to undo the completion.
+    exec(&pool, &config, &["+water", "-1"]).await.unwrap();
+    assert_eq!(completion_sum(&pool, task).await, 0);
+    assert_eq!(
+        im::db::fetch_task_short_id(&pool, task).await.unwrap(),
+        Some(short_id),
+        "undoing reassigns the smallest free id"
+    );
+}
+
+/// A word ref matching several oneshots still resolves when exactly one of
+/// them is unfinished: the finished ones cannot be the target.
+#[tokio::test]
+async fn test_entry_word_ref_picks_the_unfinished_oneshot() {
+    let pool = test_pool().await.unwrap();
+    let config = Config::default();
+    let now = im::date::now();
+
+    let (milk, milk_id) = create_task(&pool, &task_spec("milk", now, None, None))
+        .await
+        .unwrap();
+    let milk_id = milk_id.expect("an open oneshot has a short id");
+    let (cow, _) = create_task(&pool, &task_spec("milk the cow", now, None, None))
+        .await
+        .unwrap();
+
+    // Both are unfinished: the words stay ambiguous.
+    assert!(
+        exec(&pool, &config, &["good", "+milk"]).await.is_err(),
+        "two unfinished oneshots are ambiguous"
+    );
+
+    // Finishing the shorter one leaves a single target.
+    let complete_milk = format!("+{milk_id}");
+    exec(&pool, &config, &[&complete_milk, "1"]).await.unwrap();
+    assert_eq!(completion_sum(&pool, milk).await, 1);
+
+    exec(&pool, &config, &["good", "+milk"]).await.unwrap();
+    assert_eq!(
+        completion_sum(&pool, cow).await,
+        1,
+        "the unfinished oneshot takes the completion"
+    );
+    let links: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mood WHERE todo_id = ?")
+        .bind(cow)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(links, 1, "the mood is linked to the unfinished oneshot");
+
+    // With both finished there is no unique target any more.
+    assert!(
+        exec(&pool, &config, &["fine", "+milk"]).await.is_err(),
+        "two finished oneshots are ambiguous"
+    );
+    let moods: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mood")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(moods, 1, "the refusal records nothing");
+}
+
+/// A word ref names one kind, so the same name can exist three times and the
+/// prefix says which row is meant. Short ids keep addressing any kind.
+#[tokio::test]
+async fn test_word_ref_names_the_task_kind() {
+    let pool = test_pool().await.unwrap();
+    let config = Config::default();
+    let now = im::date::now();
+    let day = im::date::span_to_db(&jiff::Span::new().days(1));
+
+    let (oneshot, _) = create_task(&pool, &task_spec("gym", now, None, None))
+        .await
+        .unwrap();
+    let (recurring, recurring_number) = create_task(&pool, &task_spec("gym", now, None, Some(day)))
+        .await
+        .unwrap();
+    let (scheduled, scheduled_number) = create_task(&pool, &task_spec("gym", now, Some(3600), None))
+        .await
+        .unwrap();
+    assert_eq!(
+        scheduled_number, None,
+        "a scheduled task carries no short id"
+    );
+
+    async fn scheduled_marks(pool: &SqlitePool, task: im::db::Id) -> Vec<i32> {
+        sqlx::query_scalar("SELECT count FROM todo_completions WHERE todo_id = ?")
+            .bind(task)
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    // A plain query is the oneshot.
+    exec(&pool, &config, &["good", "+gym"]).await.unwrap();
+    assert_eq!(completion_sum(&pool, oneshot).await, 1);
+    assert_eq!(completion_sum(&pool, recurring).await, 0);
+    assert!(scheduled_marks(&pool, scheduled).await.is_empty());
+
+    // `@` names the recurring task.
+    exec(&pool, &config, &["fine", "+@gym"]).await.unwrap();
+    assert_eq!(completion_sum(&pool, recurring).await, 1);
+    assert_eq!(completion_sum(&pool, oneshot).await, 1);
+
+    // `%` names the scheduled task.
+    exec(&pool, &config, &["ok", "+%gym"]).await.unwrap();
+    assert_eq!(scheduled_marks(&pool, scheduled).await, vec![1]);
+
+    // The short id needs no prefix and reaches the recurring task.
+    let number = format!("+{}", recurring_number.expect("recurring tasks keep a short id"));
+    exec(&pool, &config, &[&number, "3"]).await.unwrap();
+    assert_eq!(completion_sum(&pool, recurring).await, 4);
+
+    // Each mood landed on its own task.
+    for (task, count) in [(oneshot, 1), (recurring, 1), (scheduled, 1)] {
+        let linked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mood WHERE todo_id = ?")
+            .bind(task)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(linked, count);
+    }
+}
+
+/// A recurring ref has to land inside an active interval, whether the entry
+/// links the task or only counts it; the edit form resolves either way.
+#[tokio::test]
+async fn test_entry_ref_needs_an_active_recurring_interval() {
+    let pool = test_pool().await.unwrap();
+    let config = Config::default();
+    let now = im::date::now();
+    let day = im::date::span_to_db(&jiff::Span::new().days(1));
+
+    let (closed, _) = create_task(
+        &pool,
+        &task_spec("closed", now - 7200, Some(3600), Some(day)),
+    )
+    .await
+    .unwrap();
+    create_task(
+        &pool,
+        &task_spec("future", now + 86_400, None, Some(day)),
+    )
+    .await
+    .unwrap();
+    let (open, _) = create_task(
+        &pool,
+        &task_spec("open", now - 1800, Some(3600), Some(day)),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        exec(&pool, &config, &["good", "+@closed"]).await.is_err(),
+        "the availability window has closed"
+    );
+    assert!(
+        exec(&pool, &config, &["good", "+@future"]).await.is_err(),
+        "the chain has not started"
+    );
+    assert!(
+        exec(&pool, &config, &["+@closed", "1"]).await.is_err(),
+        "the count form applies the same gate"
+    );
+    assert_eq!(completion_sum(&pool, closed).await, 0);
+
+    // The open one resolves by its kind-prefixed word query.
+    exec(&pool, &config, &["good", "+@open"]).await.unwrap();
+    assert_eq!(completion_sum(&pool, open).await, 1);
 }
 
 /// Null tracker semantics: a valueless `-<name>` logs a Null tracker.
@@ -7267,43 +7707,25 @@ async fn test_unmarked_scheduled_row_is_not_a_completion() {
     assert!(done.is_empty(), "cleared, not completed");
 }
 
-/// A scheduled task is not an addressable oneshot: a `+<ref> <count>` must not
-/// reach `update_task`, which would add a second state row (and an undo would
-/// be clamped against the unmarked sentinel).
+/// A scheduled task carries no short id: its state is re-marked in place, so a
+/// number would churn on every mark. `%<query>` refs address it, and it takes
+/// no completion delta (an undo would be clamped against the unmarked
+/// sentinel).
 #[tokio::test]
-async fn a_scheduled_task_takes_no_completion_delta() {
+async fn a_scheduled_task_has_no_short_id() {
     let pool = im::db::test_pool().await.unwrap();
-    let (task, short_id) = create_task(
-        &pool,
-        &TaskObject {
-            id: None,
-            short_id: None,
-            name: "walk".into(),
-            body: String::new(),
-            priority: 5,
-            start_time: im::date::now(),
-            available_duration_secs: Some(3600),
-            interval_secs: None,
-            target_count: 0,
-            optional: false,
-            end_time: None,
-            parent: None,
-        },
-    )
-    .await
-    .unwrap();
+    let now = im::date::now();
 
-    let by_id = im::db::fetch_oneshot_task_by_id_for_update(&pool, task)
+    let (_, short_id) = create_task(&pool, &task_spec("walk", now, Some(3600), None))
         .await
         .unwrap();
-    assert!(by_id.is_none(), "a scheduled task has no oneshot update");
-    let by_short_id = im::db::fetch_oneshot_task_for_update(&pool, short_id)
+    assert_eq!(short_id, None, "a scheduled task gets no number");
+
+    // It consumes no number either: the next task takes the first one.
+    let (_, oneshot) = create_task(&pool, &task_spec("shop", now, None, None))
         .await
         .unwrap();
-    assert!(
-        by_short_id.is_none(),
-        "a scheduled task has no oneshot update"
-    );
+    assert_eq!(oneshot, Some(1));
 }
 
 /// Directly plant completion rows at chosen moments, so a test can exercise

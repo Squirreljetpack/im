@@ -38,6 +38,9 @@ backfill = true
 # Color for overdue task labels (date column in the today view, the
 # preview's `due:` field): pale pink by default.
 # overdue_color = "#FFB6C1"
+# Count a `+<task>` on an entry as one completion when no count is given
+# (`im good +3` adds 1); an explicit count wins, so `im good +3 0` adds none.
+# increment_cli_ref_by_default = true
 
 [grid]
 # week_rolling = false

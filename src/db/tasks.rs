@@ -4,13 +4,15 @@ use sqlx::{Row, SqlitePool};
 use crate::types::TaskKind;
 
 use super::Id;
-use super::models::{PrunedTask, TaskObject, TaskRow, TaskUpdateInfo, UpdateTaskObject};
+use super::models::{PrunedTask, TaskObject, TaskRow, UpdateTaskObject};
 
 /// Insert a new task. Both the stable row id and the user-facing `short_id`
 /// are assigned by the database layer — the caller must not pass either
-/// (`task.id` and `task.short_id` must be `None`). Returns the row id and
-/// the allocated short id. The insert and its sync event share a transaction.
-pub async fn create_task(pool: &SqlitePool, task: &TaskObject) -> Result<(Id, i64)> {
+/// (`task.id` and `task.short_id` must be `None`). Returns the row id and the
+/// short id the task was created with; a scheduled task is created without
+/// one, since its state is re-marked in place and an automatic number would
+/// churn on every mark. The insert and its sync event share a transaction.
+pub async fn create_task(pool: &SqlitePool, task: &TaskObject) -> Result<(Id, Option<i64>)> {
     assert!(
         task.short_id.is_none(),
         "create_task assigns the short id itself; the task must not carry one"
@@ -25,7 +27,10 @@ pub async fn create_task(pool: &SqlitePool, task: &TaskObject) -> Result<(Id, i6
         task.interval_secs
     );
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
-    let short_id = allocate_short_id(&mut tx).await?;
+    let short_id = match TaskKind::of(task.interval_secs, task.available_duration_secs) {
+        TaskKind::Scheduled => None,
+        _ => Some(allocate_short_id(&mut tx).await?),
+    };
     let id = Id::new();
 
     sqlx::query(
@@ -395,15 +400,17 @@ pub async fn allocate_short_id(conn: &mut sqlx::SqliteConnection) -> Result<i64>
     Ok(expected)
 }
 
-/// Ensure a task's `short_id` reflects its completion state:
+/// Ensure a task's `short_id` reflects its kind and completion state:
 ///
-/// * A not-done task must have a short id — when it's `NULL`, the smallest
-///   free positive id is allocated (first-available-gap, so untoggling a
-///   completion reassigns the task's id).
-/// * A done **oneshot** task must not have a short id: it is cleared on
-///   completion, freeing the id for reuse. Recurring tasks keep their short
-///   id across intervals — their "done" state is interval-scoped and
-///   transient, so clearing/reassigning per interval would churn ids.
+/// * A not-done **oneshot** must have a short id — when it's `NULL`, the
+///   smallest free positive id is allocated (first-available-gap, so
+///   untoggling a completion reassigns the task's id). A done oneshot's id is
+///   cleared, freeing the number for reuse.
+/// * **Recurring** tasks always keep their short id: done-ness is
+///   interval-scoped, so clearing and reassigning would only churn ids.
+/// * **Scheduled** tasks are never assigned one: their state is re-marked in
+///   place (done/failed/unmarked), so a number would churn on every mark.
+///   `%<query>` refs address them; a manually set id is left alone.
 ///
 /// `short_id` is a local projection and never syncs, so this writes no event.
 /// Completion state is evaluated with completions scoped to the current
@@ -413,7 +420,7 @@ pub async fn allocate_short_id(conn: &mut sqlx::SqliteConnection) -> Result<i64>
 /// together.
 pub async fn sync_short_id(conn: &mut sqlx::SqliteConnection, todo_id: Id) -> Result<()> {
     let row = sqlx::query(
-        "SELECT start_time, interval_secs, target_count, short_id FROM todos WHERE id = ?",
+        "SELECT start_time, interval_secs, available_duration_secs, target_count, short_id FROM todos WHERE id = ?",
     )
     .bind(todo_id)
     .fetch_optional(&mut *conn)
@@ -423,6 +430,7 @@ pub async fn sync_short_id(conn: &mut sqlx::SqliteConnection, todo_id: Id) -> Re
 
     let start_time: i64 = row.get("start_time");
     let interval_secs: Option<i64> = row.get("interval_secs");
+    let available_duration_secs: Option<i64> = row.get("available_duration_secs");
     let target_count: i32 = row.get("target_count");
     let short_id: Option<i64> = row.get("short_id");
 
@@ -452,9 +460,17 @@ pub async fn sync_short_id(conn: &mut sqlx::SqliteConnection, todo_id: Id) -> Re
         }
     };
 
-    // Recurring tasks never lose their short id; only oneshot tasks do.
-    if interval_secs.is_some() {
-        if short_id.is_none() {
+    // Whether the task should hold a number: recurring tasks keep theirs
+    // across intervals, oneshots only while they are open. Scheduled tasks are
+    // never assigned one automatically — their state is re-marked in place, so
+    // it would churn on every mark — and a manually set id is left alone.
+    let keep = match TaskKind::of(interval_secs, available_duration_secs) {
+        TaskKind::Recurring => true,
+        TaskKind::Scheduled => short_id.is_some(),
+        TaskKind::Oneshot => !crate::task::is_task_done(target_count, Some(sum)),
+    };
+    match (keep, short_id) {
+        (true, None) => {
             let new_id = allocate_short_id(&mut *conn).await?;
             sqlx::query("UPDATE todos SET short_id = ? WHERE id = ?")
                 .bind(new_id)
@@ -463,33 +479,20 @@ pub async fn sync_short_id(conn: &mut sqlx::SqliteConnection, todo_id: Id) -> Re
                 .await
                 .context("Failed to assign short id")?;
         }
-        return Ok(());
-    }
-
-    let done = crate::task::is_task_done(target_count, Some(sum));
-    match (done, short_id) {
-        (true, Some(_)) => {
+        (false, Some(_)) => {
             sqlx::query("UPDATE todos SET short_id = NULL WHERE id = ?")
                 .bind(todo_id)
                 .execute(&mut *conn)
                 .await
                 .context("Failed to clear short id")?;
         }
-        (false, None) => {
-            let new_id = allocate_short_id(&mut *conn).await?;
-            sqlx::query("UPDATE todos SET short_id = ? WHERE id = ?")
-                .bind(new_id)
-                .bind(todo_id)
-                .execute(&mut *conn)
-                .await
-                .context("Failed to assign short id")?;
-        }
         _ => {}
     }
     Ok(())
 }
 
-/// The current short id of a task (`None` once a oneshot task is completed).
+/// The current short id of a task (`None` for a completed oneshot, and for a
+/// scheduled task unless an id was set by hand).
 pub async fn fetch_task_short_id(pool: &SqlitePool, id: Id) -> Result<Option<i64>> {
     let short_id: Option<i64> =
         sqlx::query_scalar::<_, Option<i64>>("SELECT short_id FROM todos WHERE id = ?")
@@ -576,13 +579,46 @@ pub async fn fetch_task_by_id(pool: &SqlitePool, id: Id, now: i64) -> Result<Opt
     .await
     .context("Failed to fetch task")?;
 
-    let Some(mut task) = row else { return Ok(None) };
-    // Scope the completion sum to the current interval for recurring tasks
-    // (calendar-aware jiff math); last_time stays unscoped.
+    match row {
+        Some(task) => Ok(Some(attach_completion_state(pool, task, now).await?)),
+        None => Ok(None),
+    }
+}
+
+/// One task row of any kind by its user-facing short id, with the completion
+/// state attached like [`fetch_task_by_id`].
+pub async fn fetch_task_by_short_id(
+    pool: &SqlitePool,
+    short_id: i64,
+    now: i64,
+) -> Result<Option<TaskRow>> {
+    let row = sqlx::query_as::<_, TaskRow>(
+        r#"SELECT t.*, NULL AS completions, NULL AS last_time, NULL AS last_tz_offset, '' AS last_location
+           FROM todos t WHERE t.short_id = ?"#,
+    )
+    .bind(short_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to fetch task by short id")?;
+
+    match row {
+        Some(task) => Ok(Some(attach_completion_state(pool, task, now).await?)),
+        None => Ok(None),
+    }
+}
+
+/// Attach the completion state to a row fetched without it: the completion
+/// sum and the last completion. The sum is scoped to the current interval for
+/// recurring tasks (calendar-aware jiff math); `last_time` stays unscoped.
+async fn attach_completion_state(
+    pool: &SqlitePool,
+    mut task: TaskRow,
+    now: i64,
+) -> Result<TaskRow> {
     let rows = sqlx::query(
         "SELECT time, tz_offset, location, count FROM todo_completions WHERE todo_id = ? ORDER BY time ASC",
     )
-    .bind(id)
+    .bind(task.id)
     .fetch_all(pool)
     .await
     .context("Failed to fetch task completions")?;
@@ -616,7 +652,7 @@ pub async fn fetch_task_by_id(pool: &SqlitePool, id: Id, now: i64) -> Result<Opt
     };
     task.completions = task.normalize_completions(sum);
     super::views::set_last_completion(&mut task, &completions);
-    Ok(Some(task))
+    Ok(task)
 }
 
 /// Task rows by id, with completions scoped like [`fetch_task_by_id`] —
@@ -681,95 +717,6 @@ pub async fn fetch_recurring_task_by_name(
         end_time: r.get("end_time"),
         parent: r.get("parent"),
     }))
-}
-
-/// Oneshot task + prior completion count for the `- <short-id> [count]`
-/// update command, looked up by its user-facing short id. Completed oneshot
-/// tasks have no short id, so they are not addressable by id (use the word
-/// query form instead).
-pub async fn fetch_oneshot_task_for_update(
-    pool: &SqlitePool,
-    short_id: i64,
-) -> Result<Option<TaskUpdateInfo>> {
-    let row = sqlx::query(
-        r#"SELECT id, name, target_count, short_id,
-                  COALESCE((SELECT SUM(count) FROM todo_completions
-                            WHERE todo_id = todos.id), 0) AS prior_completions
-           FROM todos WHERE short_id = ? AND interval_secs IS NULL
-             AND available_duration_secs IS NULL"#,
-    )
-    .bind(short_id)
-    .fetch_optional(pool)
-    .await
-    .context("Failed to fetch task")?;
-
-    Ok(row.map(|r| TaskUpdateInfo {
-        id: r.get("id"),
-        short_id: r.get("short_id"),
-        name: r.get("name"),
-        target_count: r.get("target_count"),
-        prior_completions: r.get("prior_completions"),
-    }))
-}
-
-pub async fn fetch_oneshot_task_by_id_for_update(
-    pool: &SqlitePool,
-    id: Id,
-) -> Result<Option<TaskUpdateInfo>> {
-    let row = sqlx::query(
-        r#"SELECT id, name, target_count, short_id,
-                  COALESCE((SELECT SUM(count) FROM todo_completions
-                            WHERE todo_id = todos.id), 0) AS prior_completions
-           FROM todos WHERE id = ? AND interval_secs IS NULL
-             AND available_duration_secs IS NULL"#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .context("Failed to fetch task")?;
-
-    Ok(row.map(|r| TaskUpdateInfo {
-        id: r.get("id"),
-        short_id: r.get("short_id"),
-        name: r.get("name"),
-        target_count: r.get("target_count"),
-        prior_completions: r.get("prior_completions"),
-    }))
-}
-
-/// Oneshot tasks whose names contain all `words` in order (a subsequence
-/// match over whitespace-split words), with prior completion counts — the
-/// candidates for the `im +<words> [count]` update form. The
-/// subsequence test is done here in Rust: SQL `LIKE` can't express
-/// "in order, with gaps allowed".
-pub async fn fetch_oneshot_matching_words(
-    pool: &SqlitePool,
-    words: &[String],
-) -> Result<Vec<TaskUpdateInfo>> {
-    let rows = sqlx::query(
-        r#"SELECT id, name, target_count, short_id,
-                  COALESCE((SELECT SUM(count) FROM todo_completions
-                            WHERE todo_id = todos.id), 0) AS prior_completions
-           FROM todos WHERE interval_secs IS NULL AND available_duration_secs IS NULL"#,
-    )
-    .fetch_all(pool)
-    .await
-    .context("Failed to fetch tasks for word query")?;
-
-    Ok(rows
-        .into_iter()
-        .filter(|r| {
-            let name: String = r.get("name");
-            name_contains_words_in_order(&name, words)
-        })
-        .map(|r| TaskUpdateInfo {
-            id: r.get("id"),
-            short_id: r.get("short_id"),
-            name: r.get("name"),
-            target_count: r.get("target_count"),
-            prior_completions: r.get("prior_completions"),
-        })
-        .collect())
 }
 
 /// True iff every word in `words` appears in `name` as a whitespace-

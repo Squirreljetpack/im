@@ -152,6 +152,19 @@ pub fn recurring_available(task: &TaskRow, now: i64) -> bool {
     }
 }
 
+/// Whether an entry's `+<ref>` may name this task: oneshots and scheduled
+/// tasks in any state, and recurring tasks whose current interval is inside
+/// its availability window — the pending view's recurring gate, plus the
+/// started and not-expired checks it leaves to its SQL filter.
+pub fn entry_ref_addressable(task: &TaskRow, now: i64) -> bool {
+    if !task.is_recurring() {
+        return true;
+    }
+    task.start_time <= now
+        && task.end_time.is_none_or(|end| now <= end)
+        && recurring_available(task, now)
+}
+
 /// A row from the completed-on merge. Each row covers one interval with a
 /// completion in the day window (recurring tasks) or one task (everything
 /// else). `interval` is the span the task's sum and `last_time` are scoped to;

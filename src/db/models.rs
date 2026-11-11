@@ -375,18 +375,6 @@ pub struct PrunedTask {
     pub reason: String,
 }
 
-/// Task identity + completion state for the `- <short-id> [count]` update
-/// command. `id` is the stable row id; `short_id` is the user-facing id
-/// (`None` once the task is completed).
-#[derive(Debug, Clone)]
-pub struct TaskUpdateInfo {
-    pub id: Id,
-    pub short_id: Option<i64>,
-    pub name: String,
-    pub target_count: i32,
-    pub prior_completions: i32,
-}
-
 /// One availability window of a recurring task, with the completion
 /// aggregates scoped to that window's interval.
 #[derive(Debug, Clone)]

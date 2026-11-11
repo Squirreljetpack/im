@@ -306,8 +306,9 @@ pub fn build_preview(
                 })
                 .unwrap_or(Color::DarkGray);
             lines.push(Line::from(vec![
+                Span::raw("  - "),
                 Span::styled(
-                    format!("  - {}", config.badges.mood.unwrap_or('●')),
+                    config.badges.mood.unwrap_or('●').to_string(),
                     Style::default().fg(color),
                 ),
                 Span::raw(format!(" {}", mood.mood)),

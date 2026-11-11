@@ -21,6 +21,11 @@ pub struct TasksConfig {
     /// preview's `due:` field of an overdue oneshot task (see
     /// `badge::task_label_color`). Pale pink by default.
     pub overdue_color: Color,
+    /// Count a `+<task_ref>` on an entry as one completion when no count is
+    /// given (`im good +3` logs a mood and adds `1` completion). An explicit
+    /// count always wins, so `im good +3 0` adds nothing. Off, a ref only
+    /// links the entry and a count must be given to complete work.
+    pub increment_cli_ref_by_default: bool,
 }
 
 impl Default for TasksConfig {
@@ -36,6 +41,7 @@ impl Default for TasksConfig {
                 g: 0xB6,
                 b: 0xC1,
             },
+            increment_cli_ref_by_default: true,
         }
     }
 }

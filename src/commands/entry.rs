@@ -359,7 +359,16 @@ pub(super) async fn record_entry(
         }
     };
 
-    let linked_task_id = match task_ref {
+    let should_link_mood = !mood.is_empty()
+        || !body.is_empty()
+        || duration.is_some()
+        || !tracker_objects.is_empty();
+
+    // An entry may refer to any oneshot, all scheduled tasks, and recurring
+    // tasks inside their current availability window — for the link and for
+    // the count alike. Only the edit form (`im +<ref>`, no count) resolves a
+    // task outside it.
+    let linked_task = match task_ref {
         Some(TaskRef::Pick) => {
             if !atty::is(atty::Stream::Stdin) {
                 anyhow::bail!("Picking a task to link requires an interactive terminal");
@@ -370,32 +379,32 @@ pub(super) async fn record_entry(
                 .await?
                 .map(|(id, _)| id)
                 .ok_or_else(|| anyhow::anyhow!("Cancelled"))?;
-            Some(id)
+            Some(super::refs::entry_task_by_id(pool, id, time_epoch).await?)
         }
-        Some(task_ref) => Some(super::refs::resolve_task_ref(pool, &task_ref).await?),
+        Some(task_ref) => {
+            Some(super::refs::resolve_entry_task_ref(pool, &task_ref, time_epoch).await?)
+        }
         None => None,
     };
 
-    if let (Some(task_id), Some(delta)) = (linked_task_id, entry_count) {
-        // Completions only apply to incomplete oneshot tasks.
-        let info = crate::db::fetch_oneshot_task_by_id_for_update(pool, task_id)
-            .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Task with id {task_id} is not an addressable oneshot (completed \
-                     tasks and other kinds take no completions)"
-                )
-            })?;
-        super::update::update_oneshot(pool, opts, &info, Some(delta)).await?;
+    // A ref without a count completes one unit when
+    // `tasks.increment_cli_ref_by_default` is on (`im good +3`); an explicit
+    // count always wins, so `im good +3 0` adds nothing.
+    let implicit_count = entry_count.is_none() && config.tasks.increment_cli_ref_by_default;
+    let mut completed = false;
+    if let Some(task) = &linked_task
+        && let Some(count) = entry_count.or(implicit_count.then_some(1))
+    {
+        if task.is_scheduled() {
+            super::update::set_scheduled_state(pool, opts, task, count).await?;
+        } else {
+            super::update::apply_completion_delta(pool, opts, task, count).await?;
+        }
+        completed = true;
     }
 
-    let should_link_mood = !mood.is_empty()
-        || !body.is_empty()
-        || duration.is_some()
-        || !tracker_objects.is_empty();
-
     let todo_id = if should_link_mood {
-        linked_task_id
+        linked_task.as_ref().map(|task| task.id)
     } else {
         None
     };
@@ -415,7 +424,7 @@ pub(super) async fn record_entry(
     let mood_id = crate::db::create_entry(pool, &entry_obj).await?;
     log::debug!("Inserted mood with id={:?}", mood_id);
 
-    let wrote = mood_id.is_some() || !entry_obj.trackers.is_empty() || entry_count.is_some();
+    let wrote = mood_id.is_some() || !entry_obj.trackers.is_empty() || completed;
     crate::output::display_entry(config, &entry_obj, opts)?;
 
     Ok(wrote)

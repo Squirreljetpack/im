@@ -196,12 +196,24 @@ name. It is opaque display/journal metadata: it is never parsed back into a
   recent entries backwards, so no negative rows are ever stored and totals
   floor at 0. Recurring tasks scope sums to the current calendar interval
   (`current_interval_start`); scheduled tasks keep at most one completion row
-  (`1` = done, `0` = failed), replaced in a transaction.
+  (`1` = done, `0` = failed, `-1` = unmarked), replaced in a transaction.
+- **Entry task refs**: a mood entry's `+<ref>` resolves to any oneshot, any
+  scheduled task, and a recurring task inside its current availability window
+  (`db::entry_ref_addressable`). A word query names one kind — plain oneshots,
+  `@` recurring, `%` scheduled — while a short id addresses any task that has
+  one. A word ref matching several oneshots picks the single unfinished one.
+  The count
+  form (`im +<ref> <count>` with nothing to log) applies the same gate; only
+  the edit form (`im +<ref>`, no count) resolves a task outside it. Counts
+  mean the kind's own update: a delta for oneshot/recurring rows, the state
+  for a scheduled one (`1` done, `2` failed, `-1` unmarked, `0` untouched).
 - **Short ids**: `todos.id` is a stable `AUTOINCREMENT` PK; the user-facing
   `short_id` is the first free positive gap. Completing a oneshot task clears
   its `short_id` (recycled on reset); recurring tasks keep theirs (done-ness
-  is interval-scoped and transient). Allocation is a pure read; the UNIQUE
-  column makes concurrent double-allocation fail loudly at INSERT.
+  is interval-scoped); scheduled tasks are never assigned one (`%<query>` is
+  their handle, since re-marking state in place would churn a number).
+  Allocation is a pure read; the UNIQUE column makes concurrent
+  double-allocation fail loudly at INSERT.
 
 ---
 

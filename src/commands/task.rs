@@ -46,6 +46,15 @@ pub(crate) async fn resolve_parent(
 ///   opens at the end of the flow, seeded with the `n`th template (1-based)
 ///   from `templates` (config `[editor] *_template` per task kind).
 /// * `Err(0)` — no delimiter: no body.
+/// "Created task #7: name", or without a number for a scheduled task — those
+/// carry no short id, so `%<query>` is their handle.
+fn created_message(task: &TaskObject) -> String {
+    match task.short_id {
+        Some(id) => format!("Created task #{id}: {}", task.name),
+        None => format!("Created task: {}", task.name),
+    }
+}
+
 fn resolve_body(body: Result<String, usize>, templates: &[PathBuf]) -> Result<String> {
     match body {
         Ok(b) => Ok(b),
@@ -282,13 +291,9 @@ pub(super) async fn create_task_command(
             };
             let (new_id, new_short_id) = crate::db::create_task(pool, &task_obj).await?;
             task_obj.id = Some(new_id);
-            task_obj.short_id = Some(new_short_id);
+            task_obj.short_id = new_short_id;
 
-            let msg = format!(
-                "Created task #{}: {}",
-                task_obj.short_id.unwrap_or_default(),
-                task_obj.name
-            );
+            let msg = created_message(&task_obj);
             if !opts.quiet() {
                 if interactive {
                     cliclack::outro(&msg)?;
@@ -343,13 +348,9 @@ pub(super) async fn create_task_command(
                 };
                 let (new_id, new_short_id) = crate::db::create_task(pool, &task_obj).await?;
                 task_obj.id = Some(new_id);
-                task_obj.short_id = Some(new_short_id);
+                task_obj.short_id = new_short_id;
 
-                let msg = format!(
-                    "Created task #{}: {}",
-                    task_obj.short_id.unwrap_or_default(),
-                    task_obj.name
-                );
+                let msg = created_message(&task_obj);
                 if !opts.quiet() {
                     println!("{msg}");
                     if opts.verbose() {
@@ -556,13 +557,9 @@ async fn create_recurring_task(
     };
     let (new_id, new_short_id) = crate::db::create_task(pool, &task_obj).await?;
     task_obj.id = Some(new_id);
-    task_obj.short_id = Some(new_short_id);
+    task_obj.short_id = new_short_id;
 
-    let msg = format!(
-        "Created task #{}: {}",
-        task_obj.short_id.unwrap_or_default(),
-        task_obj.name
-    );
+    let msg = created_message(&task_obj);
     if !opts.quiet() {
         cliclack::outro(&msg)?;
         if opts.verbose() {
@@ -708,13 +705,9 @@ async fn create_scheduled_task(
     };
     let (new_id, new_short_id) = crate::db::create_task(pool, &task_obj).await?;
     task_obj.id = Some(new_id);
-    task_obj.short_id = Some(new_short_id);
+    task_obj.short_id = new_short_id;
 
-    let msg = format!(
-        "Created task #{}: {}",
-        task_obj.short_id.unwrap_or_default(),
-        task_obj.name
-    );
+    let msg = created_message(&task_obj);
     if !opts.quiet() {
         cliclack::outro(&msg)?;
         if opts.verbose() {

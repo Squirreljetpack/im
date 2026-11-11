@@ -1195,7 +1195,7 @@ mod tests {
         assert_eq!(
             cmd,
             Command::TaskEdit {
-                task: TaskRef::Words(vec!["groceries".to_string()]),
+                task: TaskRef::Words { words: vec!["groceries".to_string()], kind: TaskKind::Oneshot },
             }
         );
 
@@ -1276,7 +1276,7 @@ mod tests {
                 body: Err(0),
                 prefill: None,
                 available_duration: None,
-                parent: Some(TaskRef::Words(vec!["buy".to_string()])),
+                parent: Some(TaskRef::Words { words: vec!["buy".to_string()], kind: TaskKind::Oneshot }),
                 interval: None,
             })
         );
@@ -1296,7 +1296,7 @@ mod tests {
 
         // Untoggle via a negative numeric payload.
         let e = entry_of(parse_from(args(&["+toggle", "-1"])).unwrap());
-        assert_eq!(e.task_ref, Some(TaskRef::Words(vec!["toggle".to_string()])));
+        assert_eq!(e.task_ref, Some(TaskRef::Words { words: vec!["toggle".to_string()], kind: TaskKind::Oneshot }));
         assert_eq!(e.count, Some(-1));
 
         // A trailing ref closes the line like a tracker pair: a bare word
@@ -1507,7 +1507,7 @@ mod tests {
                 assert_eq!(entry.trackers, vec![("tracker".to_string(), "y".to_string())]);
                 assert_eq!(
                     entry.task_ref,
-                    Some(TaskRef::Words(vec!["task".to_string()]))
+                    Some(TaskRef::Words { words: vec!["task".to_string()], kind: TaskKind::Oneshot })
                 );
                 assert_eq!(entry.count, None);
             }
@@ -1522,7 +1522,7 @@ mod tests {
                 assert_eq!(entry.trackers, vec![("tracker".to_string(), String::new())]);
                 assert_eq!(
                     entry.task_ref,
-                    Some(TaskRef::Words(vec!["task".to_string()]))
+                    Some(TaskRef::Words { words: vec!["task".to_string()], kind: TaskKind::Oneshot })
                 );
                 assert_eq!(entry.count, Some(3));
             }
@@ -1567,19 +1567,6 @@ mod tests {
             _ => panic!("Expected Entry command"),
         }
 
-        // Word query ref (including multi-word quoted token).
-        let cmd = parse_from(args(&["good", "+buy milk"])).unwrap();
-        match cmd {
-            Command::Entry(entry) => {
-                assert_eq!(entry.mood, "good");
-                assert_eq!(
-                    entry.task_ref,
-                    Some(TaskRef::Words(vec!["buy".to_string(), "milk".to_string()]))
-                );
-            }
-            _ => panic!("Expected Entry command"),
-        }
-
         // Bare '+' picks interactively. Digits are always ids (+0 too).
         let cmd = parse_from(args(&["ok", "+"])).unwrap();
         assert!(matches!(
@@ -1596,6 +1583,45 @@ mod tests {
         assert!(parse_from(args(&["+1", "-tracker", "+2"])).is_err());
         assert!(parse_from(args(&["good", "+1", "+2"])).is_err());
         assert!(parse_from(args(&["good", "+", "+2"])).is_err());
+    }
+
+    #[test]
+    fn test_parse_task_ref_kind_prefixes() {
+        // Word query ref (including multi-word quoted token): a plain query
+        // names oneshots, '@' recurring tasks, '%' scheduled ones.
+        let ref_of = |token: &str| match parse_from(args(&["good", token])).unwrap() {
+            Command::Entry(entry) => entry.task_ref.unwrap(),
+            _ => panic!("Expected Entry command"),
+        };
+        assert_eq!(
+            ref_of("+buy milk"),
+            TaskRef::Words {
+                words: vec!["buy".to_string(), "milk".to_string()],
+                kind: TaskKind::Oneshot
+            }
+        );
+        assert_eq!(
+            ref_of("+@tidy"),
+            TaskRef::Words {
+                words: vec!["tidy".to_string()],
+                kind: TaskKind::Recurring
+            }
+        );
+        assert_eq!(
+            ref_of("+%walk"),
+            TaskRef::Words {
+                words: vec!["walk".to_string()],
+                kind: TaskKind::Scheduled
+            }
+        );
+
+        // A prefix alone has no words to query, and ids never carry one.
+        assert!(parse_from(args(&["good", "+@"])).is_err());
+        assert!(parse_from(args(&["good", "+%"])).is_err());
+        assert_eq!(ref_of("+@7"), TaskRef::Words {
+            words: vec!["7".to_string()],
+            kind: TaskKind::Recurring
+        });
     }
 
     #[test]

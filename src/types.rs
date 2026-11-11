@@ -193,7 +193,10 @@ impl TodayHorizon {
 pub enum TaskRef {
     Pick,
     Id(i64),
-    Words(Vec<String>),
+    /// Word query over task names. `kind` is the kind the query names: a
+    /// leading `@` selects recurring, `%` scheduled, and a plain query names
+    /// oneshots. Short ids carry no prefix and address any task that has one.
+    Words { words: Vec<String>, kind: TaskKind },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -204,7 +207,8 @@ pub struct Entry {
     pub trackers: Vec<(String, String)>,
     /// Optional task reference (`+[id]` / `+[words]` / bare `+` to pick):
     /// resolved to one task row and linked to the mood entry at write time
-    /// (a plain link via `mood.todo_id`, not a completion). At most one per
+    /// (a plain link via `mood.todo_id`, not a completion). A word query is
+    /// prefixed `@` for recurring and `%` for scheduled tasks. At most one per
     /// entry.
     pub task_ref: Option<TaskRef>,
     /// Completion delta carried by a nonempty `+<ref>` followed by a plain

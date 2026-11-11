@@ -16,11 +16,24 @@ Entry creation full grammar:
 
   Tasks are referred to (when linking in an entry, updating completion, or editing),
   by a single argument that begins with `+`, followed by either:
-  - the short id of the task (+7)
-  - (a string of) one or more words that uniquely queries a task name (+groceries)
+  - the short id of the task (+7) — any task that has one, no prefix
+  - (a string of) one or more words that uniquely queries a task name (+groceries);
+    the query names a kind: oneshots plain, recurring with `@` (+@groom),
+    scheduled with `%` (+%dentist). Scheduled tasks are not given a short id.
   - or nothing (+): pick interactively (in entry task linking).
 
   At most one task can be referenced per entry.
+
+  A mood entry links any oneshot, all scheduled tasks, and recurring tasks
+  inside their current availability window. A word ref matching several tasks
+  resolves to the single unfinished oneshot among them. The count form
+  (`im +7 <count>`, nothing to log) applies the same rule; only `im +7` on its
+  own (edit a task) resolves a task outside the window.
+
+  Without a count, a task ref adds one completion
+  (`tasks.increment_cli_ref_by_default`); an explicit count wins, so `+7 0`
+  only links the entry. A scheduled task takes the count as its state: 1 done,
+  2 failed, -1 unmarked.
 
   Entry creation (`im <mood>`, tracker-only entries, and `im %<duration>`)
   accepts a trailing [<dots> [body]].

@@ -1,6 +1,6 @@
 use anyhow::Context;
 
-use crate::types::TaskRef;
+use crate::types::{TaskKind, TaskRef};
 
 mod entry;
 mod groups;
@@ -16,6 +16,9 @@ pub(super) use view::parse_view_command;
 
 /// Parse a `+<ref>` token into a [`TaskRef`]: bare `+` picks interactively,
 /// `+<digits>` is a short ID, and `+<words>` is a whitespace-split word query.
+/// A word query names a oneshot unless its prefix picks a kind: `+@<words>`
+/// for recurring tasks, `+%<words>` for scheduled ones. Short ids need no
+/// prefix — the number already names one task.
 pub(super) fn parse_task_ref(token: &str) -> anyhow::Result<TaskRef> {
     let rest = token
         .strip_prefix('+')
@@ -27,11 +30,18 @@ pub(super) fn parse_task_ref(token: &str) -> anyhow::Result<TaskRef> {
         let id = rest.parse::<i64>().context("Task ID must be a number")?;
         return Ok(TaskRef::Id(id));
     }
-    let words: Vec<String> = rest.split_whitespace().map(String::from).collect();
+    let (kind, query) = if let Some(query) = rest.strip_prefix('@') {
+        (TaskKind::Recurring, query)
+    } else if let Some(query) = rest.strip_prefix('%') {
+        (TaskKind::Scheduled, query)
+    } else {
+        (TaskKind::Oneshot, rest)
+    };
+    let words: Vec<String> = query.split_whitespace().map(String::from).collect();
     if words.is_empty() {
-        anyhow::bail!("Task reference query cannot be whitespace-only");
+        anyhow::bail!("Task reference query cannot be empty");
     }
-    Ok(TaskRef::Words(words))
+    Ok(TaskRef::Words { words, kind })
 }
 
 /// Parse an integer completion delta token (`2`, `-1`). Rejects leading `+`
