@@ -1,3 +1,16 @@
+## [0.3.2] - 2026-11-11
+
+### 🚀 Features
+
+- *(sync)* Implement end-to-end encryption for sync
+- *(grid)* Heatmap display-list items and per-day color ranges
+
+### 🐛 Bug Fixes
+
+- *(sync)* Validate key overrides and improve key diagnostics
+- *(sync-server)* Require a key id and encryption on every push
+- *(sync)* Retire cascaded outbox cells on delete
+
 ## [0.3.1] - 2026-11-07
 
 ### 🚀 Features
