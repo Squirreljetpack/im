@@ -27,7 +27,7 @@ name = "seed-db"
 path = "bin/seed_db.rs"
 
 [dependencies]
-cli_boilerplate_automation = { version = "0.*", features = ["serde", "bring"] }
+cli_boilerplate_automation = { version = "0.*", features = ["serde", "bring", "dirs"] }
 matchmaker-lib = { version = "0.*", features = ["partial", "bracketed-paste"] }
 # Stack
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "migrate", "uuid"] }
@@ -82,7 +82,6 @@ mimalloc = "0.1"
 dashmap = "6"
 strum = { version = "0.28", features = ["derive"] }
 strum_macros = "0.28"
-dirs = "7"
 ring = "0.17"
 base64 = "0.22"
 
